@@ -9,7 +9,7 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 0** | **Complete** | Binary analysis, PE parsing, section mapping |
 | **Phase 1** | **Complete** | SafeDisc decryption, memory dump from runtime |
 | **Phase 2** | **Complete** | Function discovery (2,674 functions, 443,224 instructions) |
-| **Phase 3** | **In Progress** | x86-to-C code generation |
+| **Phase 3** | **Complete** | x86-to-C code generation (2,701 functions, 631,944 lines of C) |
 | Phase 4 | Pending | Compilation, stub resolution, crash-debug-fix loop |
 | Phase 5 | Pending | Win32/DirectX HAL (D3D11 rendering, DirectSound, DirectInput) |
 | Phase 6 | Pending | Game loop execution, import bridging |
@@ -28,15 +28,16 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Copy Protection** | SafeDisc v1 (.bind section, runtime decryption) |
 | **ASLR** | None (fixed image base, no relocations) |
 
-### Function Statistics
+### Recompilation Statistics
 
 | Metric | Value |
 |--------|-------|
-| Functions discovered | 2,674 |
-| Total basic blocks | 69,385 |
-| Total instructions | 443,224 |
-| Thunk functions | 9 |
-| Median function size | 231 bytes |
+| Functions recompiled | 2,701 |
+| Total lines of C | 631,944 |
+| Generated code size | 34.5 MB |
+| Source files | 6 + header + dispatch table |
+| Code generation time | 7.4 seconds |
+| Errors | 0 |
 
 ### DirectX API Surface
 
