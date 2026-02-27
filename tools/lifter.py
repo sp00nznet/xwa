@@ -81,7 +81,15 @@ def reg_name(reg_id: int) -> str:
         return REG_NAMES_8L[reg_id]
     if reg_id in REG_NAMES_8H:
         return REG_NAMES_8H[reg_id]
-    return f"REG_{reg_id}"
+    # FPU ST(i) registers: Capstone uses IDs 224-231 for st(0)-st(7)
+    if 224 <= reg_id <= 231:
+        return f"_st[{reg_id - 224}]"
+    # Segment registers (flat mode - effectively no-ops)
+    # CS=11, DS=17, ES=28, FS=29, GS=30, SS=49
+    seg_names = {11: '_seg_cs', 17: '_seg_ds', 28: '_seg_es', 29: '_seg_fs', 30: '_seg_gs', 49: '_seg_ss'}
+    if reg_id in seg_names:
+        return seg_names[reg_id]
+    return f"0 /* unknown reg {reg_id} */"
 
 
 def is_16bit_reg(reg_id: int) -> bool:
@@ -119,7 +127,7 @@ class Lifter:
                 return f"LO8({REG_NAMES_8L[r]})"
             if r in REG_NAMES_8H:
                 return f"HI8({REG_NAMES_8H[r]})"
-            return f"REG_{r}"
+            return reg_name(r)
         elif op.type == X86_OP_IMM:
             val = op.imm & 0xFFFFFFFF
             if val > 0xFFFF:
@@ -144,7 +152,13 @@ class Lifter:
                 return f"SET_LO8({REG_NAMES_8L[r]}, {value})"
             if r in REG_NAMES_8H:
                 return f"SET_HI8({REG_NAMES_8H[r]}, {value})"
-            return f"REG_{r} = {value}"
+            # Segment registers and FPU ST(i) - use as comment
+            if 224 <= r <= 231:
+                return f"_st[{r - 224}] = {value}"
+            # Segment registers - no-op in flat mode
+            if r in (11, 17, 28, 29, 30, 49):
+                return f"(void)({value}) /* seg reg write */"
+            return f"(void)({value}) /* unknown reg {r} */"
         elif op.type == X86_OP_MEM:
             return self._fmt_mem_write(op.mem, op.size, value)
         return f"??? = {value}"
@@ -325,10 +339,10 @@ class Lifter:
             lines.append(f"POPAD(); {comment}")
 
         elif m == 'pushfd':
-            lines.append(f"PUSH32(esp, _eflags); {comment}")
+            lines.append(f"PUSH32(esp, 0); /* pushfd - flags not tracked */ {comment}")
 
         elif m == 'popfd':
-            lines.append(f"_eflags = POP32_VAL(esp); {comment}")
+            lines.append(f"(void)POP32_VAL(esp); /* popfd - flags not tracked */ {comment}")
 
         # --- Arithmetic ---
         elif m == 'add':

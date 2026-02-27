@@ -15,13 +15,15 @@ if(MSVC)
     add_link_options(/STACK:8388608)  # 8 MB
 
     # Suppress warnings in generated code
-    add_compile_options(/W3)
-    # C4996: deprecated functions (we use fopen, etc.)
-    add_compile_options(/wd4996)
-    # C4244: conversion warnings (uint32 <-> int)
-    add_compile_options(/wd4244)
-    # C4146: unary minus on unsigned
-    add_compile_options(/wd4146)
+    add_compile_options(/W1)
+    add_compile_options(/wd4996)  # deprecated functions
+    add_compile_options(/wd4244)  # conversion warnings
+    add_compile_options(/wd4146)  # unary minus on unsigned
+    add_compile_options(/wd4102)  # unreferenced label
+    add_compile_options(/wd4013)  # undefined function (forward refs)
+    add_compile_options(/wd4101)  # unreferenced local variable
+    add_compile_options(/wd4267)  # size_t to int
+    add_compile_options(/wd4018)  # signed/unsigned mismatch
 
     # Optimization for Release
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Oi /GL")

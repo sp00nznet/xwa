@@ -33,6 +33,9 @@ extern uint32_t g_eax, g_ecx, g_edx, g_esp;
 /* Callee-saved registers (also global for implicit parameter passing) */
 extern uint32_t g_ebx, g_esi, g_edi;
 
+/* Segment registers (flat mode Win32 - effectively unused) */
+extern uint16_t g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
+
 /* Function pointer type for recompiled functions */
 typedef void (*recomp_func_t)(void);
 
@@ -59,6 +62,12 @@ extern const uint32_t recomp_dispatch_count;
 #define esi g_esi
 #define edi g_edi
 /* ebp is declared local in each function */
+#define _seg_cs g_seg_cs
+#define _seg_ds g_seg_ds
+#define _seg_es g_seg_es
+#define _seg_fs g_seg_fs
+#define _seg_gs g_seg_gs
+#define _seg_ss g_seg_ss
 #endif
 
 /* ============================================================

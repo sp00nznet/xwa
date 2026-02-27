@@ -18,6 +18,8 @@
 
 uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
 uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
+uint16_t g_seg_cs = 0, g_seg_ds = 0, g_seg_es = 0;
+uint16_t g_seg_fs = 0, g_seg_gs = 0, g_seg_ss = 0;
 
 /* Memory base offset (0 for fixed-base mapping) */
 ptrdiff_t g_mem_base = 0;

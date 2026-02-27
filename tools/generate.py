@@ -143,6 +143,10 @@ def lift_function_linear(lifter, name, instructions, leaders, func_start):
         for line in lifted:
             lines.append(f'    {line}')
 
+    # Ensure function doesn't fall off the end without return
+    if instructions and not instructions[-1].is_ret:
+        lines.append('    return; /* end of function */')
+
     lines.append('}')
     return '\n'.join(lines)
 
@@ -156,6 +160,7 @@ def write_chunk(output_dir, file_idx, funcs):
         f.write(f'/* File {file_idx}: {len(funcs)} functions */\n\n')
         f.write('#define RECOMP_GENERATED_CODE\n')
         f.write('#include "recomp_types.h"\n')
+        f.write('#include "recomp_funcs.h"\n')
         f.write('#include <math.h>\n')
         f.write('#include <string.h>\n\n')
         for code, addr, name in funcs:
@@ -224,12 +229,21 @@ def main():
             if not instructions:
                 continue
 
-            # Trim: stop at first int3 or large gap of zeros
+            # Trim: stop at first int3, and skip garbage after ret
+            # unless a label follows (which indicates a reachable block)
             trimmed = []
+            seen_ret = False
             for insn in instructions:
                 if insn.mnemonic == 'int3':
                     break
+                # After a ret, only continue if this address is a jump target
+                if seen_ret:
+                    if insn.address not in leaders:
+                        continue  # skip garbage between ret and next label
+                    seen_ret = False  # found a label, resume
                 trimmed.append(insn)
+                if insn.is_ret:
+                    seen_ret = True
             if not trimmed:
                 continue
 
