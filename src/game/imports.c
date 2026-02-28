@@ -32,7 +32,7 @@ typedef uint32_t (__stdcall *STDFN14)(uint32_t, uint32_t, uint32_t, uint32_t, ui
 
 static void bridge_RegSetValueExA_005A9000(void) { /* ADVAPI32.dll:RegSetValueExA (6 args) */
     static STDFN6 fn = NULL;
-    if (!fn) fn = (STDFN6)GetProcAddress(GetModuleHandleA("ADVAPI32.dll"), "RegSetValueExA");
+    if (!fn) fn = (STDFN6)GetProcAddress(LoadLibraryA("ADVAPI32.dll"), "RegSetValueExA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -45,19 +45,22 @@ static void bridge_RegSetValueExA_005A9000(void) { /* ADVAPI32.dll:RegSetValueEx
 
 static void bridge_RegOpenKeyExA_005A9004(void) { /* ADVAPI32.dll:RegOpenKeyExA (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("ADVAPI32.dll"), "RegOpenKeyExA");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("ADVAPI32.dll"), "RegOpenKeyExA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
     uint32_t a3 = MEM32(g_esp + 16);
     uint32_t a4 = MEM32(g_esp + 20);
+    fprintf(stderr, "  RegOpenKeyExA(hKey=0x%X, subKey=0x%08X \"%s\", fn=%p)\n", a0, a1, (const char*)(uintptr_t)a1, (void*)fn);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
+    else g_eax = 2; /* ERROR_FILE_NOT_FOUND */
+    fprintf(stderr, "  → 0x%08X\n", g_eax);
     g_esp += 24;
 }
 
 static void bridge_RegQueryValueExA_005A9008(void) { /* ADVAPI32.dll:RegQueryValueExA (6 args) */
     static STDFN6 fn = NULL;
-    if (!fn) fn = (STDFN6)GetProcAddress(GetModuleHandleA("ADVAPI32.dll"), "RegQueryValueExA");
+    if (!fn) fn = (STDFN6)GetProcAddress(LoadLibraryA("ADVAPI32.dll"), "RegQueryValueExA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -70,7 +73,7 @@ static void bridge_RegQueryValueExA_005A9008(void) { /* ADVAPI32.dll:RegQueryVal
 
 static void bridge_RegCloseKey_005A900C(void) { /* ADVAPI32.dll:RegCloseKey (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("ADVAPI32.dll"), "RegCloseKey");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("ADVAPI32.dll"), "RegCloseKey");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -118,7 +121,7 @@ static void bridge_ordinal_1_005A9030(void) { /* DSOUND.dll:ordinal_1 */
 
 static void bridge_SetMapMode_005A9038(void) { /* GDI32.dll:SetMapMode (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("GDI32.dll"), "SetMapMode");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("GDI32.dll"), "SetMapMode");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -127,7 +130,7 @@ static void bridge_SetMapMode_005A9038(void) { /* GDI32.dll:SetMapMode (2 args) 
 
 static void bridge_ExtTextOutA_005A903C(void) { /* GDI32.dll:ExtTextOutA (8 args) */
     static STDFN8 fn = NULL;
-    if (!fn) fn = (STDFN8)GetProcAddress(GetModuleHandleA("GDI32.dll"), "ExtTextOutA");
+    if (!fn) fn = (STDFN8)GetProcAddress(LoadLibraryA("GDI32.dll"), "ExtTextOutA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -142,7 +145,7 @@ static void bridge_ExtTextOutA_005A903C(void) { /* GDI32.dll:ExtTextOutA (8 args
 
 static void bridge_Rectangle_005A9040(void) { /* GDI32.dll:Rectangle (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("GDI32.dll"), "Rectangle");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("GDI32.dll"), "Rectangle");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -154,7 +157,7 @@ static void bridge_Rectangle_005A9040(void) { /* GDI32.dll:Rectangle (5 args) */
 
 static void bridge_GetStockObject_005A9044(void) { /* GDI32.dll:GetStockObject (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("GDI32.dll"), "GetStockObject");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("GDI32.dll"), "GetStockObject");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -162,7 +165,7 @@ static void bridge_GetStockObject_005A9044(void) { /* GDI32.dll:GetStockObject (
 
 static void bridge_SetBkMode_005A9048(void) { /* GDI32.dll:SetBkMode (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("GDI32.dll"), "SetBkMode");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("GDI32.dll"), "SetBkMode");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -171,7 +174,7 @@ static void bridge_SetBkMode_005A9048(void) { /* GDI32.dll:SetBkMode (2 args) */
 
 static void bridge_SetBkColor_005A904C(void) { /* GDI32.dll:SetBkColor (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("GDI32.dll"), "SetBkColor");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("GDI32.dll"), "SetBkColor");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -180,7 +183,7 @@ static void bridge_SetBkColor_005A904C(void) { /* GDI32.dll:SetBkColor (2 args) 
 
 static void bridge_SetTextColor_005A9050(void) { /* GDI32.dll:SetTextColor (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("GDI32.dll"), "SetTextColor");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("GDI32.dll"), "SetTextColor");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -189,7 +192,7 @@ static void bridge_SetTextColor_005A9050(void) { /* GDI32.dll:SetTextColor (2 ar
 
 static void bridge_CreateDCA_005A9054(void) { /* GDI32.dll:CreateDCA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("GDI32.dll"), "CreateDCA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("GDI32.dll"), "CreateDCA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -200,7 +203,7 @@ static void bridge_CreateDCA_005A9054(void) { /* GDI32.dll:CreateDCA (4 args) */
 
 static void bridge_GetTextExtentPoint32A_005A9058(void) { /* GDI32.dll:GetTextExtentPoint32A (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("GDI32.dll"), "GetTextExtentPoint32A");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("GDI32.dll"), "GetTextExtentPoint32A");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -211,7 +214,7 @@ static void bridge_GetTextExtentPoint32A_005A9058(void) { /* GDI32.dll:GetTextEx
 
 static void bridge_SelectObject_005A905C(void) { /* GDI32.dll:SelectObject (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("GDI32.dll"), "SelectObject");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("GDI32.dll"), "SelectObject");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -220,7 +223,7 @@ static void bridge_SelectObject_005A905C(void) { /* GDI32.dll:SelectObject (2 ar
 
 static void bridge_CreateFontA_005A9060(void) { /* GDI32.dll:CreateFontA (14 args) */
     static STDFN14 fn = NULL;
-    if (!fn) fn = (STDFN14)GetProcAddress(GetModuleHandleA("GDI32.dll"), "CreateFontA");
+    if (!fn) fn = (STDFN14)GetProcAddress(LoadLibraryA("GDI32.dll"), "CreateFontA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -241,7 +244,7 @@ static void bridge_CreateFontA_005A9060(void) { /* GDI32.dll:CreateFontA (14 arg
 
 static void bridge_DeleteObject_005A9064(void) { /* GDI32.dll:DeleteObject (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("GDI32.dll"), "DeleteObject");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("GDI32.dll"), "DeleteObject");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -249,7 +252,7 @@ static void bridge_DeleteObject_005A9064(void) { /* GDI32.dll:DeleteObject (1 ar
 
 static void bridge_SetTextCharacterExtra_005A9068(void) { /* GDI32.dll:SetTextCharacterExtra (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("GDI32.dll"), "SetTextCharacterExtra");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("GDI32.dll"), "SetTextCharacterExtra");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -258,7 +261,7 @@ static void bridge_SetTextCharacterExtra_005A9068(void) { /* GDI32.dll:SetTextCh
 
 static void bridge_DeleteDC_005A906C(void) { /* GDI32.dll:DeleteDC (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("GDI32.dll"), "DeleteDC");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("GDI32.dll"), "DeleteDC");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -268,7 +271,7 @@ static void bridge_DeleteDC_005A906C(void) { /* GDI32.dll:DeleteDC (1 args) */
 
 static void bridge_Sleep_005A9074(void) { /* KERNEL32.dll:Sleep (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "Sleep");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "Sleep");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -276,7 +279,7 @@ static void bridge_Sleep_005A9074(void) { /* KERNEL32.dll:Sleep (1 args) */
 
 static void bridge_GlobalUnlock_005A9078(void) { /* KERNEL32.dll:GlobalUnlock (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GlobalUnlock");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalUnlock");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -284,7 +287,7 @@ static void bridge_GlobalUnlock_005A9078(void) { /* KERNEL32.dll:GlobalUnlock (1
 
 static void bridge_GlobalReAlloc_005A907C(void) { /* KERNEL32.dll:GlobalReAlloc (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GlobalReAlloc");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalReAlloc");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -294,7 +297,7 @@ static void bridge_GlobalReAlloc_005A907C(void) { /* KERNEL32.dll:GlobalReAlloc 
 
 static void bridge__hread_005A9080(void) { /* KERNEL32.dll:_hread (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "_hread");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "_hread");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -304,7 +307,7 @@ static void bridge__hread_005A9080(void) { /* KERNEL32.dll:_hread (3 args) */
 
 static void bridge__llseek_005A9084(void) { /* KERNEL32.dll:_llseek (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "_llseek");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "_llseek");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -314,7 +317,7 @@ static void bridge__llseek_005A9084(void) { /* KERNEL32.dll:_llseek (3 args) */
 
 static void bridge_GlobalLock_005A9088(void) { /* KERNEL32.dll:GlobalLock (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GlobalLock");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalLock");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -322,7 +325,7 @@ static void bridge_GlobalLock_005A9088(void) { /* KERNEL32.dll:GlobalLock (1 arg
 
 static void bridge_GlobalAlloc_005A908C(void) { /* KERNEL32.dll:GlobalAlloc (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GlobalAlloc");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalAlloc");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -331,7 +334,7 @@ static void bridge_GlobalAlloc_005A908C(void) { /* KERNEL32.dll:GlobalAlloc (2 a
 
 static void bridge_QueryPerformanceCounter_005A9090(void) { /* KERNEL32.dll:QueryPerformanceCounter (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "QueryPerformanceCounter");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "QueryPerformanceCounter");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -339,7 +342,7 @@ static void bridge_QueryPerformanceCounter_005A9090(void) { /* KERNEL32.dll:Quer
 
 static void bridge_QueryPerformanceFrequency_005A9094(void) { /* KERNEL32.dll:QueryPerformanceFrequency (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "QueryPerformanceFrequency");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "QueryPerformanceFrequency");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -347,7 +350,7 @@ static void bridge_QueryPerformanceFrequency_005A9094(void) { /* KERNEL32.dll:Qu
 
 static void bridge_CreateProcessA_005A9098(void) { /* KERNEL32.dll:CreateProcessA (10 args) */
     static STDFN10 fn = NULL;
-    if (!fn) fn = (STDFN10)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "CreateProcessA");
+    if (!fn) fn = (STDFN10)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "CreateProcessA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -364,7 +367,7 @@ static void bridge_CreateProcessA_005A9098(void) { /* KERNEL32.dll:CreateProcess
 
 static void bridge_GlobalFree_005A909C(void) { /* KERNEL32.dll:GlobalFree (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GlobalFree");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalFree");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -372,16 +375,18 @@ static void bridge_GlobalFree_005A909C(void) { /* KERNEL32.dll:GlobalFree (1 arg
 
 static void bridge__lopen_005A90A0(void) { /* KERNEL32.dll:_lopen (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "_lopen");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "_lopen");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
+    fprintf(stderr, "  _lopen(\"%s\", 0x%X)\n", (const char*)(uintptr_t)a0, a1);
     if (fn) g_eax = fn(a0, a1);
+    fprintf(stderr, "  → 0x%08X\n", g_eax);
     g_esp += 12;
 }
 
 static void bridge__lread_005A90A4(void) { /* KERNEL32.dll:_lread (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "_lread");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "_lread");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -391,7 +396,7 @@ static void bridge__lread_005A90A4(void) { /* KERNEL32.dll:_lread (3 args) */
 
 static void bridge__lclose_005A90A8(void) { /* KERNEL32.dll:_lclose (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "_lclose");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "_lclose");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -399,7 +404,7 @@ static void bridge__lclose_005A90A8(void) { /* KERNEL32.dll:_lclose (1 args) */
 
 static void bridge_VirtualProtect_005A90AC(void) { /* KERNEL32.dll:VirtualProtect (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "VirtualProtect");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "VirtualProtect");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -410,7 +415,7 @@ static void bridge_VirtualProtect_005A90AC(void) { /* KERNEL32.dll:VirtualProtec
 
 static void bridge_GetLocalTime_005A90B0(void) { /* KERNEL32.dll:GetLocalTime (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetLocalTime");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetLocalTime");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -418,7 +423,7 @@ static void bridge_GetLocalTime_005A90B0(void) { /* KERNEL32.dll:GetLocalTime (1
 
 static void bridge_OutputDebugStringA_005A90B4(void) { /* KERNEL32.dll:OutputDebugStringA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "OutputDebugStringA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "OutputDebugStringA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -426,7 +431,7 @@ static void bridge_OutputDebugStringA_005A90B4(void) { /* KERNEL32.dll:OutputDeb
 
 static void bridge_GetCPInfo_005A90B8(void) { /* KERNEL32.dll:GetCPInfo (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetCPInfo");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetCPInfo");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -435,7 +440,7 @@ static void bridge_GetCPInfo_005A90B8(void) { /* KERNEL32.dll:GetCPInfo (2 args)
 
 static void bridge_UnhandledExceptionFilter_005A90BC(void) { /* KERNEL32.dll:UnhandledExceptionFilter (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "UnhandledExceptionFilter");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "UnhandledExceptionFilter");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -443,7 +448,7 @@ static void bridge_UnhandledExceptionFilter_005A90BC(void) { /* KERNEL32.dll:Unh
 
 static void bridge_GetModuleFileNameA_005A90C0(void) { /* KERNEL32.dll:GetModuleFileNameA (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetModuleFileNameA");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetModuleFileNameA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -453,7 +458,7 @@ static void bridge_GetModuleFileNameA_005A90C0(void) { /* KERNEL32.dll:GetModule
 
 static void bridge_GetFileType_005A90C4(void) { /* KERNEL32.dll:GetFileType (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetFileType");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetFileType");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -461,7 +466,7 @@ static void bridge_GetFileType_005A90C4(void) { /* KERNEL32.dll:GetFileType (1 a
 
 static void bridge_WideCharToMultiByte_005A90C8(void) { /* KERNEL32.dll:WideCharToMultiByte (8 args) */
     static STDFN8 fn = NULL;
-    if (!fn) fn = (STDFN8)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "WideCharToMultiByte");
+    if (!fn) fn = (STDFN8)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "WideCharToMultiByte");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -476,7 +481,7 @@ static void bridge_WideCharToMultiByte_005A90C8(void) { /* KERNEL32.dll:WideChar
 
 static void bridge_LCMapStringA_005A90CC(void) { /* KERNEL32.dll:LCMapStringA (6 args) */
     static STDFN6 fn = NULL;
-    if (!fn) fn = (STDFN6)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "LCMapStringA");
+    if (!fn) fn = (STDFN6)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "LCMapStringA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -489,7 +494,7 @@ static void bridge_LCMapStringA_005A90CC(void) { /* KERNEL32.dll:LCMapStringA (6
 
 static void bridge_RaiseException_005A90D0(void) { /* KERNEL32.dll:RaiseException (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "RaiseException");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "RaiseException");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -500,7 +505,7 @@ static void bridge_RaiseException_005A90D0(void) { /* KERNEL32.dll:RaiseExceptio
 
 static void bridge_GetLocaleInfoW_005A90D4(void) { /* KERNEL32.dll:GetLocaleInfoW (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetLocaleInfoW");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetLocaleInfoW");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -511,7 +516,7 @@ static void bridge_GetLocaleInfoW_005A90D4(void) { /* KERNEL32.dll:GetLocaleInfo
 
 static void bridge_GlobalMemoryStatus_005A90D8(void) { /* KERNEL32.dll:GlobalMemoryStatus (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GlobalMemoryStatus");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalMemoryStatus");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -519,7 +524,7 @@ static void bridge_GlobalMemoryStatus_005A90D8(void) { /* KERNEL32.dll:GlobalMem
 
 static void bridge_GetDriveTypeA_005A90DC(void) { /* KERNEL32.dll:GetDriveTypeA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetDriveTypeA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetDriveTypeA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -527,7 +532,7 @@ static void bridge_GetDriveTypeA_005A90DC(void) { /* KERNEL32.dll:GetDriveTypeA 
 
 static void bridge_GetLogicalDriveStringsA_005A90E0(void) { /* KERNEL32.dll:GetLogicalDriveStringsA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetLogicalDriveStringsA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetLogicalDriveStringsA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -536,7 +541,7 @@ static void bridge_GetLogicalDriveStringsA_005A90E0(void) { /* KERNEL32.dll:GetL
 
 static void bridge_TerminateProcess_005A90E4(void) { /* KERNEL32.dll:TerminateProcess (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "TerminateProcess");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "TerminateProcess");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -545,14 +550,14 @@ static void bridge_TerminateProcess_005A90E4(void) { /* KERNEL32.dll:TerminatePr
 
 static void bridge_GetCurrentProcess_005A90E8(void) { /* KERNEL32.dll:GetCurrentProcess (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetCurrentProcess");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetCurrentProcess");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_ExitProcess_005A90EC(void) { /* KERNEL32.dll:ExitProcess (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "ExitProcess");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "ExitProcess");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -560,7 +565,7 @@ static void bridge_ExitProcess_005A90EC(void) { /* KERNEL32.dll:ExitProcess (1 a
 
 static void bridge_GlobalHandle_005A90F0(void) { /* KERNEL32.dll:GlobalHandle (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GlobalHandle");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalHandle");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -568,7 +573,7 @@ static void bridge_GlobalHandle_005A90F0(void) { /* KERNEL32.dll:GlobalHandle (1
 
 static void bridge_lstrlenA_005A90F4(void) { /* KERNEL32.dll:lstrlenA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "lstrlenA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "lstrlenA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -576,23 +581,23 @@ static void bridge_lstrlenA_005A90F4(void) { /* KERNEL32.dll:lstrlenA (1 args) *
 
 static void bridge_GetTickCount_005A90F8(void) { /* KERNEL32.dll:GetTickCount (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetTickCount");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetTickCount");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_GetProcAddress_005A90FC(void) { /* KERNEL32.dll:GetProcAddress (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetProcAddress");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetProcAddress");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
     g_esp += 12;
 }
 
-static void bridge_GetModuleHandleA_005A9100(void) { /* KERNEL32.dll:GetModuleHandleA (1 args) */
+static void bridge_LoadLibraryA_005A9100(void) { /* KERNEL32.dll:LoadLibraryA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetModuleHandleA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "LoadLibraryA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -600,7 +605,7 @@ static void bridge_GetModuleHandleA_005A9100(void) { /* KERNEL32.dll:GetModuleHa
 
 static void bridge_lstrcpyA_005A9104(void) { /* KERNEL32.dll:lstrcpyA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "lstrcpyA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "lstrcpyA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -609,7 +614,7 @@ static void bridge_lstrcpyA_005A9104(void) { /* KERNEL32.dll:lstrcpyA (2 args) *
 
 static void bridge_FindNextFileA_005A9108(void) { /* KERNEL32.dll:FindNextFileA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "FindNextFileA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "FindNextFileA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -618,7 +623,7 @@ static void bridge_FindNextFileA_005A9108(void) { /* KERNEL32.dll:FindNextFileA 
 
 static void bridge_FindClose_005A910C(void) { /* KERNEL32.dll:FindClose (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "FindClose");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "FindClose");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -626,7 +631,7 @@ static void bridge_FindClose_005A910C(void) { /* KERNEL32.dll:FindClose (1 args)
 
 static void bridge_FindFirstFileA_005A9110(void) { /* KERNEL32.dll:FindFirstFileA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "FindFirstFileA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "FindFirstFileA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -635,7 +640,7 @@ static void bridge_FindFirstFileA_005A9110(void) { /* KERNEL32.dll:FindFirstFile
 
 static void bridge_LockResource_005A9114(void) { /* KERNEL32.dll:LockResource (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "LockResource");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "LockResource");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -643,7 +648,7 @@ static void bridge_LockResource_005A9114(void) { /* KERNEL32.dll:LockResource (1
 
 static void bridge_LoadResource_005A9118(void) { /* KERNEL32.dll:LoadResource (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "LoadResource");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "LoadResource");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -652,7 +657,7 @@ static void bridge_LoadResource_005A9118(void) { /* KERNEL32.dll:LoadResource (2
 
 static void bridge_FindResourceA_005A911C(void) { /* KERNEL32.dll:FindResourceA (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "FindResourceA");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "FindResourceA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -662,7 +667,7 @@ static void bridge_FindResourceA_005A911C(void) { /* KERNEL32.dll:FindResourceA 
 
 static void bridge_LeaveCriticalSection_005A9120(void) { /* KERNEL32.dll:LeaveCriticalSection (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "LeaveCriticalSection");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "LeaveCriticalSection");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -670,7 +675,7 @@ static void bridge_LeaveCriticalSection_005A9120(void) { /* KERNEL32.dll:LeaveCr
 
 static void bridge_EnterCriticalSection_005A9124(void) { /* KERNEL32.dll:EnterCriticalSection (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "EnterCriticalSection");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "EnterCriticalSection");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -678,7 +683,7 @@ static void bridge_EnterCriticalSection_005A9124(void) { /* KERNEL32.dll:EnterCr
 
 static void bridge_InitializeCriticalSection_005A9128(void) { /* KERNEL32.dll:InitializeCriticalSection (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "InitializeCriticalSection");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "InitializeCriticalSection");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -686,7 +691,7 @@ static void bridge_InitializeCriticalSection_005A9128(void) { /* KERNEL32.dll:In
 
 static void bridge_CloseHandle_005A912C(void) { /* KERNEL32.dll:CloseHandle (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "CloseHandle");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "CloseHandle");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -694,7 +699,7 @@ static void bridge_CloseHandle_005A912C(void) { /* KERNEL32.dll:CloseHandle (1 a
 
 static void bridge_DeleteCriticalSection_005A9130(void) { /* KERNEL32.dll:DeleteCriticalSection (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "DeleteCriticalSection");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "DeleteCriticalSection");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -702,7 +707,7 @@ static void bridge_DeleteCriticalSection_005A9130(void) { /* KERNEL32.dll:Delete
 
 static void bridge_InterlockedDecrement_005A9134(void) { /* KERNEL32.dll:InterlockedDecrement (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "InterlockedDecrement");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "InterlockedDecrement");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -710,7 +715,7 @@ static void bridge_InterlockedDecrement_005A9134(void) { /* KERNEL32.dll:Interlo
 
 static void bridge_InterlockedIncrement_005A9138(void) { /* KERNEL32.dll:InterlockedIncrement (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "InterlockedIncrement");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "InterlockedIncrement");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -718,7 +723,7 @@ static void bridge_InterlockedIncrement_005A9138(void) { /* KERNEL32.dll:Interlo
 
 static void bridge_GetLastError_005A913C(void) { /* KERNEL32.dll:GetLastError (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetLastError");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetLastError");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
@@ -736,39 +741,34 @@ static void bridge_MoveFileA_005A9144(void) { /* KERNEL32.dll:MoveFileA */
 }
 
 static void bridge_HeapAlloc_005A9148(void) { /* KERNEL32.dll:HeapAlloc (3 args) */
-    static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "HeapAlloc");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    if (fn) g_eax = fn(a0, a1, a2);
+    /* Always use our process heap - original CRT heap handle in .data is invalid */
+    uint32_t a1 = MEM32(g_esp + 8);   /* dwFlags */
+    uint32_t a2 = MEM32(g_esp + 12);  /* dwBytes */
+    g_eax = (uint32_t)(uintptr_t)HeapAlloc(GetProcessHeap(), a1, a2);
     g_esp += 16;
 }
 
 static void bridge_HeapReAlloc_005A914C(void) { /* KERNEL32.dll:HeapReAlloc (4 args) */
-    static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "HeapReAlloc");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    uint32_t a3 = MEM32(g_esp + 16);
-    if (fn) g_eax = fn(a0, a1, a2, a3);
+    /* Always use our process heap */
+    uint32_t a1 = MEM32(g_esp + 8);   /* dwFlags */
+    uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
+    uint32_t a3 = MEM32(g_esp + 16);  /* dwBytes */
+    g_eax = (uint32_t)(uintptr_t)HeapReAlloc(GetProcessHeap(), a1, (void*)(uintptr_t)a2, a3);
     g_esp += 20;
 }
 
 static void bridge_HeapFree_005A9150(void) { /* KERNEL32.dll:HeapFree (3 args) */
-    static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "HeapFree");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    if (fn) g_eax = fn(a0, a1, a2);
+    /* Always use our process heap */
+    uint32_t a1 = MEM32(g_esp + 8);   /* dwFlags */
+    uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
+    if (a2) HeapFree(GetProcessHeap(), a1, (void*)(uintptr_t)a2);
+    g_eax = 1; /* success */
     g_esp += 16;
 }
 
 static void bridge_GetStartupInfoA_005A9154(void) { /* KERNEL32.dll:GetStartupInfoA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetStartupInfoA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetStartupInfoA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -776,21 +776,21 @@ static void bridge_GetStartupInfoA_005A9154(void) { /* KERNEL32.dll:GetStartupIn
 
 static void bridge_GetCommandLineA_005A9158(void) { /* KERNEL32.dll:GetCommandLineA (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetCommandLineA");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetCommandLineA");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_GetVersion_005A915C(void) { /* KERNEL32.dll:GetVersion (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetVersion");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetVersion");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_SetEnvironmentVariableA_005A9160(void) { /* KERNEL32.dll:SetEnvironmentVariableA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "SetEnvironmentVariableA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "SetEnvironmentVariableA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -799,7 +799,7 @@ static void bridge_SetEnvironmentVariableA_005A9160(void) { /* KERNEL32.dll:SetE
 
 static void bridge_GetCurrentDirectoryA_005A9164(void) { /* KERNEL32.dll:GetCurrentDirectoryA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetCurrentDirectoryA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetCurrentDirectoryA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -808,15 +808,16 @@ static void bridge_GetCurrentDirectoryA_005A9164(void) { /* KERNEL32.dll:GetCurr
 
 static void bridge_SetCurrentDirectoryA_005A9168(void) { /* KERNEL32.dll:SetCurrentDirectoryA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "SetCurrentDirectoryA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "SetCurrentDirectoryA");
     uint32_t a0 = MEM32(g_esp + 4);
+    fprintf(stderr, "  SetCurrentDirectoryA(0x%08X \"%s\")\n", a0, (const char*)(uintptr_t)a0);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
 }
 
 static void bridge_GetFullPathNameA_005A916C(void) { /* KERNEL32.dll:GetFullPathNameA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetFullPathNameA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetFullPathNameA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -827,7 +828,7 @@ static void bridge_GetFullPathNameA_005A916C(void) { /* KERNEL32.dll:GetFullPath
 
 static void bridge_MultiByteToWideChar_005A9170(void) { /* KERNEL32.dll:MultiByteToWideChar (6 args) */
     static STDFN6 fn = NULL;
-    if (!fn) fn = (STDFN6)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "MultiByteToWideChar");
+    if (!fn) fn = (STDFN6)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "MultiByteToWideChar");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -840,7 +841,7 @@ static void bridge_MultiByteToWideChar_005A9170(void) { /* KERNEL32.dll:MultiByt
 
 static void bridge_GetStdHandle_005A9174(void) { /* KERNEL32.dll:GetStdHandle (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetStdHandle");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetStdHandle");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -848,7 +849,7 @@ static void bridge_GetStdHandle_005A9174(void) { /* KERNEL32.dll:GetStdHandle (1
 
 static void bridge_LCMapStringW_005A9178(void) { /* KERNEL32.dll:LCMapStringW (6 args) */
     static STDFN6 fn = NULL;
-    if (!fn) fn = (STDFN6)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "LCMapStringW");
+    if (!fn) fn = (STDFN6)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "LCMapStringW");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -861,7 +862,7 @@ static void bridge_LCMapStringW_005A9178(void) { /* KERNEL32.dll:LCMapStringW (6
 
 static void bridge_SetEndOfFile_005A917C(void) { /* KERNEL32.dll:SetEndOfFile (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "SetEndOfFile");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "SetEndOfFile");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -869,7 +870,7 @@ static void bridge_SetEndOfFile_005A917C(void) { /* KERNEL32.dll:SetEndOfFile (1
 
 static void bridge_IsValidLocale_005A9180(void) { /* KERNEL32.dll:IsValidLocale (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "IsValidLocale");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "IsValidLocale");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -878,7 +879,7 @@ static void bridge_IsValidLocale_005A9180(void) { /* KERNEL32.dll:IsValidLocale 
 
 static void bridge_IsValidCodePage_005A9184(void) { /* KERNEL32.dll:IsValidCodePage (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "IsValidCodePage");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "IsValidCodePage");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -886,7 +887,7 @@ static void bridge_IsValidCodePage_005A9184(void) { /* KERNEL32.dll:IsValidCodeP
 
 static void bridge_GetLocaleInfoA_005A9188(void) { /* KERNEL32.dll:GetLocaleInfoA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetLocaleInfoA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetLocaleInfoA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -897,7 +898,7 @@ static void bridge_GetLocaleInfoA_005A9188(void) { /* KERNEL32.dll:GetLocaleInfo
 
 static void bridge_EnumSystemLocalesA_005A918C(void) { /* KERNEL32.dll:EnumSystemLocalesA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "EnumSystemLocalesA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "EnumSystemLocalesA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -906,14 +907,14 @@ static void bridge_EnumSystemLocalesA_005A918C(void) { /* KERNEL32.dll:EnumSyste
 
 static void bridge_GetUserDefaultLCID_005A9190(void) { /* KERNEL32.dll:GetUserDefaultLCID (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetUserDefaultLCID");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetUserDefaultLCID");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_GetVersionExA_005A9194(void) { /* KERNEL32.dll:GetVersionExA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetVersionExA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetVersionExA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -921,7 +922,7 @@ static void bridge_GetVersionExA_005A9194(void) { /* KERNEL32.dll:GetVersionExA 
 
 static void bridge_SetFilePointer_005A9198(void) { /* KERNEL32.dll:SetFilePointer (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "SetFilePointer");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "SetFilePointer");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -932,7 +933,7 @@ static void bridge_SetFilePointer_005A9198(void) { /* KERNEL32.dll:SetFilePointe
 
 static void bridge_ReadFile_005A919C(void) { /* KERNEL32.dll:ReadFile (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "ReadFile");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "ReadFile");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -944,7 +945,7 @@ static void bridge_ReadFile_005A919C(void) { /* KERNEL32.dll:ReadFile (5 args) *
 
 static void bridge_WriteFile_005A91A0(void) { /* KERNEL32.dll:WriteFile (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "WriteFile");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "WriteFile");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -956,14 +957,14 @@ static void bridge_WriteFile_005A91A0(void) { /* KERNEL32.dll:WriteFile (5 args)
 
 static void bridge_GetCurrentThreadId_005A91A4(void) { /* KERNEL32.dll:GetCurrentThreadId (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetCurrentThreadId");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetCurrentThreadId");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_TlsSetValue_005A91A8(void) { /* KERNEL32.dll:TlsSetValue (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "TlsSetValue");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "TlsSetValue");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -972,14 +973,14 @@ static void bridge_TlsSetValue_005A91A8(void) { /* KERNEL32.dll:TlsSetValue (2 a
 
 static void bridge_TlsAlloc_005A91AC(void) { /* KERNEL32.dll:TlsAlloc (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "TlsAlloc");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "TlsAlloc");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_SetLastError_005A91B0(void) { /* KERNEL32.dll:SetLastError (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "SetLastError");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "SetLastError");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -987,25 +988,23 @@ static void bridge_SetLastError_005A91B0(void) { /* KERNEL32.dll:SetLastError (1
 
 static void bridge_TlsGetValue_005A91B4(void) { /* KERNEL32.dll:TlsGetValue (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "TlsGetValue");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "TlsGetValue");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
 }
 
 static void bridge_HeapSize_005A91B8(void) { /* KERNEL32.dll:HeapSize (3 args) */
-    static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "HeapSize");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    if (fn) g_eax = fn(a0, a1, a2);
+    /* Always use our process heap */
+    uint32_t a1 = MEM32(g_esp + 8);   /* dwFlags */
+    uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
+    g_eax = (uint32_t)HeapSize(GetProcessHeap(), a1, (void*)(uintptr_t)a2);
     g_esp += 16;
 }
 
 static void bridge_SetHandleCount_005A91BC(void) { /* KERNEL32.dll:SetHandleCount (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "SetHandleCount");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "SetHandleCount");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1013,7 +1012,7 @@ static void bridge_SetHandleCount_005A91BC(void) { /* KERNEL32.dll:SetHandleCoun
 
 static void bridge_LoadLibraryA_005A91C0(void) { /* KERNEL32.dll:LoadLibraryA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "LoadLibraryA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "LoadLibraryA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1021,7 +1020,7 @@ static void bridge_LoadLibraryA_005A91C0(void) { /* KERNEL32.dll:LoadLibraryA (1
 
 static void bridge_GetStringTypeA_005A91C4(void) { /* KERNEL32.dll:GetStringTypeA (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetStringTypeA");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetStringTypeA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1033,7 +1032,7 @@ static void bridge_GetStringTypeA_005A91C4(void) { /* KERNEL32.dll:GetStringType
 
 static void bridge_GetStringTypeW_005A91C8(void) { /* KERNEL32.dll:GetStringTypeW (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetStringTypeW");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetStringTypeW");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1044,33 +1043,27 @@ static void bridge_GetStringTypeW_005A91C8(void) { /* KERNEL32.dll:GetStringType
 
 static void bridge_FlushFileBuffers_005A91CC(void) { /* KERNEL32.dll:FlushFileBuffers (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "FlushFileBuffers");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "FlushFileBuffers");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
 }
 
 static void bridge_HeapDestroy_005A91D0(void) { /* KERNEL32.dll:HeapDestroy (1 args) */
-    static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "HeapDestroy");
-    uint32_t a0 = MEM32(g_esp + 4);
-    if (fn) g_eax = fn(a0);
+    /* No-op: don't destroy heaps we didn't create */
+    g_eax = 1; /* success */
     g_esp += 8;
 }
 
 static void bridge_HeapCreate_005A91D4(void) { /* KERNEL32.dll:HeapCreate (3 args) */
-    static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "HeapCreate");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    if (fn) g_eax = fn(a0, a1, a2);
+    /* Return process heap - all allocations go through one heap */
+    g_eax = (uint32_t)(uintptr_t)GetProcessHeap();
     g_esp += 16;
 }
 
 static void bridge_VirtualFree_005A91D8(void) { /* KERNEL32.dll:VirtualFree (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "VirtualFree");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "VirtualFree");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1080,7 +1073,7 @@ static void bridge_VirtualFree_005A91D8(void) { /* KERNEL32.dll:VirtualFree (3 a
 
 static void bridge_VirtualAlloc_005A91DC(void) { /* KERNEL32.dll:VirtualAlloc (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "VirtualAlloc");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "VirtualAlloc");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1091,7 +1084,7 @@ static void bridge_VirtualAlloc_005A91DC(void) { /* KERNEL32.dll:VirtualAlloc (4
 
 static void bridge_FreeEnvironmentStringsA_005A91E0(void) { /* KERNEL32.dll:FreeEnvironmentStringsA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "FreeEnvironmentStringsA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "FreeEnvironmentStringsA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1099,7 +1092,7 @@ static void bridge_FreeEnvironmentStringsA_005A91E0(void) { /* KERNEL32.dll:Free
 
 static void bridge_FreeEnvironmentStringsW_005A91E4(void) { /* KERNEL32.dll:FreeEnvironmentStringsW (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "FreeEnvironmentStringsW");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "FreeEnvironmentStringsW");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1107,35 +1100,35 @@ static void bridge_FreeEnvironmentStringsW_005A91E4(void) { /* KERNEL32.dll:Free
 
 static void bridge_GetEnvironmentStrings_005A91E8(void) { /* KERNEL32.dll:GetEnvironmentStrings (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetEnvironmentStrings");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetEnvironmentStrings");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_GetEnvironmentStringsW_005A91EC(void) { /* KERNEL32.dll:GetEnvironmentStringsW (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetEnvironmentStringsW");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetEnvironmentStringsW");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_GetACP_005A91F0(void) { /* KERNEL32.dll:GetACP (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetACP");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetACP");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_GetOEMCP_005A91F4(void) { /* KERNEL32.dll:GetOEMCP (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "GetOEMCP");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GetOEMCP");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_RtlUnwind_005A91F8(void) { /* KERNEL32.dll:RtlUnwind (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "RtlUnwind");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "RtlUnwind");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1146,7 +1139,7 @@ static void bridge_RtlUnwind_005A91F8(void) { /* KERNEL32.dll:RtlUnwind (4 args)
 
 static void bridge_SetStdHandle_005A91FC(void) { /* KERNEL32.dll:SetStdHandle (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "SetStdHandle");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "SetStdHandle");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1155,7 +1148,7 @@ static void bridge_SetStdHandle_005A91FC(void) { /* KERNEL32.dll:SetStdHandle (2
 
 static void bridge_CreateFileA_005A9200(void) { /* KERNEL32.dll:CreateFileA (7 args) */
     static STDFN7 fn = NULL;
-    if (!fn) fn = (STDFN7)GetProcAddress(GetModuleHandleA("KERNEL32.dll"), "CreateFileA");
+    if (!fn) fn = (STDFN7)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "CreateFileA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1171,7 +1164,7 @@ static void bridge_CreateFileA_005A9200(void) { /* KERNEL32.dll:CreateFileA (7 a
 
 static void bridge_ShellExecuteA_005A9208(void) { /* SHELL32.dll:ShellExecuteA (6 args) */
     static STDFN6 fn = NULL;
-    if (!fn) fn = (STDFN6)GetProcAddress(GetModuleHandleA("SHELL32.dll"), "ShellExecuteA");
+    if (!fn) fn = (STDFN6)GetProcAddress(LoadLibraryA("SHELL32.dll"), "ShellExecuteA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1186,7 +1179,7 @@ static void bridge_ShellExecuteA_005A9208(void) { /* SHELL32.dll:ShellExecuteA (
 
 static void bridge_UpdateWindow_005A9210(void) { /* USER32.dll:UpdateWindow (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "UpdateWindow");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "UpdateWindow");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1194,7 +1187,7 @@ static void bridge_UpdateWindow_005A9210(void) { /* USER32.dll:UpdateWindow (1 a
 
 static void bridge_SetFocus_005A9214(void) { /* USER32.dll:SetFocus (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "SetFocus");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "SetFocus");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1202,7 +1195,7 @@ static void bridge_SetFocus_005A9214(void) { /* USER32.dll:SetFocus (1 args) */
 
 static void bridge_DispatchMessageA_005A9218(void) { /* USER32.dll:DispatchMessageA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "DispatchMessageA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "DispatchMessageA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1210,7 +1203,7 @@ static void bridge_DispatchMessageA_005A9218(void) { /* USER32.dll:DispatchMessa
 
 static void bridge_SetWindowTextA_005A921C(void) { /* USER32.dll:SetWindowTextA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("USER32.dll"), "SetWindowTextA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "SetWindowTextA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1219,7 +1212,7 @@ static void bridge_SetWindowTextA_005A921C(void) { /* USER32.dll:SetWindowTextA 
 
 static void bridge_GetAsyncKeyState_005A9220(void) { /* USER32.dll:GetAsyncKeyState (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "GetAsyncKeyState");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "GetAsyncKeyState");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1227,7 +1220,7 @@ static void bridge_GetAsyncKeyState_005A9220(void) { /* USER32.dll:GetAsyncKeySt
 
 static void bridge_DestroyWindow_005A9224(void) { /* USER32.dll:DestroyWindow (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "DestroyWindow");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "DestroyWindow");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1235,7 +1228,7 @@ static void bridge_DestroyWindow_005A9224(void) { /* USER32.dll:DestroyWindow (1
 
 static void bridge_PostMessageA_005A9228(void) { /* USER32.dll:PostMessageA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("USER32.dll"), "PostMessageA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("USER32.dll"), "PostMessageA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1246,7 +1239,7 @@ static void bridge_PostMessageA_005A9228(void) { /* USER32.dll:PostMessageA (4 a
 
 static void bridge_SetCursor_005A922C(void) { /* USER32.dll:SetCursor (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "SetCursor");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "SetCursor");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1254,14 +1247,14 @@ static void bridge_SetCursor_005A922C(void) { /* USER32.dll:SetCursor (1 args) *
 
 static void bridge_ReleaseCapture_005A9230(void) { /* USER32.dll:ReleaseCapture (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("USER32.dll"), "ReleaseCapture");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("USER32.dll"), "ReleaseCapture");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_SetCapture_005A9234(void) { /* USER32.dll:SetCapture (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "SetCapture");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "SetCapture");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1269,7 +1262,7 @@ static void bridge_SetCapture_005A9234(void) { /* USER32.dll:SetCapture (1 args)
 
 static void bridge_PostQuitMessage_005A9238(void) { /* USER32.dll:PostQuitMessage (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "PostQuitMessage");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "PostQuitMessage");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1277,7 +1270,7 @@ static void bridge_PostQuitMessage_005A9238(void) { /* USER32.dll:PostQuitMessag
 
 static void bridge_GetKeyboardState_005A923C(void) { /* USER32.dll:GetKeyboardState (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "GetKeyboardState");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "GetKeyboardState");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1285,7 +1278,7 @@ static void bridge_GetKeyboardState_005A923C(void) { /* USER32.dll:GetKeyboardSt
 
 static void bridge_CreateWindowExA_005A9240(void) { /* USER32.dll:CreateWindowExA (12 args) */
     static STDFN12 fn = NULL;
-    if (!fn) fn = (STDFN12)GetProcAddress(GetModuleHandleA("USER32.dll"), "CreateWindowExA");
+    if (!fn) fn = (STDFN12)GetProcAddress(LoadLibraryA("USER32.dll"), "CreateWindowExA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1304,7 +1297,7 @@ static void bridge_CreateWindowExA_005A9240(void) { /* USER32.dll:CreateWindowEx
 
 static void bridge_GetSystemMetrics_005A9244(void) { /* USER32.dll:GetSystemMetrics (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "GetSystemMetrics");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "GetSystemMetrics");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1312,7 +1305,7 @@ static void bridge_GetSystemMetrics_005A9244(void) { /* USER32.dll:GetSystemMetr
 
 static void bridge_RegisterClassA_005A9248(void) { /* USER32.dll:RegisterClassA (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "RegisterClassA");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "RegisterClassA");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1320,7 +1313,7 @@ static void bridge_RegisterClassA_005A9248(void) { /* USER32.dll:RegisterClassA 
 
 static void bridge_LoadCursorA_005A924C(void) { /* USER32.dll:LoadCursorA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("USER32.dll"), "LoadCursorA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "LoadCursorA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1329,7 +1322,7 @@ static void bridge_LoadCursorA_005A924C(void) { /* USER32.dll:LoadCursorA (2 arg
 
 static void bridge_LoadIconA_005A9250(void) { /* USER32.dll:LoadIconA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("USER32.dll"), "LoadIconA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "LoadIconA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1338,7 +1331,7 @@ static void bridge_LoadIconA_005A9250(void) { /* USER32.dll:LoadIconA (2 args) *
 
 static void bridge_ShowWindowAsync_005A9254(void) { /* USER32.dll:ShowWindowAsync (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("USER32.dll"), "ShowWindowAsync");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "ShowWindowAsync");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1347,7 +1340,7 @@ static void bridge_ShowWindowAsync_005A9254(void) { /* USER32.dll:ShowWindowAsyn
 
 static void bridge_FindWindowA_005A9258(void) { /* USER32.dll:FindWindowA (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("USER32.dll"), "FindWindowA");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "FindWindowA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1356,7 +1349,7 @@ static void bridge_FindWindowA_005A9258(void) { /* USER32.dll:FindWindowA (2 arg
 
 static void bridge_DrawTextA_005A925C(void) { /* USER32.dll:DrawTextA (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("USER32.dll"), "DrawTextA");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("USER32.dll"), "DrawTextA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1368,7 +1361,7 @@ static void bridge_DrawTextA_005A925C(void) { /* USER32.dll:DrawTextA (5 args) *
 
 static void bridge_SetRect_005A9260(void) { /* USER32.dll:SetRect (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("USER32.dll"), "SetRect");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("USER32.dll"), "SetRect");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1380,7 +1373,7 @@ static void bridge_SetRect_005A9260(void) { /* USER32.dll:SetRect (5 args) */
 
 static void bridge_ReleaseDC_005A9264(void) { /* USER32.dll:ReleaseDC (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("USER32.dll"), "ReleaseDC");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "ReleaseDC");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1389,7 +1382,7 @@ static void bridge_ReleaseDC_005A9264(void) { /* USER32.dll:ReleaseDC (2 args) *
 
 static void bridge_GetDC_005A9268(void) { /* USER32.dll:GetDC (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "GetDC");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "GetDC");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1405,7 +1398,7 @@ static void bridge_wsprintfA_005A926C(void) { /* USER32.dll:wsprintfA */
 
 static void bridge_SystemParametersInfoA_005A9270(void) { /* USER32.dll:SystemParametersInfoA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("USER32.dll"), "SystemParametersInfoA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("USER32.dll"), "SystemParametersInfoA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1416,7 +1409,7 @@ static void bridge_SystemParametersInfoA_005A9270(void) { /* USER32.dll:SystemPa
 
 static void bridge_SetCursorPos_005A9274(void) { /* USER32.dll:SetCursorPos (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("USER32.dll"), "SetCursorPos");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "SetCursorPos");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1425,7 +1418,7 @@ static void bridge_SetCursorPos_005A9274(void) { /* USER32.dll:SetCursorPos (2 a
 
 static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("USER32.dll"), "PeekMessageA");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("USER32.dll"), "PeekMessageA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1437,7 +1430,7 @@ static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 a
 
 static void bridge_ShowCursor_005A927C(void) { /* USER32.dll:ShowCursor (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "ShowCursor");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "ShowCursor");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1445,7 +1438,7 @@ static void bridge_ShowCursor_005A927C(void) { /* USER32.dll:ShowCursor (1 args)
 
 static void bridge_TranslateMessage_005A9280(void) { /* USER32.dll:TranslateMessage (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "TranslateMessage");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "TranslateMessage");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1453,7 +1446,7 @@ static void bridge_TranslateMessage_005A9280(void) { /* USER32.dll:TranslateMess
 
 static void bridge_MessageBoxA_005A9284(void) { /* USER32.dll:MessageBoxA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("USER32.dll"), "MessageBoxA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("USER32.dll"), "MessageBoxA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1464,14 +1457,14 @@ static void bridge_MessageBoxA_005A9284(void) { /* USER32.dll:MessageBoxA (4 arg
 
 static void bridge_GetForegroundWindow_005A9288(void) { /* USER32.dll:GetForegroundWindow (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("USER32.dll"), "GetForegroundWindow");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("USER32.dll"), "GetForegroundWindow");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_DefWindowProcA_005A928C(void) { /* USER32.dll:DefWindowProcA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("USER32.dll"), "DefWindowProcA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("USER32.dll"), "DefWindowProcA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1482,7 +1475,7 @@ static void bridge_DefWindowProcA_005A928C(void) { /* USER32.dll:DefWindowProcA 
 
 static void bridge_GetMessageA_005A9290(void) { /* USER32.dll:GetMessageA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("USER32.dll"), "GetMessageA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("USER32.dll"), "GetMessageA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1493,7 +1486,7 @@ static void bridge_GetMessageA_005A9290(void) { /* USER32.dll:GetMessageA (4 arg
 
 static void bridge_SetForegroundWindow_005A9294(void) { /* USER32.dll:SetForegroundWindow (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("USER32.dll"), "SetForegroundWindow");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "SetForegroundWindow");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1503,7 +1496,7 @@ static void bridge_SetForegroundWindow_005A9294(void) { /* USER32.dll:SetForegro
 
 static void bridge_timeGetDevCaps_005A929C(void) { /* WINMM.dll:timeGetDevCaps (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("WINMM.dll"), "timeGetDevCaps");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeGetDevCaps");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1512,7 +1505,7 @@ static void bridge_timeGetDevCaps_005A929C(void) { /* WINMM.dll:timeGetDevCaps (
 
 static void bridge_timeSetEvent_005A92A0(void) { /* WINMM.dll:timeSetEvent (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("WINMM.dll"), "timeSetEvent");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeSetEvent");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1524,7 +1517,7 @@ static void bridge_timeSetEvent_005A92A0(void) { /* WINMM.dll:timeSetEvent (5 ar
 
 static void bridge_joyGetPosEx_005A92A4(void) { /* WINMM.dll:joyGetPosEx (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("WINMM.dll"), "joyGetPosEx");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("WINMM.dll"), "joyGetPosEx");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1533,7 +1526,7 @@ static void bridge_joyGetPosEx_005A92A4(void) { /* WINMM.dll:joyGetPosEx (2 args
 
 static void bridge_joyGetDevCapsA_005A92A8(void) { /* WINMM.dll:joyGetDevCapsA (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("WINMM.dll"), "joyGetDevCapsA");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("WINMM.dll"), "joyGetDevCapsA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1543,14 +1536,14 @@ static void bridge_joyGetDevCapsA_005A92A8(void) { /* WINMM.dll:joyGetDevCapsA (
 
 static void bridge_timeGetTime_005A92AC(void) { /* WINMM.dll:timeGetTime (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("WINMM.dll"), "timeGetTime");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeGetTime");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_timeBeginPeriod_005A92B0(void) { /* WINMM.dll:timeBeginPeriod (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("WINMM.dll"), "timeBeginPeriod");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeBeginPeriod");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1558,14 +1551,14 @@ static void bridge_timeBeginPeriod_005A92B0(void) { /* WINMM.dll:timeBeginPeriod
 
 static void bridge_joyGetNumDevs_005A92B4(void) { /* WINMM.dll:joyGetNumDevs (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("WINMM.dll"), "joyGetNumDevs");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("WINMM.dll"), "joyGetNumDevs");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
 
 static void bridge_mciSendCommandA_005A92B8(void) { /* WINMM.dll:mciSendCommandA (4 args) */
     static STDFN4 fn = NULL;
-    if (!fn) fn = (STDFN4)GetProcAddress(GetModuleHandleA("WINMM.dll"), "mciSendCommandA");
+    if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("WINMM.dll"), "mciSendCommandA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1576,7 +1569,7 @@ static void bridge_mciSendCommandA_005A92B8(void) { /* WINMM.dll:mciSendCommandA
 
 static void bridge_timeEndPeriod_005A92BC(void) { /* WINMM.dll:timeEndPeriod (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("WINMM.dll"), "timeEndPeriod");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeEndPeriod");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1584,7 +1577,7 @@ static void bridge_timeEndPeriod_005A92BC(void) { /* WINMM.dll:timeEndPeriod (1 
 
 static void bridge_auxSetVolume_005A92C0(void) { /* WINMM.dll:auxSetVolume (2 args) */
     static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(GetModuleHandleA("WINMM.dll"), "auxSetVolume");
+    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("WINMM.dll"), "auxSetVolume");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
@@ -1593,7 +1586,7 @@ static void bridge_auxSetVolume_005A92C0(void) { /* WINMM.dll:auxSetVolume (2 ar
 
 static void bridge_auxGetDevCapsA_005A92C4(void) { /* WINMM.dll:auxGetDevCapsA (3 args) */
     static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(GetModuleHandleA("WINMM.dll"), "auxGetDevCapsA");
+    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("WINMM.dll"), "auxGetDevCapsA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1603,7 +1596,7 @@ static void bridge_auxGetDevCapsA_005A92C4(void) { /* WINMM.dll:auxGetDevCapsA (
 
 static void bridge_timeKillEvent_005A92C8(void) { /* WINMM.dll:timeKillEvent (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("WINMM.dll"), "timeKillEvent");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeKillEvent");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1611,7 +1604,7 @@ static void bridge_timeKillEvent_005A92C8(void) { /* WINMM.dll:timeKillEvent (1 
 
 static void bridge_auxGetNumDevs_005A92CC(void) { /* WINMM.dll:auxGetNumDevs (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("WINMM.dll"), "auxGetNumDevs");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("WINMM.dll"), "auxGetNumDevs");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
@@ -1620,7 +1613,7 @@ static void bridge_auxGetNumDevs_005A92CC(void) { /* WINMM.dll:auxGetNumDevs (0 
 
 static void bridge_CoCreateInstance_005A92D4(void) { /* ole32.dll:CoCreateInstance (5 args) */
     static STDFN5 fn = NULL;
-    if (!fn) fn = (STDFN5)GetProcAddress(GetModuleHandleA("ole32.dll"), "CoCreateInstance");
+    if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("ole32.dll"), "CoCreateInstance");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
@@ -1632,7 +1625,7 @@ static void bridge_CoCreateInstance_005A92D4(void) { /* ole32.dll:CoCreateInstan
 
 static void bridge_CoInitialize_005A92D8(void) { /* ole32.dll:CoInitialize (1 args) */
     static STDFN1 fn = NULL;
-    if (!fn) fn = (STDFN1)GetProcAddress(GetModuleHandleA("ole32.dll"), "CoInitialize");
+    if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("ole32.dll"), "CoInitialize");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
@@ -1640,7 +1633,7 @@ static void bridge_CoInitialize_005A92D8(void) { /* ole32.dll:CoInitialize (1 ar
 
 static void bridge_CoUninitialize_005A92DC(void) { /* ole32.dll:CoUninitialize (0 args) */
     static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(GetModuleHandleA("ole32.dll"), "CoUninitialize");
+    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("ole32.dll"), "CoUninitialize");
     if (fn) g_eax = fn();
     g_esp += 4;
 }
@@ -1860,7 +1853,7 @@ void register_import_bridges(void) {
     g_import_bridges[57].func = bridge_GetProcAddress_005A90FC;
     MEM32(0x005A9100) = 0xBB00003Bu;
     g_import_bridges[58].address = 0xBB00003Bu;
-    g_import_bridges[58].func = bridge_GetModuleHandleA_005A9100;
+    g_import_bridges[58].func = bridge_LoadLibraryA_005A9100;
     MEM32(0x005A9104) = 0xBB00003Cu;
     g_import_bridges[59].address = 0xBB00003Cu;
     g_import_bridges[59].func = bridge_lstrcpyA_005A9104;

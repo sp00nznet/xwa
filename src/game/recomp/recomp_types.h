@@ -255,6 +255,10 @@ extern uint32_t g_icall_trace[ICALL_TRACE_SIZE];
 extern uint32_t g_icall_trace_idx;
 extern uint32_t g_icall_count;
 
+/* Call depth tracking */
+extern uint32_t g_call_depth;
+extern uint32_t g_call_depth_max;
+
 /* Lookup functions */
 recomp_func_t recomp_lookup(uint32_t va);          /* binary search in dispatch table */
 recomp_func_t recomp_lookup_manual(uint32_t va);    /* manual overrides */
@@ -263,7 +267,10 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
 /* Direct call to a known recompiled function */
 #define RECOMP_CALL(func) do { \
     PUSH32(esp, 0xDEAD0000u); /* dummy return address */ \
+    g_call_depth++; \
+    if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
     func(); \
+    g_call_depth--; \
 } while(0)
 
 /* Indirect call through dispatch */
@@ -277,10 +284,12 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
     if (!_fn) _fn = recomp_lookup_import(_va); \
     if (_fn) { \
         PUSH32(esp, 0xDEAD0000u); \
+        g_call_depth++; \
+        if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
         _fn(); \
+        g_call_depth--; \
     } else { \
         fprintf(stderr, "ICALL: unresolved VA 0x%08X\n", _va); \
-        esp += 4; /* pop dummy ret addr */ \
         eax = 0; \
     } \
 } while(0)
@@ -294,8 +303,12 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
     recomp_func_t _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_import(_va); \
-    if (_fn) { _fn(); } \
-    else { fprintf(stderr, "ITAIL: unresolved VA 0x%08X\n", _va); } \
+    if (_fn) { \
+        g_call_depth++; \
+        if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
+        _fn(); \
+        g_call_depth--; \
+    } else { fprintf(stderr, "ITAIL: unresolved VA 0x%08X\n", _va); } \
 } while(0)
 
 /* Stub macro for unimplemented imports */

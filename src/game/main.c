@@ -32,6 +32,10 @@ uint32_t g_icall_trace[ICALL_TRACE_SIZE] = {0};
 uint32_t g_icall_trace_idx = 0;
 uint32_t g_icall_count = 0;
 
+/* Call depth tracking */
+uint32_t g_call_depth = 0;
+uint32_t g_call_depth_max = 0;
+
 /* ============================================================
  * Memory Layout Constants (from PE analysis)
  *
@@ -47,7 +51,7 @@ uint32_t g_icall_count = 0;
 #define XWA_DATA_START    0x005A9000  /* .rdata start */
 #define XWA_DATA_END      0x00B10000  /* end of .data (rounded up) */
 #define XWA_STACK_BASE    0x00100000  /* simulated stack start */
-#define XWA_STACK_SIZE    0x00100000  /* 1 MB stack */
+#define XWA_STACK_SIZE    0x00800000  /* 8 MB stack */
 #define XWA_STACK_TOP     (XWA_STACK_BASE + XWA_STACK_SIZE)
 
 /* Entire mapped region: from stack through data end */
@@ -62,6 +66,8 @@ static void*  g_region_alloc = NULL;
  * ============================================================ */
 
 static uint32_t g_seh_skip_count = 0;
+static uint32_t g_esp_initial = 0;
+static uint32_t g_esp_min = 0xFFFFFFFF;
 
 static void dump_icall_trace(void) {
     fprintf(stderr, "\n=== ICALL Trace (last %d calls) ===\n", ICALL_TRACE_SIZE);
@@ -99,6 +105,9 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     }
 
     dump_registers();
+    fprintf(stderr, "  Stack usage: %u bytes (initial ESP=0x%08X, min ESP=0x%08X)\n",
+            g_esp_initial - g_esp, g_esp_initial, g_esp_min);
+    fprintf(stderr, "  Call depth: %u (max: %u)\n", g_call_depth, g_call_depth_max);
     dump_icall_trace();
 
     return EXCEPTION_CONTINUE_SEARCH;
@@ -369,6 +378,40 @@ int main(int argc, char* argv[]) {
     uint32_t cmdline_va = XWA_DATA_END - 0x400;  /* use end of data region as scratch */
     strncpy((char*)ADDR(cmdline_va), cmdLine, 0x3FF);
     ((char*)ADDR(cmdline_va))[0x3FF] = '\0';
+
+    g_esp_initial = g_esp;
+    g_esp_min = g_esp;
+
+    /* Disable VC6 small-block heap (SBH) - route all malloc to HeapAlloc.
+     * We bypassed the CRT startup (_heap_init, __sbh_heap_init) which would
+     * normally initialize the SBH lock table. Without it, _lock(9) tries to
+     * lazily allocate a CRITICAL_SECTION via malloc, which re-enters the SBH
+     * path and creates infinite recursion. Setting __sbh_threshold to 0 forces
+     * _heap_alloc_base to use the HeapAlloc fallback for all sizes. */
+    MEM32(0x60DC1C) = 0;  /* Disable SBH - force HeapAlloc for all sizes */
+
+    /* Initialize CRT heap handle to our process heap */
+    MEM32(0xB0E828) = (uint32_t)(uintptr_t)GetProcessHeap();
+
+    /* Pre-initialize CRT lock table at 0x60B1C8 + locknum*4.
+     * VC6 CRT _lock() lazily allocates CRITICAL_SECTION structs and
+     * recursively calls _lock(0x11) to protect the allocation. Without
+     * pre-initialized locks, this creates infinite recursion.
+     * Lock 0x11 (heap lock) must be initialized first. */
+    {
+        #define CRT_MAX_LOCKS 36
+        static CRITICAL_SECTION crt_locks[CRT_MAX_LOCKS];
+        for (int i = 0; i < CRT_MAX_LOCKS; i++) {
+            InitializeCriticalSection(&crt_locks[i]);
+            MEM32(i * 4 + 0x60B1C8) = (uint32_t)(uintptr_t)&crt_locks[i];
+        }
+        printf("[*] Pre-initialized %d CRT locks\n", CRT_MAX_LOCKS);
+    }
+
+    /* Verify data section loaded correctly */
+    printf("[*] Data check: 0x5FFEEC = \"%s\"\n", (char*)ADDR(0x5FFEEC));
+    printf("[*] Data check: 0x5FFEE4 = \"%s\"\n", (char*)ADDR(0x5FFEE4));
+    printf("[*] Data check: 0x631860 = \"%s\"\n", (char*)ADDR(0x631860));
 
     printf("[*] Launching WinMain (sub_0050A4A0)...\n");
     printf("    hInstance = %p, cmdLine = \"%s\"\n", hInst, cmdLine);
