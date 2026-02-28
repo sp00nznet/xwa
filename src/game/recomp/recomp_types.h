@@ -105,6 +105,22 @@ extern ptrdiff_t g_mem_base;
 #define MEMF(addr)   (*(volatile float    *)ADDR(addr))
 #define MEMD(addr)   (*(volatile double   *)ADDR(addr))
 
+/* ============================================================
+ * FS Segment Access (Thread Environment Block)
+ *
+ * Win32 uses FS:[0] for the SEH chain head and FS:[0x18] for
+ * the linear address of the TEB itself.  We simulate this with
+ * a small array so that CRT SEH setup/teardown works correctly.
+ * ============================================================ */
+
+extern uint32_t g_fs_seg[256];  /* simulated TEB (1 KB) */
+
+#define FS_ADDR(offset)  ((uintptr_t)g_fs_seg + (uint32_t)(offset))
+#define FS_MEM8(offset)  (*(volatile uint8_t  *)FS_ADDR(offset))
+#define FS_MEM16(offset) (*(volatile uint16_t *)FS_ADDR(offset))
+#define FS_MEM32(offset) (*(volatile uint32_t *)FS_ADDR(offset))
+#define FS_MEM64(offset) (*(volatile uint64_t *)FS_ADDR(offset))
+
 /* Set 32-bit values in memory (for rep stosd) */
 static inline void MEMSET32(void* dst, uint32_t val, uint32_t count) {
     uint32_t* p = (uint32_t*)dst;

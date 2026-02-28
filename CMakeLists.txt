@@ -11,6 +11,10 @@ if(MSVC)
     # Disable ASLR - we need fixed address mapping
     add_link_options(/DYNAMICBASE:NO)
 
+    # Move our image base to 0x10000000 so the original game's address
+    # space (0x00300000-0x00B10000) is free for VirtualAlloc mapping
+    add_link_options(/BASE:0x10000000)
+
     # Large native stack (recompiled code creates deep call chains)
     add_link_options(/STACK:8388608)  # 8 MB
 
@@ -37,6 +41,7 @@ endif()
 # Runtime / manually written sources
 set(RUNTIME_SOURCES
     src/game/main.c
+    src/game/imports.c
 )
 
 # Generated recompiled code (if present)

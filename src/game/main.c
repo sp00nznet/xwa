@@ -24,6 +24,9 @@ uint16_t g_seg_fs = 0, g_seg_gs = 0, g_seg_ss = 0;
 /* Memory base offset (0 for fixed-base mapping) */
 ptrdiff_t g_mem_base = 0;
 
+/* Simulated FS segment (Thread Environment Block) */
+uint32_t g_fs_seg[256] = {0};
+
 /* ICALL trace */
 uint32_t g_icall_trace[ICALL_TRACE_SIZE] = {0};
 uint32_t g_icall_trace_idx = 0;
@@ -35,21 +38,24 @@ uint32_t g_icall_count = 0;
  * .text:  0x00401000 - 0x005A8B20  (code, not mapped - we ARE the code)
  * .rdata: 0x005A9000 - 0x005ADA24  (read-only data)
  * .data:  0x005AE000 - 0x00B0F974  (read/write data)
+ *
+ * We map ONE contiguous region from stack base through data end.
+ * This ensures g_mem_base works for both stack and data accesses.
  * ============================================================ */
 
 #define XWA_IMAGE_BASE    0x00400000
 #define XWA_DATA_START    0x005A9000  /* .rdata start */
 #define XWA_DATA_END      0x00B10000  /* end of .data (rounded up) */
-#define XWA_DATA_SIZE     (XWA_DATA_END - XWA_DATA_START)
-
-/* Stack: 4MB at a fixed location below the data sections */
-#define XWA_STACK_BASE    0x00300000
+#define XWA_STACK_BASE    0x00100000  /* simulated stack start */
 #define XWA_STACK_SIZE    0x00100000  /* 1 MB stack */
 #define XWA_STACK_TOP     (XWA_STACK_BASE + XWA_STACK_SIZE)
 
-static HANDLE g_data_mapping = NULL;
-static void*  g_data_view = NULL;
-static void*  g_stack_alloc = NULL;
+/* Entire mapped region: from stack through data end */
+#define XWA_REGION_START  XWA_STACK_BASE
+#define XWA_REGION_END    XWA_DATA_END
+#define XWA_REGION_SIZE   (XWA_REGION_END - XWA_REGION_START)
+
+static void*  g_region_alloc = NULL;
 
 /* ============================================================
  * VEH Crash Handler
@@ -137,8 +143,8 @@ recomp_func_t recomp_lookup_manual(uint32_t va) {
 
 /* Import bridge table (populated during init) */
 #define MAX_IMPORT_BRIDGES 256
-static recomp_dispatch_entry_t g_import_bridges[MAX_IMPORT_BRIDGES];
-static int g_import_bridge_count = 0;
+recomp_dispatch_entry_t g_import_bridges[MAX_IMPORT_BRIDGES];
+int g_import_bridge_count = 0;
 
 recomp_func_t recomp_lookup_import(uint32_t va) {
     for (int i = 0; i < g_import_bridge_count; i++) {
@@ -155,50 +161,112 @@ recomp_func_t recomp_lookup_import(uint32_t va) {
 
 static int setup_memory(const char* data_file) {
     /*
-     * Map the original data sections at their original VAs.
-     * We use VirtualAlloc at fixed addresses since the binary
-     * has no ASLR and uses a fixed image base.
+     * Allocate one contiguous region covering both the simulated stack
+     * and original data sections. A single g_mem_base offset translates
+     * all original VAs to real addresses.
+     *
+     * We try to map at the original addresses first (g_mem_base = 0),
+     * but fall back to wherever the OS gives us.
      */
 
-    /* Allocate the simulated stack */
-    g_stack_alloc = VirtualAlloc(
-        (void*)XWA_STACK_BASE,
-        XWA_STACK_SIZE,
-        MEM_RESERVE | MEM_COMMIT,
-        PAGE_READWRITE
-    );
-    if (!g_stack_alloc) {
-        /* Try without fixed address */
-        g_stack_alloc = VirtualAlloc(NULL, XWA_STACK_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (!g_stack_alloc) {
-            fprintf(stderr, "ERROR: Failed to allocate stack\n");
-            return 0;
+    printf("[*] Allocating %u MB region (0x%08X - 0x%08X)\n",
+           (unsigned)(XWA_REGION_SIZE / (1024*1024)), XWA_REGION_START, XWA_REGION_END);
+
+    /* Debug: check what's at our target addresses */
+    {
+        MEMORY_BASIC_INFORMATION mbi;
+        uintptr_t scan = XWA_REGION_START;
+        printf("[*] Memory map at target range:\n");
+        while (scan < XWA_REGION_END) {
+            if (VirtualQuery((void*)scan, &mbi, sizeof(mbi)) == 0) break;
+            if (mbi.State != MEM_FREE) {
+                printf("    0x%08X-0x%08X: State=0x%lX Type=0x%lX\n",
+                       (uint32_t)scan, (uint32_t)(scan + mbi.RegionSize),
+                       mbi.State, mbi.Type);
+            }
+            scan += mbi.RegionSize;
+            if (mbi.RegionSize == 0) break;
         }
-        fprintf(stderr, "WARNING: Stack allocated at %p (wanted 0x%08X)\n",
-                g_stack_alloc, XWA_STACK_BASE);
     }
 
-    /* Set initial stack pointer to top of stack (minus some alignment) */
-    g_esp = (uint32_t)((uintptr_t)g_stack_alloc + XWA_STACK_SIZE - 16);
+    /* Strategy: The CRT heap often reserves 0x400000-0xBFB000 on Windows 10/11.
+     * Our data sections fall within that range (0x5A9000-0xB10000).
+     * We can COMMIT pages within an existing reservation using just MEM_COMMIT. */
 
-    /* Allocate the data region */
-    g_data_view = VirtualAlloc(
-        (void*)(uintptr_t)XWA_DATA_START,
-        XWA_DATA_SIZE,
+    /* Try 1: Full region at exact addresses */
+    g_region_alloc = VirtualAlloc(
+        (void*)(uintptr_t)XWA_REGION_START,
+        XWA_REGION_SIZE,
         MEM_RESERVE | MEM_COMMIT,
         PAGE_READWRITE
     );
-    if (!g_data_view) {
-        /* Try without fixed address */
-        g_data_view = VirtualAlloc(NULL, XWA_DATA_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-        if (!g_data_view) {
-            fprintf(stderr, "ERROR: Failed to allocate data region\n");
-            return 0;
+    if (g_region_alloc) {
+        g_mem_base = 0;
+        printf("[*] Mapped at original addresses (g_mem_base = 0)\n");
+        goto alloc_done;
+    }
+
+    /* Try 2: Commit pages within existing reservation (data section) */
+    {
+        void* data_try = VirtualAlloc(
+            (void*)(uintptr_t)XWA_DATA_START,
+            XWA_DATA_END - XWA_DATA_START,
+            MEM_COMMIT,  /* just commit, don't reserve */
+            PAGE_READWRITE
+        );
+        if (data_try == (void*)(uintptr_t)XWA_DATA_START) {
+            printf("[*] Data committed at original VA 0x%08X (within existing reservation)\n",
+                   XWA_DATA_START);
+            g_mem_base = 0;
+            g_region_alloc = data_try;
+
+            /* Stack: also try to commit at original address, else use real address */
+            void* stack_try = VirtualAlloc(
+                (void*)(uintptr_t)XWA_STACK_BASE, XWA_STACK_SIZE,
+                MEM_COMMIT, PAGE_READWRITE);
+            if (!stack_try) {
+                stack_try = VirtualAlloc(
+                    (void*)(uintptr_t)XWA_STACK_BASE, XWA_STACK_SIZE,
+                    MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            }
+            if (stack_try == (void*)(uintptr_t)XWA_STACK_BASE) {
+                printf("[*] Stack committed at original VA 0x%08X\n", XWA_STACK_BASE);
+            } else {
+                /* Stack at different address - use REAL address for ESP */
+                if (!stack_try) {
+                    stack_try = VirtualAlloc(NULL, XWA_STACK_SIZE,
+                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                }
+                if (!stack_try) {
+                    fprintf(stderr, "ERROR: Failed to allocate stack\n");
+                    return 0;
+                }
+                /* With g_mem_base=0, ESP must be real address since MEM32 won't translate */
+                g_esp = (uint32_t)((uintptr_t)stack_try + XWA_STACK_SIZE - 16);
+                printf("[*] Stack at %p (real addr, ESP=0x%08X)\n", stack_try, g_esp);
+            }
+            goto alloc_done;
         }
-        /* Calculate offset for non-fixed mapping */
-        g_mem_base = (ptrdiff_t)((uintptr_t)g_data_view - XWA_DATA_START);
-        fprintf(stderr, "WARNING: Data mapped at %p (wanted 0x%08X), offset=%lld\n",
-                g_data_view, XWA_DATA_START, (long long)g_mem_base);
+    }
+
+    /* Try 3: Complete fallback - let OS pick */
+    printf("[*] Fixed allocation failed, using OS-picked address...\n");
+    g_region_alloc = VirtualAlloc(NULL, XWA_REGION_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (!g_region_alloc) {
+        fprintf(stderr, "ERROR: Failed to allocate %u MB region\n",
+                (unsigned)(XWA_REGION_SIZE / (1024*1024)));
+        return 0;
+    }
+    g_mem_base = (ptrdiff_t)((uintptr_t)g_region_alloc - XWA_REGION_START);
+    printf("[*] Region at %p (offset %lld from original)\n",
+           g_region_alloc, (long long)g_mem_base);
+
+alloc_done:
+
+memory_ready:
+    /* Set initial stack pointer (as a VIRTUAL address, translated via ADDR) */
+    if (g_esp == 0) {
+        g_esp = XWA_STACK_TOP - 16;
     }
 
     /* Load .rdata and .data sections from the original binary */
@@ -228,13 +296,9 @@ static int setup_memory(const char* data_file) {
 }
 
 static void cleanup_memory(void) {
-    if (g_data_view) {
-        VirtualFree(g_data_view, 0, MEM_RELEASE);
-        g_data_view = NULL;
-    }
-    if (g_stack_alloc) {
-        VirtualFree(g_stack_alloc, 0, MEM_RELEASE);
-        g_stack_alloc = NULL;
+    if (g_region_alloc) {
+        VirtualFree(g_region_alloc, 0, MEM_RELEASE);
+        g_region_alloc = NULL;
     }
 }
 
@@ -242,8 +306,12 @@ static void cleanup_memory(void) {
  * Entry Point
  * ============================================================ */
 
-/* Forward declaration of the recompiled WinMain / game entry */
-extern void sub_004D7810(void);  /* Placeholder - real entry point TBD from analysis */
+/* Forward declaration of the recompiled game entry points */
+extern void sub_0050A4A0(void);  /* WinMain */
+extern void sub_0059CD60(void);  /* CRT startup (calls WinMain internally) */
+
+/* Import bridge registration (generated by gen_bridges.py) */
+extern void register_import_bridges(void);
 
 int main(int argc, char* argv[]) {
     printf("=== X-Wing Alliance Static Recompilation ===\n");
@@ -265,19 +333,56 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     printf("[*] Memory layout initialized\n");
-    printf("    Stack:  %p - %p (ESP = 0x%08X)\n",
-           g_stack_alloc, (char*)g_stack_alloc + XWA_STACK_SIZE, g_esp);
-    printf("    Data:   %p (0x%08X - 0x%08X)\n",
-           g_data_view, XWA_DATA_START, XWA_DATA_END);
+    printf("    Region: %p (VA 0x%08X - 0x%08X)\n",
+           g_region_alloc, XWA_REGION_START, XWA_REGION_END);
+    printf("    Stack:  VA 0x%08X - 0x%08X (ESP = 0x%08X)\n",
+           XWA_STACK_BASE, XWA_STACK_TOP, g_esp);
+    printf("    Data:   VA 0x%08X - 0x%08X\n", XWA_DATA_START, XWA_DATA_END);
     printf("    Offset: %lld\n", (long long)g_mem_base);
+
+    /* Register import bridges (maps IAT slots to bridge functions) */
+    register_import_bridges();
 
     printf("\n[*] XWA recomp infrastructure ready.\n");
     printf("[*] Dispatch table: %u functions\n", recomp_dispatch_count);
-    printf("[*] To run game: pass path to xwingalliance.exe as argument\n");
 
-    /* TODO: Once imports are bridged and entry point identified:
-     *   sub_XXXXXXXX();  // Call recompiled WinMain
+    if (!data_file) {
+        printf("[*] To run game: pass path to xwingalliance.exe as argument\n");
+        cleanup_memory();
+        return 0;
+    }
+
+    /*
+     * Call WinMain directly, bypassing the original CRT startup.
+     * The VC6 CRT startup (sub_0059CD60) initializes the C runtime heap,
+     * stdio, SEH, etc. - but those are already provided by our real CRT.
+     * The original CRT's heap metadata in .data points to addresses that
+     * don't exist in our process, causing crashes.
+     *
+     * WinMain(hInstance, hPrevInstance=NULL, lpCmdLine, nCmdShow=SW_SHOWDEFAULT)
+     * Args pushed right-to-left on simulated stack.
      */
+    HINSTANCE hInst = GetModuleHandleA(NULL);
+    LPSTR cmdLine = GetCommandLineA();
+
+    /* Store command line string in mapped memory so game code can access it */
+    uint32_t cmdline_va = XWA_DATA_END - 0x400;  /* use end of data region as scratch */
+    strncpy((char*)ADDR(cmdline_va), cmdLine, 0x3FF);
+    ((char*)ADDR(cmdline_va))[0x3FF] = '\0';
+
+    printf("[*] Launching WinMain (sub_0050A4A0)...\n");
+    printf("    hInstance = %p, cmdLine = \"%s\"\n", hInst, cmdLine);
+    fflush(stdout);
+
+    /* Push WinMain args: nCmdShow, lpCmdLine, hPrevInstance, hInstance, return addr */
+    PUSH32(g_esp, 0x0Au);              /* nCmdShow = SW_SHOWDEFAULT */
+    PUSH32(g_esp, cmdline_va);         /* lpCmdLine (VA in mapped memory) */
+    PUSH32(g_esp, 0);                  /* hPrevInstance = NULL */
+    PUSH32(g_esp, (uint32_t)(uintptr_t)hInst);  /* hInstance */
+    PUSH32(g_esp, 0xDEAD0000u);        /* dummy return address */
+    sub_0050A4A0();
+
+    printf("[*] WinMain returned (eax = 0x%08X)\n", g_eax);
 
     cleanup_memory();
     return 0;

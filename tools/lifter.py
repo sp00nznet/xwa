@@ -85,8 +85,8 @@ def reg_name(reg_id: int) -> str:
     if 224 <= reg_id <= 231:
         return f"_st[{reg_id - 224}]"
     # Segment registers (flat mode - effectively no-ops)
-    # CS=11, DS=17, ES=28, FS=29, GS=30, SS=49
-    seg_names = {11: '_seg_cs', 17: '_seg_ds', 28: '_seg_es', 29: '_seg_fs', 30: '_seg_gs', 49: '_seg_ss'}
+    # CS=11, DS=17, ES=28, FS=32, GS=33, SS=49
+    seg_names = {11: '_seg_cs', 17: '_seg_ds', 28: '_seg_es', 32: '_seg_fs', 33: '_seg_gs', 49: '_seg_ss'}
     if reg_id in seg_names:
         return seg_names[reg_id]
     return f"0 /* unknown reg {reg_id} */"
@@ -160,7 +160,7 @@ class Lifter:
             if 224 <= r <= 231:
                 return f"_st[{r - 224}] = {value}"
             # Segment registers - no-op in flat mode
-            if r in (11, 17, 28, 29, 30, 49):
+            if r in (11, 17, 28, 32, 33, 49):
                 return f"(void)({value}) /* seg reg write */"
             return f"(void)({value}) /* unknown reg {r} */"
         elif op.type == X86_OP_MEM:
@@ -187,31 +187,40 @@ class Lifter:
             parts.append("0")
         return ' + '.join(parts)
 
+    def _mem_prefix(self, mem) -> str:
+        """Return macro prefix based on segment override (FS -> FS_MEM, else MEM)."""
+        # FS segment override: Capstone reg ID 32 (X86_REG_FS)
+        if mem.segment == 32:
+            return "FS_MEM"
+        return "MEM"
+
     def _fmt_mem_read(self, mem, size: int) -> str:
         """Format a memory read."""
         addr = self._fmt_mem_addr(mem)
+        pfx = self._mem_prefix(mem)
         if size == 1:
-            return f"MEM8({addr})"
+            return f"{pfx}8({addr})"
         elif size == 2:
-            return f"MEM16({addr})"
+            return f"{pfx}16({addr})"
         elif size == 4:
-            return f"MEM32({addr})"
+            return f"{pfx}32({addr})"
         elif size == 8:
-            return f"MEM64({addr})"
-        return f"MEM32({addr})"
+            return f"{pfx}64({addr})"
+        return f"{pfx}32({addr})"
 
     def _fmt_mem_write(self, mem, size: int, value: str) -> str:
         """Format a memory write."""
         addr = self._fmt_mem_addr(mem)
+        pfx = self._mem_prefix(mem)
         if size == 1:
-            return f"MEM8({addr}) = (uint8_t)({value})"
+            return f"{pfx}8({addr}) = (uint8_t)({value})"
         elif size == 2:
-            return f"MEM16({addr}) = (uint16_t)({value})"
+            return f"{pfx}16({addr}) = (uint16_t)({value})"
         elif size == 4:
-            return f"MEM32({addr}) = {value}"
+            return f"{pfx}32({addr}) = {value}"
         elif size == 8:
-            return f"MEM64({addr}) = {value}"
-        return f"MEM32({addr}) = {value}"
+            return f"{pfx}64({addr}) = {value}"
+        return f"{pfx}32({addr}) = {value}"
 
     def _fmt_lea(self, mem) -> str:
         """Format LEA (just the address calculation, no memory access)."""
@@ -622,12 +631,12 @@ class Lifter:
         elif m == 'ret' or m == 'retn':
             if ops and ops[0].type == X86_OP_IMM:
                 n = ops[0].imm
-                lines.append(f"esp += {n}; return; {comment}")
+                lines.append(f"esp += {4 + n}; return; {comment}")
             else:
-                lines.append(f"return; {comment}")
+                lines.append(f"esp += 4; return; {comment}")
 
         elif m == 'retf':
-            lines.append(f"return; /* far return */ {comment}")
+            lines.append(f"esp += 8; return; /* far return */ {comment}")
 
         elif m == 'jmp':
             target = insn.get_branch_target()
@@ -683,10 +692,11 @@ class Lifter:
             if ops:
                 if ops[0].type == X86_OP_MEM:
                     addr = self._fmt_mem_addr(ops[0].mem)
+                    addr_macro = "FS_ADDR" if ops[0].mem.segment == 32 else "ADDR"
                     if ops[0].size == 4:
-                        lines.append(f"{{ float _v = (float)fp_pop(); *(float*)ADDR({addr}) = _v; }} {comment}")
+                        lines.append(f"{{ float _v = (float)fp_pop(); *(float*){addr_macro}({addr}) = _v; }} {comment}")
                     elif ops[0].size == 8:
-                        lines.append(f"{{ double _v = fp_pop(); *(double*)ADDR({addr}) = _v; }} {comment}")
+                        lines.append(f"{{ double _v = fp_pop(); *(double*){addr_macro}({addr}) = _v; }} {comment}")
                     else:
                         lines.append(f"fp_pop(); /* fstp size={ops[0].size} */ {comment}")
                 else:
@@ -695,10 +705,11 @@ class Lifter:
         elif m == 'fst':
             if ops and ops[0].type == X86_OP_MEM:
                 addr = self._fmt_mem_addr(ops[0].mem)
+                addr_macro = "FS_ADDR" if ops[0].mem.segment == 32 else "ADDR"
                 if ops[0].size == 4:
-                    lines.append(f"{{ float _v = (float)_st[0]; *(float*)ADDR({addr}) = _v; }} {comment}")
+                    lines.append(f"{{ float _v = (float)_st[0]; *(float*){addr_macro}({addr}) = _v; }} {comment}")
                 elif ops[0].size == 8:
-                    lines.append(f"*(double*)ADDR({addr}) = _st[0]; {comment}")
+                    lines.append(f"*(double*){addr_macro}({addr}) = _st[0]; {comment}")
 
         elif m == 'fistp':
             if ops and ops[0].type == X86_OP_MEM:
