@@ -283,16 +283,19 @@ memory_ready:
         FILE* f = fopen(data_file, "rb");
         if (f) {
             /*
-             * .rdata: file offset 0x001A8200, VA 0x005A9000, size 0x4A24
-             * .data:  file offset 0x001AC800, VA 0x005AE000, size 0x561974
+             * Section offsets from PE section headers:
+             * .rdata: file offset 0x001A8000, VA 0x005A9000, VSize 0x4A24, RawSize 0x4C00
+             * .data:  file offset 0x001ACC00, VA 0x005AE000, VSize 0x561974, RawSize 0x60600
+             * BSS (zero-initialized) portion of .data is VSize - RawSize = 0x501374 bytes,
+             * which is already zeroed by VirtualAlloc. Only read the on-disk RawSize.
              */
-            /* Read .rdata */
-            fseek(f, 0x001A8200, SEEK_SET);
+            /* Read .rdata (VSize) */
+            fseek(f, 0x001A8000, SEEK_SET);
             fread((void*)ADDR(0x005A9000), 1, 0x4A24, f);
 
-            /* Read .data */
-            fseek(f, 0x001AC800, SEEK_SET);
-            fread((void*)ADDR(0x005AE000), 1, 0x561974, f);
+            /* Read .data (RawSize only; rest is BSS, already zero from VirtualAlloc) */
+            fseek(f, 0x001ACC00, SEEK_SET);
+            fread((void*)ADDR(0x005AE000), 1, 0x60600, f);
 
             fclose(f);
             printf("[*] Loaded data sections from %s\n", data_file);
