@@ -105,13 +105,17 @@ def is_8bit_hi(reg_id: int) -> bool:
 class Lifter:
     """Lifts x86 instructions to C code using a global register model."""
 
-    def __init__(self, iat_map: dict = None, func_names: dict = None):
+    def __init__(self, iat_map: dict = None, func_names: dict = None,
+                 code_start: int = 0x00401000, code_end: int = 0x005A8B20):
         """
         iat_map: VA -> (dll, func_name) for import resolution
         func_names: VA -> name for known function names
+        code_start/code_end: valid code section boundaries
         """
         self.iat_map = iat_map or {}
         self.func_names = func_names or {}
+        self.code_start = code_start
+        self.code_end = code_end
         self._flag_state = None  # (setter_mnemonic, operands_str)
         self._fp_depth = 0  # FPU stack depth tracking
 
@@ -264,6 +268,23 @@ class Lifter:
             if cmp_macro in ('CMP_B', 'CMP_AE'):  # jb/jae test CF
                 return f"BT_CF({ops})"
             return f"/* bt */ {cmp_macro}({ops})"
+        elif setter == 'fcom':
+            # FPU comparison: _fpu_cmp is -1 (less), 0 (equal), 1 (greater)
+            # After fcomp+fnstsw+sahf, CF=C0(less), ZF=C3(equal)
+            FCOM_COND = {
+                'CMP_EQ': '_fpu_cmp == 0', 'CMP_NE': '_fpu_cmp != 0',
+                'CMP_B': '_fpu_cmp < 0', 'CMP_AE': '_fpu_cmp >= 0',
+                'CMP_A': '_fpu_cmp > 0', 'CMP_BE': '_fpu_cmp <= 0',
+                'CMP_L': '_fpu_cmp < 0', 'CMP_GE': '_fpu_cmp >= 0',
+                'CMP_G': '_fpu_cmp > 0', 'CMP_LE': '_fpu_cmp <= 0',
+                'CMP_S': '_fpu_cmp < 0', 'CMP_NS': '_fpu_cmp >= 0',
+                'TEST_Z': '_fpu_cmp == 0', 'TEST_NZ': '_fpu_cmp != 0',
+            }
+            if cmp_macro in FCOM_COND:
+                return f"({FCOM_COND[cmp_macro]})"
+            if test_macro and test_macro in FCOM_COND:
+                return f"({FCOM_COND[test_macro]})"
+            return f"/* fcom */ ({ops} == 0)"
         else:
             return f"/* flag from {setter} */ {cmp_macro}({ops})"
 
@@ -326,11 +347,12 @@ class Lifter:
 
         elif m == 'pop':
             if len(ops) == 1:
-                lines.append(f"POP32(esp, {self._fmt_read(ops[0])}); {comment}")
-                # For pop to register, need assignment form
                 if ops[0].type == X86_OP_REG:
                     r = reg_name(ops[0].reg)
-                    lines[-1] = f"{r} = POP32_VAL(esp); {comment}"
+                    lines.append(f"{r} = POP32_VAL(esp); {comment}")
+                else:
+                    # Memory destination
+                    lines.append(f"{self._fmt_write(ops[0], 'POP32_VAL(esp)')}; {comment}")
 
         elif m == 'pushad':
             lines.append(f"PUSHAD(); {comment}")
@@ -581,8 +603,11 @@ class Lifter:
                     lines.append(f"RECOMP_ICALL(0x{target:08X}u); {comment}")
                 elif target in self.func_names:
                     lines.append(f"RECOMP_CALL(recomp_{self.func_names[target]}); {comment}")
-                else:
+                elif self.code_start <= target < self.code_end:
                     lines.append(f"RECOMP_CALL(sub_{target:08X}); {comment}")
+                else:
+                    # Target outside code section - use dispatch
+                    lines.append(f"RECOMP_ICALL(0x{target:08X}u); {comment}")
             else:
                 # Indirect call
                 if ops and ops[0].type == X86_OP_MEM:

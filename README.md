@@ -9,8 +9,8 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 0** | **Complete** | Binary analysis, PE parsing, section mapping |
 | **Phase 1** | **Complete** | SafeDisc decryption, memory dump from runtime |
 | **Phase 2** | **Complete** | Function discovery (2,674 functions, 443,224 instructions) |
-| **Phase 3** | **Complete** | x86-to-C code generation (2,701 functions, 631,944 lines of C) |
-| Phase 4 | Pending | Compilation, stub resolution, crash-debug-fix loop |
+| **Phase 3** | **Complete** | x86-to-C code generation (2,701 functions, 606,424 lines of C) |
+| **Phase 4** | **Complete** | Compilation and linking (0 errors, 1 warning) |
 | Phase 5 | Pending | Win32/DirectX HAL (D3D11 rendering, DirectSound, DirectInput) |
 | Phase 6 | Pending | Game loop execution, import bridging |
 
@@ -33,11 +33,13 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | Metric | Value |
 |--------|-------|
 | Functions recompiled | 2,701 |
-| Total lines of C | 631,944 |
-| Generated code size | 34.5 MB |
+| Total lines of C | 606,424 |
+| Generated code size | 33.4 MB |
 | Source files | 6 + header + dispatch table |
-| Code generation time | 7.4 seconds |
-| Errors | 0 |
+| Code generation time | ~7 seconds |
+| Compilation errors | 0 |
+| Link errors | 0 |
+| Warnings | 1 (harmless shift count) |
 
 ### DirectX API Surface
 
@@ -78,7 +80,8 @@ xwa-recomp/
 │   ├── pe_analyze.py           # PE header/section/import parser
 │   ├── disasm.py               # Capstone-based x86 disassembler + function finder
 │   ├── lifter.py               # x86 instruction → C code lifter
-│   ├── translator.py           # Full pipeline orchestrator + code generator
+│   ├── generate.py             # Linear sweep code generator (fast)
+│   ├── translator.py           # Full pipeline orchestrator (legacy)
 │   └── dump_memory.py          # SafeDisc runtime decryption dumper
 ├── src/
 │   └── game/

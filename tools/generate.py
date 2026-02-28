@@ -7,6 +7,7 @@ sweep through the entire code section and splits by known function boundaries.
 
 import sys
 import os
+import re
 import time
 import json
 import struct
@@ -148,7 +149,31 @@ def lift_function_linear(lifter, name, instructions, leaders, func_start):
         lines.append('    return; /* end of function */')
 
     lines.append('}')
-    return '\n'.join(lines)
+
+    # Post-process: convert out-of-bounds gotos to RECOMP_ITAIL
+    # Collect all defined labels in this function
+    defined_labels = set()
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('L_') and stripped.endswith(':'):
+            defined_labels.add(stripped[:-1])  # remove trailing ':'
+        # Also handle "L_XXXXXXXX:" with a following semicolon-label
+        m_label = re.match(r'^(L_[0-9A-Fa-f]{8}):', stripped)
+        if m_label:
+            defined_labels.add(m_label.group(1))
+
+    # Replace goto to undefined labels with RECOMP_ITAIL using re.sub
+    def replace_goto(m):
+        label = m.group(1)
+        va_hex = m.group(2)
+        if label not in defined_labels:
+            return f'{{ RECOMP_ITAIL(0x{va_hex}u); return; }}'
+        return m.group(0)
+
+    goto_re = re.compile(r'goto (L_([0-9A-Fa-f]{8}));')
+    fixed_lines = [goto_re.sub(replace_goto, line) for line in lines]
+
+    return '\n'.join(fixed_lines)
 
 
 def write_chunk(output_dir, file_idx, funcs):
@@ -201,7 +226,7 @@ def main():
     print('[*] Phase 2: Disassembling and lifting...', flush=True)
     md = Cs(CS_ARCH_X86, CS_MODE_32)
     md.detail = True
-    lifter = Lifter(iat_map=iat_map)
+    lifter = Lifter(iat_map=iat_map, code_start=code_start, code_end=code_end)
 
     all_entries = []
     func_stats = []
