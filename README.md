@@ -11,8 +11,38 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 2** | **Complete** | Function discovery (2,674 functions, 443,224 instructions) |
 | **Phase 3** | **Complete** | x86-to-C code generation (2,701 functions, 606,424 lines of C) |
 | **Phase 4** | **Complete** | Compilation and linking (0 errors, 1 warning) |
-| Phase 5 | Pending | Win32/DirectX HAL (D3D11 rendering, DirectSound, DirectInput) |
-| Phase 6 | Pending | Game loop execution, import bridging |
+| **Phase 5** | **In Progress** | Runtime execution — CRT init, import bridging, game startup |
+| Phase 6 | Pending | Win32/DirectX HAL (D3D11 rendering, DirectSound, DirectInput) |
+
+### Runtime Progress
+
+The recompiled binary boots through the VC6 CRT startup, initializes the game engine, and begins loading game assets:
+
+- **15,540+ function calls** executed successfully (5,294 indirect calls dispatched)
+- **VC6 CRT initialization**: heap, locks, stdio, atexit all functional
+- **39 .dat resource files** opened and loaded (BATTLE1.DAT through WAVE1.DAT)
+- **strings.txt** parsed line-by-line for localization data
+- **179 Win32 API imports** bridged (KERNEL32, USER32, GDI32, WINMM, etc.)
+- **SafeDisc stubs** reconstructed for 4 encrypted functions + 2 jump tables
+- Currently blocked on: game initialization expects DirectX/window setup
+
+### Fixes Applied During Runtime Bringup
+
+| # | Fix | Impact |
+|---|-----|--------|
+| 1 | SafeDisc function stubs (4 encrypted functions) | Bypass copy protection checks |
+| 2 | SafeDisc jump table reconstruction (2 switch statements) | Correct control flow in CRT |
+| 3 | Null function pointer guard (ICALL(0) → no-op) | Prevent crash on null callback |
+| 4 | Retry/fail dialog stub (sub_00433C50 → returns 'F') | Avoid infinite retry loop |
+| 5 | SBH (small block heap) disabled, heap handle set | Use system heap instead of VC6 SBH |
+| 6 | 36 CRT lock objects pre-initialized | Multi-threaded CRT support |
+| 7 | `_initstdio` manual implementation | stdin/stdout/stderr FILE structs |
+| 8 | VEH crash handler with ring buffer trace | Diagnostics for runtime crashes |
+| 9 | `TEST x,x; jge` codegen fix (1,122 instances) | Correct signed-negative checks |
+| 10 | `repne scasb` / `repe cmpsb` codegen fix (961 instances) | Correct string operations |
+| 11 | `TEST x,x; jbe` codegen fix (208 instances) | Correct unsigned flag checks |
+| 12 | OutputDebugStringA tracing | Capture game debug messages |
+| 13 | Watchdog uses TerminateProcess (avoids loader lock) | Clean shutdown on hang |
 
 ## Binary Analysis
 
@@ -82,10 +112,13 @@ xwa-recomp/
 │   ├── lifter.py               # x86 instruction → C code lifter
 │   ├── generate.py             # Linear sweep code generator (fast)
 │   ├── translator.py           # Full pipeline orchestrator (legacy)
-│   └── dump_memory.py          # SafeDisc runtime decryption dumper
+│   ├── dump_memory.py          # SafeDisc runtime decryption dumper
+│   ├── fix_test_cond.py        # Fix TEST codegen bug (same-register CMP → TEST_NS/G/LE)
+│   └── regen_0000.py           # Targeted regeneration of recomp_0000.c + dispatch/header
 ├── src/
 │   └── game/
 │       ├── main.c              # Entry point, VEH handler, memory setup
+│       ├── imports.c           # Win32/DirectX import bridges (179 functions)
 │       └── recomp/
 │           ├── recomp_types.h  # Register model, memory macros, dispatch
 │           └── gen/            # Auto-generated code (gitignored)

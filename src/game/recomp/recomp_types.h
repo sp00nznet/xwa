@@ -195,6 +195,8 @@ static inline uint32_t _pop32(uint32_t* sp) {
 #define TEST_NZ(a, b)  (((uint32_t)(a) & (uint32_t)(b)) != 0)
 #define TEST_S(a, b)   ((int32_t)((uint32_t)(a) & (uint32_t)(b)) < 0)
 #define TEST_NS(a, b)  ((int32_t)((uint32_t)(a) & (uint32_t)(b)) >= 0)
+#define TEST_G(a, b)   ((int32_t)((uint32_t)(a) & (uint32_t)(b)) > 0)     /* test+jg:  positive (>0) */
+#define TEST_LE(a, b)  ((int32_t)((uint32_t)(a) & (uint32_t)(b)) <= 0)    /* test+jle: non-positive (<=0) */
 
 /* Bit test (from bt) */
 #define BT_CF(base, bit) (((uint32_t)(base) >> ((uint32_t)(bit) & 31)) & 1)
@@ -263,13 +265,32 @@ extern uint32_t g_call_depth_max;
 recomp_func_t recomp_lookup(uint32_t va);          /* binary search in dispatch table */
 recomp_func_t recomp_lookup_manual(uint32_t va);    /* manual overrides */
 recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
+int recomp_native_call(uint32_t va);                /* dynamically resolved native functions */
+void recomp_register_native(uint32_t addr, const char* name, int nargs);
+
+/* Total call counter for hang detection */
+extern uint32_t g_total_calls;
+extern uint32_t g_total_icalls;
+
+/* Trace ring buffer (dumped on hang/exit) */
+#define TRACE_RING_SIZE 512
+#define TRACE_ENTRY_SIZE 128
+extern char g_trace_ring[TRACE_RING_SIZE][TRACE_ENTRY_SIZE];
+extern uint32_t g_trace_ring_idx;
+#define TRACE_LOG(...) do { \
+    snprintf(g_trace_ring[g_trace_ring_idx & (TRACE_RING_SIZE-1)], TRACE_ENTRY_SIZE, __VA_ARGS__); \
+    g_trace_ring_idx++; \
+} while(0)
 
 /* Direct call to a known recompiled function */
 #define RECOMP_CALL(func) do { \
     PUSH32(esp, 0xDEAD0000u); /* dummy return address */ \
     g_call_depth++; \
+    g_total_calls++; \
     if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
+    TRACE_LOG("[CALL %u d%u] -> %s\n", g_total_calls, g_call_depth, #func); \
     func(); \
+    TRACE_LOG("[RET  %u d%u] <- %s\n", g_total_calls, g_call_depth, #func); \
     g_call_depth--; \
 } while(0)
 
@@ -279,6 +300,7 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
+    g_total_icalls++; \
     recomp_func_t _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_import(_va); \
@@ -286,11 +308,19 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
         PUSH32(esp, 0xDEAD0000u); \
         g_call_depth++; \
         if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
+        TRACE_LOG("[ICALL %u d%u] -> 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         _fn(); \
+        TRACE_LOG("[IRET  %u d%u] <- 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         g_call_depth--; \
     } else { \
-        fprintf(stderr, "ICALL: unresolved VA 0x%08X\n", _va); \
-        eax = 0; \
+        PUSH32(esp, 0xDEAD0000u); \
+        TRACE_LOG("[ICALL %u d%u] -> native 0x%08X\n", g_total_icalls, g_call_depth, _va); \
+        if (!recomp_native_call(_va)) { \
+            esp += 4; /* undo push */ \
+            TRACE_LOG("ICALL: unresolved VA 0x%08X\n", _va); \
+            fprintf(stderr, "!!! UNRESOLVED ICALL: VA 0x%08X (call #%u, icall #%u)\n", _va, g_total_calls, g_total_icalls); \
+            eax = 0; \
+        } \
     } \
 } while(0)
 
@@ -300,15 +330,20 @@ recomp_func_t recomp_lookup_import(uint32_t va);    /* import bridges */
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
+    g_total_icalls++; \
     recomp_func_t _fn = recomp_lookup_manual(_va); \
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_import(_va); \
     if (_fn) { \
         g_call_depth++; \
         if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
+        TRACE_LOG("[ITAIL %u d%u] -> 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         _fn(); \
         g_call_depth--; \
-    } else { fprintf(stderr, "ITAIL: unresolved VA 0x%08X\n", _va); } \
+    } else if (!recomp_native_call(_va)) { \
+        TRACE_LOG("ITAIL: unresolved VA 0x%08X\n", _va); \
+        fprintf(stderr, "!!! UNRESOLVED ITAIL: VA 0x%08X (call #%u, icall #%u)\n", _va, g_total_calls, g_total_icalls); \
+    } \
 } while(0)
 
 /* Stub macro for unimplemented imports */

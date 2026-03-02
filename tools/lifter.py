@@ -48,14 +48,14 @@ COND_MAP = {
     'jz':   ('CMP_EQ',  'TEST_Z',  'equal / zero'),
     'jne':  ('CMP_NE',  'TEST_NZ', 'not equal / not zero'),
     'jnz':  ('CMP_NE',  'TEST_NZ', 'not equal / not zero'),
-    'ja':   ('CMP_A',   None,      'above (unsigned >)'),
-    'jae':  ('CMP_AE',  None,      'above or equal (unsigned >=)'),
-    'jb':   ('CMP_B',   None,      'below (unsigned <)'),
-    'jbe':  ('CMP_BE',  None,      'below or equal (unsigned <=)'),
-    'jg':   ('CMP_G',   None,      'greater (signed >)'),
-    'jge':  ('CMP_GE',  None,      'greater or equal (signed >=)'),
+    'ja':   ('CMP_A',   'TEST_NZ', 'above (unsigned >)'),        # TEST clears CF, so JA=CF=0&&ZF=0 => ZF=0
+    'jae':  ('CMP_AE',  None,      'above or equal (unsigned >=)'), # TEST clears CF, so JAE=CF=0 => always true
+    'jb':   ('CMP_B',   None,      'below (unsigned <)'),           # TEST clears CF, so JB=CF=1 => always false
+    'jbe':  ('CMP_BE',  'TEST_Z',  'below or equal (unsigned <=)'), # TEST clears CF, so JBE=CF=1||ZF=1 => ZF=1
+    'jg':   ('CMP_G',   'TEST_G',  'greater (signed >)'),           # TEST clears OF, so JG=ZF=0&&SF=OF => ZF=0&&SF=0 => positive
+    'jge':  ('CMP_GE',  'TEST_NS', 'greater or equal (signed >=)'),  # TEST clears OF, so JGE=SF=OF => SF=0 => non-negative
     'jl':   ('CMP_L',   'TEST_S',  'less (signed <)'),
-    'jle':  ('CMP_LE',  None,      'less or equal (signed <=)'),
+    'jle':  ('CMP_LE',  'TEST_LE', 'less or equal (signed <=)'),     # TEST clears OF, so JLE=ZF=1||SF!=OF => ZF=1||SF=1 => non-positive
     'js':   ('CMP_S',   'TEST_S',  'sign (negative)'),
     'jns':  ('CMP_NS',  'TEST_NS', 'not sign (positive)'),
     'jo':   ('CMP_O',   None,      'overflow'),
@@ -260,15 +260,24 @@ class Lifter:
             if test_macro:
                 return f"{test_macro}({ops})"
             else:
-                # Fall back to cmp-style for conditions that test doesn't directly support
+                # TEST clears CF and OF. Conditions depending on CF need special handling:
+                if cmp_macro == 'CMP_AE':  # JAE (CF=0) after TEST => always true
+                    return f"(1) /* TEST+JAE: always true */"
+                elif cmp_macro == 'CMP_B':  # JB (CF=1) after TEST => always false
+                    return f"(0) /* TEST+JB: always false */"
+                # For other conditions without test_macro, fall back to cmp-style
                 return f"{cmp_macro}({ops})"
         elif setter in ('sub', 'add'):
             # Result-based condition
             return f"/* {setter} result */ {cmp_macro}({ops})"
         elif setter in ('and', 'or', 'xor'):
-            # Logical ops clear CF, set ZF/SF based on result
+            # Logical ops clear CF and OF, set ZF/SF based on result (same as TEST)
             if test_macro:
                 return f"/* {setter} result */ {test_macro}({ops})"
+            if cmp_macro == 'CMP_AE':  # JAE (CF=0) after logical op => always true
+                return f"(1) /* {setter}+JAE: always true */"
+            elif cmp_macro == 'CMP_B':  # JB (CF=1) after logical op => always false
+                return f"(0) /* {setter}+JB: always false */"
             return f"/* {setter} result */ {cmp_macro}({ops})"
         elif setter in ('dec', 'inc'):
             return f"/* {setter} result */ {cmp_macro}({ops})"
@@ -596,10 +605,12 @@ class Lifter:
             self._flag_state = ('cmp', f"LO8(eax), MEM8(edi)")
 
         elif m in ('repne scasb', 'repnz scasb'):
-            lines.append(f"{{ while (ecx && LO8(eax) != MEM8(edi)) {{ edi += _df; ecx--; }} }} {comment}")
+            # x86: compare THEN advance, but advance happens even on the terminating iteration
+            lines.append(f"{{ while (ecx) {{ int _m = (LO8(eax) == MEM8(edi)); edi += _df; ecx--; if (_m) break; }} }} {comment}")
 
         elif m in ('repe cmpsb', 'repz cmpsb'):
-            lines.append(f"{{ while (ecx && MEM8(esi) == MEM8(edi)) {{ esi += _df; edi += _df; ecx--; }} }} {comment}")
+            # x86: compare THEN advance, but advance happens even on the terminating iteration
+            lines.append(f"{{ while (ecx) {{ int _m = (MEM8(esi) != MEM8(edi)); esi += _df; edi += _df; ecx--; if (_m) break; }} }} {comment}")
 
         # --- Control Flow ---
         elif m == 'call':
