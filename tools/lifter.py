@@ -403,13 +403,19 @@ class Lifter:
             if len(ops) == 1:
                 a = self._fmt_read(ops[0])
                 lines.append(f"{self._fmt_write(ops[0], f'{a} + 1')}; {comment}")
-                self._flag_state = ('inc', f"{a}, 1")
+                # Flags are set based on the RESULT (post-increment value).
+                # By the time the condition is evaluated in C, the register already
+                # holds the result, so compare against 0 (not 1).
+                self._flag_state = ('inc', f"{a}, 0")
 
         elif m == 'dec':
             if len(ops) == 1:
                 a = self._fmt_read(ops[0])
                 lines.append(f"{self._fmt_write(ops[0], f'{a} - 1')}; {comment}")
-                self._flag_state = ('dec', f"{a}, 1")
+                # Flags are set based on the RESULT (post-decrement value).
+                # By the time the condition is evaluated in C, the register already
+                # holds the result, so compare against 0 (not 1).
+                self._flag_state = ('dec', f"{a}, 0")
 
         elif m == 'neg':
             if len(ops) == 1:

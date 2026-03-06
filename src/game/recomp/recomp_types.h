@@ -272,6 +272,11 @@ void recomp_register_native(uint32_t addr, const char* name, int nargs);
 extern uint32_t g_total_calls;
 extern uint32_t g_total_icalls;
 
+/* Heap check after every call (enabled by setting g_heap_check_enabled=1) */
+extern int g_heap_check_enabled;
+extern uint32_t g_heap_check_last_ok_call;
+extern uint32_t g_heap_check_last_ok_va;
+
 /* Trace ring buffer (dumped on hang/exit) */
 #define TRACE_RING_SIZE 512
 #define TRACE_ENTRY_SIZE 128
@@ -282,8 +287,12 @@ extern uint32_t g_trace_ring_idx;
     g_trace_ring_idx++; \
 } while(0)
 
-/* Direct call to a known recompiled function */
+/* Direct call to a known recompiled function.
+ * Save/restore callee-saved registers (ebx, esi, edi) to enforce the x86
+ * calling convention. This masks stack imbalance bugs in recompiled code
+ * that would otherwise cause corrupted pop values to propagate. */
 #define RECOMP_CALL(func) do { \
+    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi; \
     PUSH32(esp, 0xDEAD0000u); /* dummy return address */ \
     g_call_depth++; \
     g_total_calls++; \
@@ -292,11 +301,22 @@ extern uint32_t g_trace_ring_idx;
     func(); \
     TRACE_LOG("[RET  %u d%u] <- %s\n", g_total_calls, g_call_depth, #func); \
     g_call_depth--; \
+    g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; \
+    if (g_heap_check_enabled && !HeapValidate(GetProcessHeap(), 0, NULL)) { \
+        fprintf(stderr, "[HEAP] CORRUPTION after CALL %s (call #%u)\n", #func, g_total_calls); \
+        fprintf(stderr, "    Last OK: call #%u va 0x%08X\n", g_heap_check_last_ok_call, g_heap_check_last_ok_va); \
+        g_heap_check_enabled = 0; \
+    } else if (g_heap_check_enabled) { \
+        g_heap_check_last_ok_call = g_total_calls; \
+        g_heap_check_last_ok_va = 0; \
+    } \
 } while(0)
 
-/* Indirect call through dispatch */
+/* Indirect call through dispatch.
+ * Same callee-saved register protection as RECOMP_CALL. */
 #define RECOMP_ICALL(target_va) do { \
     uint32_t _va = (uint32_t)(target_va); \
+    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi; \
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
@@ -312,15 +332,25 @@ extern uint32_t g_trace_ring_idx;
         _fn(); \
         TRACE_LOG("[IRET  %u d%u] <- 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         g_call_depth--; \
+        g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; \
+        if (g_heap_check_enabled && !HeapValidate(GetProcessHeap(), 0, NULL)) { \
+            fprintf(stderr, "[HEAP] CORRUPTION after ICALL 0x%08X in %s (icall #%u, call #%u)\n", _va, __func__, g_total_icalls, g_total_calls); \
+            fprintf(stderr, "    Last OK: call #%u va 0x%08X\n", g_heap_check_last_ok_call, g_heap_check_last_ok_va); \
+            g_heap_check_enabled = 0; \
+        } else if (g_heap_check_enabled) { \
+            g_heap_check_last_ok_call = g_total_calls; \
+            g_heap_check_last_ok_va = _va; \
+        } \
     } else { \
         PUSH32(esp, 0xDEAD0000u); \
         TRACE_LOG("[ICALL %u d%u] -> native 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         if (!recomp_native_call(_va)) { \
             esp += 4; /* undo push */ \
             TRACE_LOG("ICALL: unresolved VA 0x%08X\n", _va); \
-            fprintf(stderr, "!!! UNRESOLVED ICALL: VA 0x%08X (call #%u, icall #%u)\n", _va, g_total_calls, g_total_icalls); \
+            fprintf(stderr, "!!! UNRESOLVED ICALL: VA 0x%08X (call #%u, icall #%u) in %s\n", _va, g_total_calls, g_total_icalls, __func__); \
             eax = 0; \
         } \
+        g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; \
     } \
 } while(0)
 
@@ -342,7 +372,13 @@ extern uint32_t g_trace_ring_idx;
         g_call_depth--; \
     } else if (!recomp_native_call(_va)) { \
         TRACE_LOG("ITAIL: unresolved VA 0x%08X\n", _va); \
-        fprintf(stderr, "!!! UNRESOLVED ITAIL: VA 0x%08X (call #%u, icall #%u)\n", _va, g_total_calls, g_total_icalls); \
+        fprintf(stderr, "!!! UNRESOLVED ITAIL: VA 0x%08X (call #%u, icall #%u) in %s\n", _va, g_total_calls, g_total_icalls, __func__); \
+        fprintf(stderr, "    Last 16 ICALL/ITAIL targets:\n"); \
+        for (int _i = 16; _i > 0; _i--) { \
+            uint32_t _idx = (g_icall_trace_idx - _i) & (ICALL_TRACE_SIZE-1); \
+            fprintf(stderr, "      [-%d] 0x%08X\n", _i, g_icall_trace[_idx]); \
+        } \
+        fprintf(stderr, "    g_esp=0x%08X\n", g_esp); \
     } \
 } while(0)
 
@@ -351,5 +387,19 @@ extern uint32_t g_trace_ring_idx;
     static int _warned = 0; \
     if (!_warned) { fprintf(stderr, "STUB: %s called\n", name); _warned = 1; } \
 } while(0)
+
+/* Heap validation helper */
+#ifdef _WIN32
+#ifndef _WINDOWS_  /* avoid redecl if windows.h already included */
+__declspec(dllimport) void* __stdcall GetProcessHeap(void);
+__declspec(dllimport) int   __stdcall HeapValidate(void*, unsigned long, const void*);
+#endif
+static inline void recomp_heap_check(const char* where) {
+    if (!HeapValidate(GetProcessHeap(), 0, NULL))
+        fprintf(stderr, "[HEAP] CORRUPTION detected at %s\n", where);
+}
+#else
+static inline void recomp_heap_check(const char* where) { (void)where; }
+#endif
 
 #endif /* RECOMP_TYPES_H */

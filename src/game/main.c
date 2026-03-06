@@ -38,6 +38,9 @@ uint32_t g_call_depth = 0;
 uint32_t g_call_depth_max = 0;
 uint32_t g_total_calls = 0;
 uint32_t g_total_icalls = 0;
+int g_heap_check_enabled = 0;
+uint32_t g_heap_check_last_ok_call = 0;
+uint32_t g_heap_check_last_ok_va = 0;
 
 /* ============================================================
  * Memory Layout Constants (from PE analysis)
@@ -52,7 +55,8 @@ uint32_t g_total_icalls = 0;
 
 #define XWA_IMAGE_BASE    0x00400000
 #define XWA_DATA_START    0x005A9000  /* .rdata start */
-#define XWA_DATA_END      0x00B10000  /* end of .data (rounded up) */
+#define XWA_DATA_END      0x00BFB000  /* end of uncommitted region in 0x400000 heap reservation */
+#define XWA_EXTENDED_END  0x02000000  /* max address for demand-paged BSS extension */
 #define XWA_STACK_BASE    0x00100000  /* simulated stack start */
 #define XWA_STACK_SIZE    0x00800000  /* 8 MB stack */
 #define XWA_STACK_TOP     (XWA_STACK_BASE + XWA_STACK_SIZE)
@@ -108,8 +112,62 @@ static void wf(HANDLE h, const char* s) {
     WriteFile(h, s, (DWORD)strlen(s), &w, NULL);
 }
 
+static uint32_t g_demand_page_count = 0;
+
 static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    /* Demand-paging: auto-commit pages for accesses in the extended BSS range.
+     * The original game's data extends past the PE .data VSize, and we can't
+     * pre-reserve everything due to existing allocations (DLLs, heap, etc.). */
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+        uintptr_t fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
+        if (fault_addr >= XWA_DATA_START && fault_addr < XWA_EXTENDED_END) {
+            uintptr_t page = fault_addr & ~0xFFFu;
+            void* p = NULL;
+
+            /* Strategy 1: Commit within existing reservation */
+            p = VirtualAlloc((void*)page, 0x1000, MEM_COMMIT, PAGE_READWRITE);
+
+            /* Strategy 2: Change protection on already-committed pages */
+            if (!p) {
+                DWORD old_prot;
+                if (VirtualProtect((void*)page, 0x1000, PAGE_READWRITE, &old_prot)) {
+                    p = (void*)page;
+                }
+            }
+
+            /* Strategy 2b: For MEM_MAPPED pages, try PAGE_WRITECOPY */
+            if (!p) {
+                DWORD old_prot;
+                if (VirtualProtect((void*)page, 0x1000, PAGE_WRITECOPY, &old_prot)) {
+                    p = (void*)page;
+                }
+            }
+
+            /* Strategy 3: Reserve+commit in free space at 64KB-aligned base */
+            if (!p) {
+                MEMORY_BASIC_INFORMATION mbi;
+                if (VirtualQuery((void*)page, &mbi, sizeof(mbi)) && mbi.State == MEM_FREE) {
+                    uintptr_t block = page & ~0xFFFFu;
+                    p = VirtualAlloc((void*)block, 0x10000,
+                        MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                }
+            }
+
+            if (p) {
+                g_demand_page_count++;
+                if (g_demand_page_count <= 32 || (g_demand_page_count & 0xFF) == 0) {
+                    fprintf(stderr, "[DEMAND] Page at 0x%08X (fault=0x%08X, count=%u)\n",
+                            (uint32_t)(uintptr_t)p, (uint32_t)fault_addr, g_demand_page_count);
+                }
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+            /* If all strategies failed, fall through to crash handler */
+            fprintf(stderr, "[DEMAND] FAILED at 0x%08X (err=%lu)\n",
+                    (uint32_t)fault_addr, GetLastError());
+        }
+    }
 
     /* Log ALL exceptions to stderr (even non-fatal ones) for debugging */
     fprintf(stderr, "\n!!! VEH: exception 0x%08lX at 0x%p !!!\n",
@@ -120,6 +178,22 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
             (void*)ep->ExceptionRecord->ExceptionInformation[1],
             g_esp, g_total_calls);
     }
+    if (code == 0xC0000374 /* STATUS_HEAP_CORRUPTION */) {
+        extern uint32_t g_last_heapalloc_heap, g_last_heapalloc_size, g_last_heapalloc_ret;
+        extern uint32_t g_last_heapfree_ptr, g_heapop_count;
+        fprintf(stderr, "    HEAP CORRUPTION: heapop_count=%u\n", g_heapop_count);
+        fprintf(stderr, "    last HeapAlloc: heap=0x%08X size=0x%08X ret=0x%08X\n",
+                g_last_heapalloc_heap, g_last_heapalloc_size, g_last_heapalloc_ret);
+        fprintf(stderr, "    last HeapFree: ptr=0x%08X\n", g_last_heapfree_ptr);
+        fprintf(stderr, "    g_esp=0x%08X, total_calls=%u, total_icalls=%u\n",
+                g_esp, g_total_calls, g_total_icalls);
+        /* Dump trace ring */
+        fprintf(stderr, "    Last 16 trace ring entries:\n");
+        for (int i = 16; i > 0; i--) {
+            uint32_t idx = (g_trace_ring_idx - i) & (TRACE_RING_SIZE-1);
+            fprintf(stderr, "      [-%d] %s", i, g_trace_ring[idx]);
+        }
+    }
     fflush(stderr);
 
     /* Only handle fatal exceptions (skip C++ exceptions, breakpoints, etc.) */
@@ -129,7 +203,8 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
         code != EXCEPTION_ILLEGAL_INSTRUCTION &&
         code != EXCEPTION_PRIV_INSTRUCTION &&
         code != EXCEPTION_IN_PAGE_ERROR &&
-        code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED) {
+        code != EXCEPTION_ARRAY_BOUNDS_EXCEEDED &&
+        code != 0xC0000374 /* STATUS_HEAP_CORRUPTION */) {
         return EXCEPTION_CONTINUE_SEARCH;
     }
 
@@ -229,6 +304,197 @@ recomp_func_t recomp_lookup(uint32_t va) {
 static void stub_safedisc_nop(void) {
     /* Clean return: pop return address */
     g_esp += 4;
+}
+
+/* Stub for __sbh_heap_init - returns 1 (success) without initializing SBH */
+static void stub_sbh_heap_init(void) {
+    g_eax = 1;  /* return TRUE (success) */
+    g_esp += 4;  /* pop return address */
+}
+
+/* Stub for __sbh_find_block - always returns 0 (not found).
+ * Since SBH is disabled (threshold=0), no allocations go through SBH,
+ * so no blocks should ever be found. This prevents the real function
+ * from traversing uninitialized SBH header list at 0x60BBF8.
+ * Signature: int __sbh_find_block(void* ptr, HEADER** pHeader, REGION** pRegion)
+ * cdecl, 3 args (12 bytes), caller cleans stack. */
+static void stub_sbh_find_block(void) {
+    g_eax = 0;  /* not found */
+    g_esp += 4;  /* pop return address */
+}
+
+/* sub_0057E560: Pre-main-loop init callback.
+ * Called via function pointer at 0xA1C071 before entering the game loop.
+ * Initializes sound/music subsystems and loads font resources.
+ * Original code: 0x0057E560-0x0057E59E */
+static void manual_sub_0057E560(void) {
+    extern void sub_0053F800(void);
+    extern void sub_0053F5C0(void);
+    extern void sub_0055BB90(void);
+    extern void sub_0053F5B0(void);
+    extern void sub_0053F970(void);
+    extern void sub_00556B20(void);
+    #define esp g_esp
+
+    RECOMP_CALL(sub_0053F800);
+    PUSH32(esp, 0);
+    RECOMP_CALL(sub_0053F5C0);
+    esp += 4;
+    RECOMP_CALL(sub_0055BB90);
+    RECOMP_CALL(sub_0053F5B0);
+    RECOMP_CALL(sub_0053F970);
+    PUSH32(esp, 0xAu);
+    RECOMP_CALL(sub_00556B20);
+    esp += 4;
+    PUSH32(esp, 0xCu);
+    RECOMP_CALL(sub_00556B20);
+    esp += 4;
+    PUSH32(esp, 0xFu);
+    RECOMP_CALL(sub_00556B20);
+    esp += 4;
+    g_eax = 0;
+    esp += 4;  /* pop return address */
+
+    #undef esp
+}
+
+/* sub_0057E4F0: Per-frame update callback.
+ * Called every game loop iteration from sub_0053E760.
+ * Handles sound mixing, display flip, and frame timing.
+ * Original code: 0x0057E4F0-0x0057E557 */
+static void manual_sub_0057E4F0(void) {
+    extern void sub_0053F010(void);
+    extern void sub_0055BC20(void);
+    extern void sub_0053F5D0(void);
+    extern void sub_00541810(void);
+    extern void sub_0053EF80(void);
+    #define esp g_esp
+
+    RECOMP_CALL(sub_0053F010);
+    PUSH32(esp, 0);
+    PUSH32(esp, 0x00601C9Cu);
+    RECOMP_CALL(sub_0055BC20);
+    g_eax = MEM32(0x9F4B40);
+    esp += 8;
+    if (g_eax != 0) goto frame_skip;
+    PUSH32(esp, 0);
+    PUSH32(esp, 0x00601C94u);
+    RECOMP_CALL(sub_0055BC20);
+    g_eax = MEM32(0x9F4B40);
+    esp += 8;
+    if (g_eax != 0) goto frame_skip;
+    PUSH32(esp, 0);
+    PUSH32(esp, 0x00601C88u);
+    RECOMP_CALL(sub_0055BC20);
+    esp += 8;
+frame_skip:
+    RECOMP_CALL(sub_0053F5D0);
+    PUSH32(esp, 0x00584F30u);
+    PUSH32(esp, 0x00584F50u);
+    RECOMP_CALL(sub_00541810);
+    esp += 8;
+    RECOMP_CALL(sub_0053EF80);
+    MEM32(0x9F60D4) = g_eax;
+    g_eax = 0;
+    esp += 4;  /* pop return address */
+
+    #undef esp
+}
+
+/* sub_00584F30: Outer init callback.
+ * Calls sound init, game init callback, and display init.
+ * Original code: 0x00584F30-0x00584F41 */
+static void manual_sub_00584F30(void) {
+    extern void sub_005580D0(void);
+    extern void sub_00528A50(void);
+    extern void sub_0055D720(void);
+    #define esp g_esp
+    RECOMP_CALL(sub_005580D0);
+    RECOMP_CALL(sub_00528A50);
+    RECOMP_CALL(sub_0055D720);
+    g_eax = 0;
+    esp += 4;
+    #undef esp
+}
+
+/* sub_00584F50: Outer frame callback.
+ * Calls sound update, then recurses with inner callbacks.
+ * Original code: 0x00584F50-0x00584F72 */
+static void manual_sub_00584F50(void) {
+    extern void sub_00558100(void);
+    extern void sub_00541810(void);
+    #define esp g_esp
+    g_eax = MEM32(0xABD1E4);
+    PUSH32(esp, g_eax);
+    RECOMP_CALL(sub_00558100);
+    esp += 4;
+    PUSH32(esp, 0x00539760u);
+    PUSH32(esp, 0x005397D0u);
+    RECOMP_CALL(sub_00541810);
+    esp += 8;
+    g_eax = 0;
+    esp += 4;
+    #undef esp
+}
+
+/* sub_00539760: Inner cleanup callback.
+ * Frees music/sound resources and closes resource files.
+ * Original code: 0x00539760-0x005397C3 */
+static void manual_sub_00539760(void) {
+    extern void sub_00558BE0(void);
+    extern void sub_00564D10(void);
+    extern void sub_0055DD40(void);
+    extern void sub_0055DCE0(void);
+    extern void sub_0055D480(void);
+    extern void sub_005387A0(void);
+    #define esp g_esp
+    RECOMP_CALL(sub_00558BE0);
+    PUSH32(esp, 0x00602BB4u);
+    RECOMP_CALL(sub_00564D10);
+    esp += 4;
+    RECOMP_CALL(sub_0055DD40);
+    RECOMP_CALL(sub_0055DCE0);
+    g_eax = MEM32(0x9F4B98);
+    if (g_eax != 0) {
+        PUSH32(esp, g_eax);
+        RECOMP_CALL(sub_0055D480);
+        esp += 4;
+        MEM32(0x9F4B98) = 0;
+    }
+    g_eax = MEM32(0x9F4B24);
+    if (g_eax != 0) {
+        PUSH32(esp, g_eax);
+        RECOMP_CALL(sub_0055D480);
+        esp += 4;
+        MEM32(0x9F4B24) = 0;
+    }
+    PUSH32(esp, 0x00602BA8u);
+    RECOMP_CALL(sub_005387A0);
+    esp += 4;
+    g_eax = 0;
+    esp += 4;
+    #undef esp
+}
+
+/* sub_005397D0: Main game tick function.
+ * Handles input, game state updates, rendering for one frame.
+ * TODO: Properly implement this large function (~300 bytes).
+ * For now, stub it to return 0 (skip game logic). */
+static void manual_sub_005397D0(void) {
+    g_eax = 0;
+    g_esp += 4;  /* pop return address */
+}
+
+/* Stub for sub_00556B20 (font/resource loader) - returns 1 (success).
+ * The real function tries to load .abp font files (which don't exist),
+ * falls back to GDI rendering on a DD surface, and fails during the
+ * complex pixel readback pipeline. Stubbing lets us get past DD init.
+ * cdecl, 1 arg (caller cleans), returns 1 in eax. */
+static void stub_font_loader(void) {
+    uint32_t fontIdx = MEM32(g_esp + 4);
+    fprintf(stderr, "[STUB] sub_00556B20(fontIdx=%u) -> returning 1 (success)\n", fontIdx);
+    g_eax = 1;
+    g_esp += 4;  /* pop return address */
 }
 
 /* Tracing helper: log when specific functions are entered */
@@ -342,6 +608,103 @@ static void manual_initstdio(void) {
     fflush(stderr);
 }
 
+/* Stub for DirectInput internal dispatch table entries (sub_0049A490).
+ * These are COM method implementations stored as function pointers at
+ * 0x6937D4-0x693838. They are mid-function labels within sub_0049A490
+ * that the dispatch table doesn't know about. All return DD_OK (0)
+ * and pop the return address (stdcall with 'this' ptr + variable args).
+ * Most take 1-3 args; we pop conservatively and let the caller handle
+ * the rest via the known ecx-based dispatch pattern. */
+static void stub_dinput_nop(void) {
+    g_eax = 0;
+    g_esp += 4;  /* pop return address */
+}
+
+/* ============================================================
+ * WndProc Bridge
+ *
+ * Windows calls the WndProc at the address stored in the WNDCLASS
+ * structure. The game stores 0x0053E650 which is a mid-function
+ * label inside sub_0053E340 (the actual WndProc). Since our .text
+ * pages are data-only (not executable), we need a real native
+ * stdcall function that bridges to the recompiled WndProc.
+ *
+ * We write our bridge function's address into the WNDCLASS at the
+ * point where the game stores the WndProc pointer. But actually,
+ * the better approach: override the address 0x0053E650 in the manual
+ * override table, AND write a real native WndProc bridge.
+ *
+ * The game's WndProc (sub_0053E340) is stdcall with 4 args:
+ *   LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM)
+ * It pops ebx, ebp, esi, edi, processes the message, and returns
+ * via ret 0x10 (pops 4 args + 16 bytes from stack).
+ * ============================================================ */
+extern void sub_0053E340(void);
+
+static LRESULT CALLBACK native_wndproc_bridge(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static uint32_t wndproc_count = 0;
+    wndproc_count++;
+    if (wndproc_count <= 30 || (wndproc_count % 5000 == 0)) {
+        fprintf(stderr, "[WND] WndProc #%u: msg=0x%04X wParam=0x%X lParam=0x%X esp=0x%08X\n",
+                wndproc_count, msg, (uint32_t)wParam, (uint32_t)lParam, g_esp);
+        fflush(stderr);
+    }
+
+    /* Save callee-saved globals - WndProc is re-entrant from native Windows
+     * callbacks and must not corrupt the caller's register state */
+    uint32_t saved_esp = g_esp;
+    uint32_t saved_ebx = g_ebx;
+    uint32_t saved_esi = g_esi;
+    uint32_t saved_edi = g_edi;
+
+    /* Push args right-to-left on simulated stack (stdcall convention) */
+    PUSH32(g_esp, (uint32_t)lParam);
+    PUSH32(g_esp, (uint32_t)wParam);
+    PUSH32(g_esp, (uint32_t)msg);
+    PUSH32(g_esp, (uint32_t)(uintptr_t)hwnd);
+    PUSH32(g_esp, 0xDEAD0000u);  /* return address (will be consumed by ret 0x10) */
+
+    g_call_depth++;
+    if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth;
+    sub_0053E340();
+    g_call_depth--;
+
+    /* Restore callee-saved globals */
+    g_esp = saved_esp;
+    g_ebx = saved_ebx;
+    g_esi = saved_esi;
+    g_edi = saved_edi;
+
+    return (LRESULT)g_eax;
+}
+
+/* Stub that stores the native WndProc bridge address instead of 0x0053E650.
+ * When the game stores the WndProc address into the WNDCLASS, it uses the
+ * instruction at 0x0053EB47: mov [esp+0x18], 0x53E650. We intercept the
+ * ICALL/address to write our bridge address instead.
+ *
+ * BUT: since the address 0x0053E650 is a constant embedded in the code,
+ * we patch the .text data at 0x0053E650 to contain a thunk. Actually,
+ * the simplest approach: patch the memory at the location where the game
+ * stores this constant in the WNDCLASS structure. That happens at the
+ * instruction at 0x0053EB47. We'll patch the constant there after .text
+ * is loaded. OR: we can just patch the .text word at the operand location.
+ *
+ * Even simpler: add 0x0053E650 as a manual override that acts as the
+ * WndProc entry point. When called via ITAIL/ICALL it would work. But
+ * Windows calls it as a real function pointer, not through our dispatch.
+ *
+ * The real fix: patch the DWORD at 0x0053E648 (the mov operand for the
+ * instruction at 0x0053EB47) OR write the native bridge address into
+ * the WNDCLASS after the game sets it up. BUT the WNDCLASS is on the
+ * stack, allocated dynamically.
+ *
+ * Cleanest approach: patch the .text data at the instruction that stores
+ * the WndProc address. The instruction at 0x0053EB47 is:
+ *   C7 44 24 18 50 E6 53 00  (mov [esp+0x18], 0x0053E650)
+ * The immediate operand 0x0053E650 is at file/VA offset 0x0053EB4B.
+ * We overwrite it with our native bridge address. */
+
 /* Manual override table */
 static recomp_dispatch_entry_t g_manual_overrides[] = {
     { 0x00000000, stub_null_funcptr },  /* NULL function pointer calls */
@@ -357,8 +720,60 @@ static recomp_dispatch_entry_t g_manual_overrides[] = {
     /* CRT atexit callback (called during exit cleanup via _initterm).
      * Address 0x59CD40 is in .text but not in dispatch table. */
     { 0x0059CD40, stub_safedisc_nop },
+    /* DirectInput internal dispatch table entries (sub_0049A490).
+     * These are mid-function label addresses stored in the DI vtable
+     * at 0x6937D4-0x693838 for joystick/keyboard device handling. */
+    { 0x0049A630, stub_dinput_nop },
+    { 0x0049A670, stub_dinput_nop },
+    { 0x0049A6B0, stub_dinput_nop },
+    { 0x0049A6F0, stub_dinput_nop },
+    { 0x0049A730, stub_dinput_nop },
+    { 0x0049A770, stub_dinput_nop },
+    { 0x0049A7C0, stub_dinput_nop },
+    { 0x0049A7D0, stub_dinput_nop },
+    { 0x0049A800, stub_dinput_nop },
+    { 0x0049A830, stub_dinput_nop },
+    { 0x0049A870, stub_dinput_nop },
+    { 0x0049A880, stub_dinput_nop },
+    { 0x0049A8A0, stub_dinput_nop },
+    { 0x0049A8B0, stub_dinput_nop },
+    { 0x0049A8D0, stub_dinput_nop },
+    { 0x0049A8F0, stub_dinput_nop },
+    { 0x0049A910, stub_dinput_nop },
+    { 0x0049A920, stub_dinput_nop },
+    { 0x0049A930, stub_dinput_nop },
+    { 0x0049A950, stub_dinput_nop },
+    { 0x0049A9A0, stub_dinput_nop },
+    { 0x0049A9C0, stub_dinput_nop },
+    { 0x0049A9E0, stub_dinput_nop },
+    { 0x0049AA00, stub_dinput_nop },
+    { 0x0049AA20, stub_dinput_nop },
+    { 0x0049AA30, stub_dinput_nop },
+    /* Mid-function ITAIL targets in sub_005241B0 (DirectInput init).
+     * These are cleanup/exit paths jumped to on error conditions.
+     * The function has a large stack frame; these labels restore it. */
+    { 0x005252BC, stub_null_funcptr },
+    { 0x005252C5, stub_null_funcptr },
+    /* Stub __sbh_heap_init (0x5A3560) - SBH is disabled but this func
+     * still allocates 4MB of virtual memory. Return 1 (success). */
+    { 0x005A3560, stub_sbh_heap_init },
+    /* Stub __sbh_find_block (0x5A3800) - always returns 0 (not found).
+     * Prevents traversal of uninitialized SBH header linked list. */
+    { 0x005A3800, stub_sbh_find_block },
+    /* Pre-main-loop init callback - missed by code generator */
+    { 0x0057E560, manual_sub_0057E560 },
+    /* Per-frame update callback - missed by code generator */
+    { 0x0057E4F0, manual_sub_0057E4F0 },
+    /* Outer init callback (calls sub_005580D0, sub_00528A50, sub_0055D720) */
+    { 0x00584F30, manual_sub_00584F30 },
+    /* Outer frame callback (calls sub_00558100, then sub_00541810 with inner callbacks) */
+    { 0x00584F50, manual_sub_00584F50 },
+    /* Inner cleanup callback (frees music/sound resources) */
+    { 0x00539760, manual_sub_00539760 },
+    /* Main game tick (stubbed - returns 0) */
+    { 0x005397D0, manual_sub_005397D0 },
 };
-static const int g_manual_override_count = 9;
+static const int g_manual_override_count = 45;
 
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     for (int i = 0; i < g_manual_override_count; i++) {
@@ -370,7 +785,7 @@ recomp_func_t recomp_lookup_manual(uint32_t va) {
 }
 
 /* Import bridge table (populated during init) */
-#define MAX_IMPORT_BRIDGES 256
+#define MAX_IMPORT_BRIDGES 1024
 recomp_dispatch_entry_t g_import_bridges[MAX_IMPORT_BRIDGES];
 int g_import_bridge_count = 0;
 
@@ -680,18 +1095,16 @@ static int setup_memory(const char* data_file) {
         }
     }
 
-    /* Debug: check what's at our target addresses */
+    /* Debug: check what's at our target addresses (scan past reservation too) */
     {
         MEMORY_BASIC_INFORMATION mbi;
         uintptr_t scan = XWA_REGION_START;
         printf("[*] Memory map at target range:\n");
-        while (scan < XWA_REGION_END) {
+        while (scan < XWA_REGION_END + 0x100000) {  /* scan a bit past the region */
             if (VirtualQuery((void*)scan, &mbi, sizeof(mbi)) == 0) break;
-            if (mbi.State != MEM_FREE) {
-                printf("    0x%08X-0x%08X: State=0x%lX Type=0x%lX\n",
-                       (uint32_t)scan, (uint32_t)(scan + mbi.RegionSize),
-                       mbi.State, mbi.Type);
-            }
+            printf("    0x%08X-0x%08X: State=0x%lX Type=0x%lX Alloc=0x%p\n",
+                   (uint32_t)scan, (uint32_t)(scan + mbi.RegionSize),
+                   mbi.State, mbi.Type, mbi.AllocationBase);
             scan += mbi.RegionSize;
             if (mbi.RegionSize == 0) break;
         }
@@ -752,6 +1165,49 @@ static int setup_memory(const char* data_file) {
                 g_esp = (uint32_t)((uintptr_t)stack_try + XWA_STACK_SIZE - 16);
                 printf("[*] Stack at %p (real addr, ESP=0x%08X)\n", stack_try, g_esp);
             }
+
+            /* Proactively commit FREE pages from BFB000 to extended end.
+             * IMPORTANT: Do NOT commit RESERVED pages - they may belong to
+             * heap reservations, thread stacks, or other system structures.
+             * Committing them corrupts the owning allocator's metadata. */
+            {
+                MEMORY_BASIC_INFORMATION mbi;
+                uintptr_t scan = XWA_DATA_END;
+                uint32_t committed = 0, gaps = 0, reserved_skip = 0;
+                while (scan < XWA_EXTENDED_END) {
+                    if (!VirtualQuery((void*)scan, &mbi, sizeof(mbi))) break;
+                    if (mbi.RegionSize == 0) break;
+
+                    if (mbi.State == MEM_FREE) {
+                        SIZE_T sz = mbi.RegionSize;
+                        if (scan + sz > XWA_EXTENDED_END) sz = XWA_EXTENDED_END - scan;
+                        void* p = VirtualAlloc((void*)scan, sz,
+                            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+                        if (p) committed += (uint32_t)sz;
+                    } else if (mbi.State == MEM_RESERVE) {
+                        /* Skip - belongs to another allocation (heap, etc.) */
+                        reserved_skip++;
+                        gaps++;
+                        if (gaps <= 8) {
+                            printf("    [reserved] 0x%08X-0x%08X type=0x%lX (skipped)\n",
+                                (uint32_t)scan, (uint32_t)(scan + mbi.RegionSize),
+                                mbi.Type);
+                        }
+                    } else if (mbi.State == MEM_COMMIT) {
+                        /* Existing allocation - log it as a gap */
+                        gaps++;
+                        if (gaps <= 8) {
+                            printf("    [gap] 0x%08X-0x%08X type=0x%lX prot=0x%lX\n",
+                                (uint32_t)scan, (uint32_t)(scan + mbi.RegionSize),
+                                mbi.Type, mbi.Protect);
+                        }
+                    }
+                    scan += mbi.RegionSize;
+                }
+                printf("[*] Extended BSS: committed %u KB, %u gaps, %u reserved-skips (0x%08X-0x%08X)\n",
+                       committed / 1024, gaps, reserved_skip, XWA_DATA_END, XWA_EXTENDED_END);
+            }
+
             goto alloc_done;
         }
     }
@@ -808,9 +1264,39 @@ memory_ready:
 
             /* Read .text (contains embedded data tables, jump tables, string
              * constants that the recompiled code still references via MEM macros).
-             * .text: file offset 0x400, VA 0x401000, RawSize 0x1A7C00 */
-            fseek(f, 0x00000400, SEEK_SET);
-            fread((void*)ADDR(0x00401000), 1, 0x1A7C00, f);
+             * .text: file offset 0x400, VA 0x401000, RawSize 0x1A7C00
+             *
+             * IMPORTANT: The Steam binary has SafeDisc encryption on large parts
+             * of .text (roughly 0x599000-0x5A1000+). We try to load from a
+             * decrypted binary first; fall back to the game binary. */
+            {
+                int text_loaded = 0;
+                /* Try decrypted binary: same dir as game exe, or known paths */
+                const char* dec_paths[] = {
+                    "xwingalliance_decrypted.exe",
+                    "../recomp/config/xwingalliance_decrypted.exe",
+                    NULL
+                };
+                for (int i = 0; dec_paths[i]; i++) {
+                    FILE* fd = fopen(dec_paths[i], "rb");
+                    if (fd) {
+                        fseek(fd, 0x00000400, SEEK_SET);
+                        size_t n = fread((void*)ADDR(0x00401000), 1, 0x1A7C00, fd);
+                        fclose(fd);
+                        if (n == 0x1A7C00) {
+                            printf("[*] Loaded .text from decrypted binary: %s\n", dec_paths[i]);
+                            text_loaded = 1;
+                            break;
+                        }
+                    }
+                }
+                if (!text_loaded) {
+                    fprintf(stderr, "WARNING: Using encrypted .text from game binary"
+                            " (jump tables may be garbage)\n");
+                    fseek(f, 0x00000400, SEEK_SET);
+                    fread((void*)ADDR(0x00401000), 1, 0x1A7C00, f);
+                }
+            }
 
             /* Read .rdata (VSize) */
             fseek(f, 0x001A8000, SEEK_SET);
@@ -861,6 +1347,18 @@ memory_ready:
                 memcpy((void*)ADDR(0x5A0534), byte_table, sizeof(byte_table));
 
                 printf("[*] Patched SafeDisc-encrypted CRT tables at 0x5A050C, 0x5A0534\n");
+            }
+
+            /* Patch WndProc address in sub_0053EB30's code data.
+             * Instruction at 0x0053EB47: mov [esp+0x18], 0x0053E650
+             * The 4-byte immediate 0x0053E650 is at VA 0x0053EB4B.
+             * Replace with address of our native WndProc bridge so
+             * Windows can call it directly (our .text pages aren't executable). */
+            {
+                extern LRESULT CALLBACK native_wndproc_bridge(HWND, UINT, WPARAM, LPARAM);
+                uint32_t bridge_addr = (uint32_t)(uintptr_t)&native_wndproc_bridge;
+                MEM32(0x0053EB4B) = bridge_addr;
+                printf("[*] Patched WndProc: 0x0053E650 -> 0x%08X (native bridge)\n", bridge_addr);
             }
         } else {
             fprintf(stderr, "WARNING: Could not open %s for data loading\n", data_file);
@@ -1197,11 +1695,18 @@ int main(int argc, char* argv[]) {
            g_region_alloc, XWA_REGION_START, XWA_REGION_END);
     printf("    Stack:  VA 0x%08X - 0x%08X (ESP = 0x%08X)\n",
            XWA_STACK_BASE, XWA_STACK_TOP, g_esp);
-    printf("    Data:   VA 0x%08X - 0x%08X\n", XWA_DATA_START, XWA_DATA_END);
+    printf("    Data:   VA 0x%08X - 0x%08X (extended to 0x%08X)\n",
+           XWA_DATA_START, XWA_DATA_END, XWA_EXTENDED_END);
     printf("    Offset: %lld\n", (long long)g_mem_base);
 
     /* Register import bridges (maps IAT slots to bridge functions) */
     register_import_bridges();
+
+    /* Initialize COM mock interfaces (DirectDraw, Direct3D, DirectInput, DirectSound) */
+    {
+        extern void com_mocks_init(void);
+        com_mocks_init();
+    }
 
     printf("\n[*] XWA recomp infrastructure ready.\n");
     printf("[*] Dispatch table: %u functions\n", recomp_dispatch_count);

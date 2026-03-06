@@ -91,45 +91,49 @@ static void bridge_RegCloseKey_005A900C(void) { /* ADVAPI32.dll:RegCloseKey (1 a
 
 /* ======== DDRAW.dll ======== */
 
-static void bridge_DirectDrawEnumerateExA_005A9014(void) { /* DDRAW.dll:DirectDrawEnumerateExA */
+static void bridge_DirectDrawEnumerateExA_005A9014(void) { /* DDRAW.dll:DirectDrawEnumerateExA (3 args, stdcall) */
     BRIDGE_TRACE("DDRAW.dll:DirectDrawEnumerateExA");
-    static int w = 0;
-    if (!w) { fprintf(stderr, "STUB: DDRAW.dll:DirectDrawEnumerateExA\n"); w = 1; }
-    g_eax = 0; g_esp += 4;
+    fprintf(stderr, "[COM] DirectDrawEnumerateExA(callback=0x%08X, ctx=0x%08X, flags=0x%08X)\n",
+            MEM32(g_esp + 4), MEM32(g_esp + 8), MEM32(g_esp + 12));
+    g_eax = 0; /* DD_OK */
+    g_esp += 16; /* pop ret + 3 args */
 }
 
-static void bridge_DirectDrawCreate_005A9018(void) { /* DDRAW.dll:DirectDrawCreate */
+/* Forward declaration - implemented in com_mocks.c */
+extern void bridge_DirectDrawCreate_impl(void);
+
+static void bridge_DirectDrawCreate_005A9018(void) { /* DDRAW.dll:DirectDrawCreate (3 args, stdcall) */
     BRIDGE_TRACE("DDRAW.dll:DirectDrawCreate");
-    static int w = 0;
-    if (!w) { fprintf(stderr, "STUB: DDRAW.dll:DirectDrawCreate\n"); w = 1; }
-    g_eax = 0; g_esp += 4;
+    bridge_DirectDrawCreate_impl();
 }
 
 /* ======== DINPUT.dll ======== */
 
-static void bridge_DirectInputCreateA_005A9020(void) { /* DINPUT.dll:DirectInputCreateA */
+/* Forward declaration - implemented in com_mocks.c */
+extern void bridge_DirectInputCreateA_impl(void);
+
+static void bridge_DirectInputCreateA_005A9020(void) { /* DINPUT.dll:DirectInputCreateA (4 args, stdcall) */
     BRIDGE_TRACE("DINPUT.dll:DirectInputCreateA");
-    static int w = 0;
-    if (!w) { fprintf(stderr, "STUB: DINPUT.dll:DirectInputCreateA\n"); w = 1; }
-    g_eax = 0; g_esp += 4;
+    bridge_DirectInputCreateA_impl();
 }
 
 /* ======== DPLAYX.dll ======== */
 
-static void bridge_ordinal_1_005A9028(void) { /* DPLAYX.dll:ordinal_1 */
+static void bridge_ordinal_1_005A9028(void) { /* DPLAYX.dll:ordinal_1 (DirectPlayCreate, 3 args, stdcall) */
     BRIDGE_TRACE("DPLAYX.dll:ordinal_1");
-    static int w = 0;
-    if (!w) { fprintf(stderr, "STUB: DPLAYX.dll:ordinal_1\n"); w = 1; }
-    g_eax = 0; g_esp += 4;
+    fprintf(stderr, "[COM] DPLAYX:DirectPlayCreate stub\n");
+    g_eax = 0x80004005u; /* E_FAIL - multiplayer not supported */
+    g_esp += 16; /* pop ret + 3 args */
 }
 
 /* ======== DSOUND.dll ======== */
 
-static void bridge_ordinal_1_005A9030(void) { /* DSOUND.dll:ordinal_1 */
+/* Forward declaration - implemented in com_mocks.c */
+extern void bridge_DirectSoundCreate_impl(void);
+
+static void bridge_ordinal_1_005A9030(void) { /* DSOUND.dll:DirectSoundCreate (3 args, stdcall) */
     BRIDGE_TRACE("DSOUND.dll:ordinal_1");
-    static int w = 0;
-    if (!w) { fprintf(stderr, "STUB: DSOUND.dll:ordinal_1\n"); w = 1; }
-    g_eax = 0; g_esp += 4;
+    bridge_DirectSoundCreate_impl();
 }
 
 /* ======== GDI32.dll ======== */
@@ -932,13 +936,23 @@ static void bridge_MoveFileA_005A9144(void) { /* KERNEL32.dll:MoveFileA */
     g_eax = 0; g_esp += 4;
 }
 
+uint32_t g_last_heapalloc_heap = 0;
+uint32_t g_last_heapalloc_size = 0;
+uint32_t g_last_heapalloc_ret = 0;
+uint32_t g_last_heapfree_ptr = 0;
+uint32_t g_heapop_count = 0;
+
 static void bridge_HeapAlloc_005A9148(void) { /* KERNEL32.dll:HeapAlloc (3 args) */
     BRIDGE_TRACE("KERNEL32.dll:HeapAlloc");
     uint32_t a0 = MEM32(g_esp + 4);   /* hHeap */
     uint32_t a1 = MEM32(g_esp + 8);   /* dwFlags */
     uint32_t a2 = MEM32(g_esp + 12);  /* dwBytes */
     HANDLE hHeap = (HANDLE)(uintptr_t)a0;
+    g_heapop_count++;
+    g_last_heapalloc_heap = a0;
+    g_last_heapalloc_size = a2;
     g_eax = (uint32_t)(uintptr_t)HeapAlloc(hHeap, a1, a2);
+    g_last_heapalloc_ret = g_eax;
     g_esp += 16;
 }
 
@@ -959,7 +973,23 @@ static void bridge_HeapFree_005A9150(void) { /* KERNEL32.dll:HeapFree (3 args) *
     uint32_t a1 = MEM32(g_esp + 8);   /* dwFlags */
     uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
     HANDLE hHeap = (HANDLE)(uintptr_t)a0;
+    g_heapop_count++;
+    g_last_heapfree_ptr = a2;
     if (a2) {
+        /* Validate the specific block before freeing */
+        if (!HeapValidate(hHeap, 0, (void*)(uintptr_t)a2)) {
+            fprintf(stderr, "[HEAP] HeapFree: block validation FAILED! heap=0x%08X ptr=0x%08X flags=0x%X op#%u\n",
+                    a0, a2, a1, g_heapop_count);
+            /* Try to read the 16 bytes before the block (heap metadata) */
+            uint32_t* meta = (uint32_t*)((uintptr_t)a2 - 16);
+            fprintf(stderr, "[HEAP]   meta[-16]: %08X %08X %08X %08X\n",
+                    meta[0], meta[1], meta[2], meta[3]);
+            fflush(stderr);
+            /* Skip the free to avoid crash, return success */
+            g_eax = 1;
+            g_esp += 16;
+            return;
+        }
         g_eax = (uint32_t)HeapFree(hHeap, a1, (void*)(uintptr_t)a2);
     } else {
         g_eax = 1;
@@ -1332,6 +1362,11 @@ static void bridge_HeapCreate_005A91D4(void) { /* KERNEL32.dll:HeapCreate (3 arg
     g_eax = (uint32_t)(uintptr_t)HeapCreate(a0, a1, a2);
     fprintf(stderr, "    [heap] HeapCreate(0x%X, 0x%X, 0x%X) = %p\n",
         a0, a1, a2, (void*)(uintptr_t)g_eax);
+    /* Re-disable SBH every time a heap is created.
+     * The CRT's __heap_init calls HeapCreate then __sbh_heap_init which
+     * sets __sbh_threshold (0x60DC1C) to 0x480. We must keep it at 0
+     * because __sbh_heap_init's other initialization is incomplete. */
+    MEM32(0x60DC1C) = 0;
     fflush(stderr);
     g_esp += 16;
 }
@@ -1356,6 +1391,8 @@ static void bridge_VirtualAlloc_005A91DC(void) { /* KERNEL32.dll:VirtualAlloc (4
     uint32_t a2 = MEM32(g_esp + 12);
     uint32_t a3 = MEM32(g_esp + 16);
     if (fn) g_eax = fn(a0, a1, a2, a3);
+    fprintf(stderr, "[VA] VirtualAlloc(addr=0x%08X, size=0x%08X, type=0x%X, prot=0x%X) = 0x%08X\n",
+            a0, a1, a2, a3, g_eax);
     g_esp += 20;
 }
 
@@ -1597,6 +1634,12 @@ static void bridge_CreateWindowExA_005A9240(void) { /* USER32.dll:CreateWindowEx
     const char* title = a2 ? (const char*)(uintptr_t)a2 : "(null)";
     fprintf(stderr, "[TRACE] CreateWindowExA(cls=\"%s\", title=\"%s\", %dx%d)\n",
             cls, title, a6 - a4, a7 - a5);
+    /* Force windowed mode: override WS_POPUP|WS_VISIBLE to WS_OVERLAPPEDWINDOW|WS_VISIBLE */
+    if (a3 == 0x90000000u) {
+        a3 = 0x10CF0000u; /* WS_OVERLAPPEDWINDOW | WS_VISIBLE */
+        a4 = 100; a5 = 100; /* x, y */
+        a6 = 740; a7 = 580; /* width, height (640+borders) */
+    }
     if (fn) g_eax = fn(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
     fprintf(stderr, "[TRACE]   -> hwnd=0x%08X\n", g_eax);
     g_esp += 52;
@@ -1616,9 +1659,24 @@ static void bridge_RegisterClassA_005A9248(void) { /* USER32.dll:RegisterClassA 
     static STDFN1 fn = NULL;
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "RegisterClassA");
     uint32_t a0 = MEM32(g_esp + 4);
-    /* Log the class name from WNDCLASSA.lpszClassName (offset 0x28) */
-    const char* clsName = (const char*)(uintptr_t)MEM32(a0 + 0x28);
-    fprintf(stderr, "[TRACE] RegisterClassA(\"%s\")\n", clsName ? clsName : "(null)");
+    /* WNDCLASSA layout:
+     * +0x00 style, +0x04 lpfnWndProc, +0x08 cbClsExtra, +0x0C cbWndExtra,
+     * +0x10 hInstance, +0x14 hIcon, +0x18 hCursor, +0x1C hbrBackground,
+     * +0x20 lpszMenuName, +0x24 lpszClassName */
+    fprintf(stderr, "[TRACE] RegisterClassA(pWC=0x%08X):\n", a0);
+    fprintf(stderr, "  style=0x%08X lpfnWndProc=0x%08X cbClsExtra=%u cbWndExtra=%u\n",
+            MEM32(a0), MEM32(a0+4), MEM32(a0+8), MEM32(a0+12));
+    fprintf(stderr, "  hInstance=0x%08X hIcon=0x%08X hCursor=0x%08X hbrBg=0x%08X\n",
+            MEM32(a0+0x10), MEM32(a0+0x14), MEM32(a0+0x18), MEM32(a0+0x1C));
+    fprintf(stderr, "  lpszMenuName=0x%08X lpszClassName=0x%08X\n",
+            MEM32(a0+0x20), MEM32(a0+0x24));
+    /* Check for WNDCLASSEX (size 0x30) which has lpszClassName at +0x28 */
+    uint32_t clsNamePtr = MEM32(a0 + 0x24);
+    if (clsNamePtr && clsNamePtr != 0xDEAD0000u && clsNamePtr < 0x10000000u) {
+        const char* clsName = (const char*)(uintptr_t)clsNamePtr;
+        fprintf(stderr, "  className=\"%s\"\n", clsName);
+    }
+    fflush(stderr);
     if (fn) g_eax = fn(a0);
     g_esp += 8;
 }
@@ -1742,6 +1800,7 @@ static void bridge_SetCursorPos_005A9274(void) { /* USER32.dll:SetCursorPos (2 a
 static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 args) */
     BRIDGE_TRACE("USER32.dll:PeekMessageA");
     static STDFN5 fn = NULL;
+    static uint32_t peek_count = 0;
     if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("USER32.dll"), "PeekMessageA");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
@@ -1749,15 +1808,29 @@ static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 a
     uint32_t a3 = MEM32(g_esp + 16);
     uint32_t a4 = MEM32(g_esp + 20);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
+    peek_count++;
+    if (peek_count <= 20 || (peek_count % 10000 == 0)) {
+        MSG* pmsg = (MSG*)(uintptr_t)a0;
+        fprintf(stderr, "[MSG] PeekMessage #%u: ret=%u msg=0x%X hwnd=0x%X remove=%u\n",
+                peek_count, g_eax, pmsg->message, (uint32_t)(uintptr_t)pmsg->hwnd, a4);
+        fflush(stderr);
+    }
     g_esp += 24;
 }
 
 static void bridge_ShowCursor_005A927C(void) { /* USER32.dll:ShowCursor (1 args) */
     BRIDGE_TRACE("USER32.dll:ShowCursor");
     static STDFN1 fn = NULL;
+    static uint32_t sc_count = 0;
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "ShowCursor");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
+    sc_count++;
+    if (sc_count <= 10 || (sc_count % 100000 == 0)) {
+        fprintf(stderr, "[CURSOR] ShowCursor(%u) = %d (0x%08X) #%u\n",
+                a0, (int32_t)g_eax, g_eax, sc_count);
+        fflush(stderr);
+    }
     g_esp += 8;
 }
 
@@ -1774,11 +1847,17 @@ static void bridge_MessageBoxA_005A9284(void) { /* USER32.dll:MessageBoxA (4 arg
     BRIDGE_TRACE("USER32.dll:MessageBoxA");
     static STDFN4 fn = NULL;
     if (!fn) fn = (STDFN4)GetProcAddress(LoadLibraryA("USER32.dll"), "MessageBoxA");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    uint32_t a3 = MEM32(g_esp + 16);
-    if (fn) g_eax = fn(a0, a1, a2, a3);
+    uint32_t a0 = MEM32(g_esp + 4);   /* hWnd */
+    uint32_t a1 = MEM32(g_esp + 8);   /* lpText */
+    uint32_t a2 = MEM32(g_esp + 12);  /* lpCaption */
+    uint32_t a3 = MEM32(g_esp + 16);  /* uType */
+    const char* text = a1 ? (const char*)(uintptr_t)a1 : "(null)";
+    const char* caption = a2 ? (const char*)(uintptr_t)a2 : "(null)";
+    fprintf(stderr, "[TRACE] MessageBoxA(hwnd=0x%08X, text=\"%s\", caption=\"%s\", type=0x%X)\n",
+            a0, text, caption, a3);
+    fflush(stderr);
+    /* Don't actually show the message box - just return OK */
+    g_eax = 1;  /* IDOK */
     g_esp += 20;
 }
 

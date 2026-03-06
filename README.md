@@ -11,38 +11,45 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 2** | **Complete** | Function discovery (2,674 functions, 443,224 instructions) |
 | **Phase 3** | **Complete** | x86-to-C code generation (2,701 functions, 606,424 lines of C) |
 | **Phase 4** | **Complete** | Compilation and linking (0 errors, 1 warning) |
-| **Phase 5** | **In Progress** | Runtime execution — CRT init, import bridging, game startup |
-| Phase 6 | Pending | Win32/DirectX HAL (D3D11 rendering, DirectSound, DirectInput) |
+| **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
+| **Phase 6** | **In Progress** | Win32/DirectX HAL — COM mocks operational, main loop running |
+| Phase 7 | Pending | D3D11 rendering backend, audio, full game logic |
 
 ### Runtime Progress
 
-The recompiled binary boots through the VC6 CRT startup, initializes the game engine, and begins loading game assets:
+The recompiled binary boots through the full game initialization sequence and enters the main message loop:
 
-- **15,540+ function calls** executed successfully (5,294 indirect calls dispatched)
+- **29M+ PeekMessage calls** per 15-second run — stable main loop, zero crashes
 - **VC6 CRT initialization**: heap, locks, stdio, atexit all functional
-- **39 .dat resource files** opened and loaded (BATTLE1.DAT through WAVE1.DAT)
+- **39 .dat resource files** opened and loaded (LightingEffects.dat through cursor.dat)
 - **strings.txt** parsed line-by-line for localization data
-- **179 Win32 API imports** bridged (KERNEL32, USER32, GDI32, WINMM, etc.)
-- **SafeDisc stubs** reconstructed for 4 encrypted functions + 2 jump tables
-- Currently blocked on: game initialization expects DirectX/window setup
+- **Window creation**: "X-Wing Alliance" window at 1536x864
+- **DirectX COM mocks**: Full mock objects for IDirectDraw, IDirectDrawSurface, IDirect3D, IDirect3DDevice, IDirectInput, IDirectInputDevice, IDirectSound, IDirectSoundBuffer (178 vtable bridges)
+- **357 total bridges** registered (179 Win32 API + 178 COM vtable)
+- **45 manual overrides** including 6 callback functions missed by code generator
+- **Callee-saved register protection**: g_ebx/g_esi/g_edi automatically preserved across all calls
+- **6 SafeDisc-encrypted jump tables** reconstructed with switch/goto
 
 ### Fixes Applied During Runtime Bringup
 
 | # | Fix | Impact |
 |---|-----|--------|
 | 1 | SafeDisc function stubs (4 encrypted functions) | Bypass copy protection checks |
-| 2 | SafeDisc jump table reconstruction (2 switch statements) | Correct control flow in CRT |
+| 2 | SafeDisc jump table reconstruction (6 switch statements) | Correct control flow in CRT + game |
 | 3 | Null function pointer guard (ICALL(0) → no-op) | Prevent crash on null callback |
 | 4 | Retry/fail dialog stub (sub_00433C50 → returns 'F') | Avoid infinite retry loop |
 | 5 | SBH (small block heap) disabled, heap handle set | Use system heap instead of VC6 SBH |
 | 6 | 36 CRT lock objects pre-initialized | Multi-threaded CRT support |
 | 7 | `_initstdio` manual implementation | stdin/stdout/stderr FILE structs |
 | 8 | VEH crash handler with ring buffer trace | Diagnostics for runtime crashes |
-| 9 | `TEST x,x; jge` codegen fix (1,122 instances) | Correct signed-negative checks |
+| 9 | `TEST x,x; jge/jg/jle` codegen fix (1,122 instances) | Correct signed-negative checks |
 | 10 | `repne scasb` / `repe cmpsb` codegen fix (961 instances) | Correct string operations |
-| 11 | `TEST x,x; jbe` codegen fix (208 instances) | Correct unsigned flag checks |
-| 12 | OutputDebugStringA tracing | Capture game debug messages |
-| 13 | Watchdog uses TerminateProcess (avoids loader lock) | Clean shutdown on hang |
+| 11 | `TEST x,x; jbe/ja` codegen fix (208 instances) | Correct unsigned flag checks |
+| 12 | `DEC x; jcc` codegen fix (1,205 instances) | Compare result vs 0, not 1 |
+| 13 | COM mock infrastructure (IDirectDraw, IDirect3D, etc.) | Game passes DirectX init |
+| 14 | Callee-saved register protection in RECOMP_CALL | Fixes systemic ebx/esi/edi corruption |
+| 15 | 6 callback function manual overrides | Missed entry points for function pointers |
+| 16 | Watchdog uses TerminateProcess (avoids loader lock) | Clean shutdown on hang |
 
 ## Binary Analysis
 
@@ -117,8 +124,10 @@ xwa-recomp/
 │   └── regen_0000.py           # Targeted regeneration of recomp_0000.c + dispatch/header
 ├── src/
 │   └── game/
-│       ├── main.c              # Entry point, VEH handler, memory setup
+│       ├── main.c              # Entry point, VEH handler, memory setup, manual overrides
 │       ├── imports.c           # Win32/DirectX import bridges (179 functions)
+│       ├── com_mocks.c         # COM mock objects (DirectDraw, Direct3D, DirectInput, etc.)
+│       ├── com_mocks.h         # COM mock types and creation APIs
 │       └── recomp/
 │           ├── recomp_types.h  # Register model, memory macros, dispatch
 │           └── gen/            # Auto-generated code (gitignored)
@@ -140,11 +149,13 @@ x86 registers are mapped to C global variables following the [burnout3](https://
 /* Volatile (caller-saved) */
 uint32_t g_eax, g_ecx, g_edx, g_esp;
 
-/* Callee-saved (global for implicit parameter passing) */
+/* Callee-saved (auto-preserved by RECOMP_CALL/RECOMP_ICALL macros) */
 uint32_t g_ebx, g_esi, g_edi;
 
 /* ebp is local per-function (FPO) */
 ```
+
+Callee-saved registers (ebx, esi, edi) are automatically saved/restored around every `RECOMP_CALL` and `RECOMP_ICALL`, enforcing the x86 calling convention even when recompiled functions have stack imbalances.
 
 ### Memory Access
 

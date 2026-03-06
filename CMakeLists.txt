@@ -30,8 +30,10 @@ if(MSVC)
     add_compile_options(/wd4018)  # signed/unsigned mismatch
 
     # Optimization for Release
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Oi /GL")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
+    # NOTE: /GL (whole program optimization) disabled - it causes MSVC to misoptimize
+    # cross-function global register variable accesses in the recompiled code.
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Oi")
+    #set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
 endif()
 
 # ============================================================
@@ -42,6 +44,7 @@ endif()
 set(RUNTIME_SOURCES
     src/game/main.c
     src/game/imports.c
+    src/game/com_mocks.c
 )
 
 # Generated recompiled code (if present)

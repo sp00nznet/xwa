@@ -39,9 +39,10 @@ Generated code goes to `src/game/recomp/gen/` (gitignored).
 
 ## Architecture
 - **tools/**: Python toolchain (PE analyzer, disassembler, lifter, translator)
-- **src/game/**: Game entry point, recomp infrastructure, manual overrides
-- **src/kernel/**: Win32 API bridges and compatibility
-- **src/hal/**: Hardware abstraction (D3D11 rendering, audio, input)
+- **src/game/main.c**: Entry point, VEH handler, memory setup, 45 manual overrides
+- **src/game/imports.c**: Win32/DirectX import bridges (179 functions)
+- **src/game/com_mocks.c/h**: COM mock objects for DirectDraw/Direct3D/DirectInput/DirectSound (178 vtable bridges)
+- **src/game/recomp/**: Register model, memory macros, dispatch, generated code
 - **config/**: Function tables, switch tables, manual annotations
 
 ## Key Patterns
@@ -50,3 +51,6 @@ Generated code goes to `src/game/recomp/gen/` (gitignored).
 - Indirect calls: RECOMP_ICALL dispatch with 3-tier lookup (manual, auto, API)
 - Conditions: Pattern-matched from flag-setter to flag-consumer (CMP_EQ, TEST_Z, etc.)
 - Stack: PUSH32/POP32 macros operating on simulated stack via g_esp
+- Callee-saved: RECOMP_CALL/RECOMP_ICALL auto-save/restore g_ebx, g_esi, g_edi
+- COM mocks: vtable bridges at 0xBBxxxxxx markers, dedicated COM heap
+- Manual overrides: `#define esp g_esp` pattern needed in main.c functions
