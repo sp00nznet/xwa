@@ -1815,6 +1815,17 @@ static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 a
                 peek_count, g_eax, pmsg->message, (uint32_t)(uintptr_t)pmsg->hwnd, a4);
         fflush(stderr);
     }
+    /* Keep D3D11 window alive while game tick is stubbed:
+     * present a frame every ~1000 PeekMessage calls (roughly 60 fps) */
+    {
+        extern int d3d11_is_initialized(void);
+        extern void d3d11_begin_scene(void);
+        extern void d3d11_present(void);
+        if (d3d11_is_initialized() && (peek_count % 1000 == 0)) {
+            d3d11_begin_scene();
+            d3d11_present();
+        }
+    }
     g_esp += 24;
 }
 

@@ -49,6 +49,7 @@ static void heap_check(const char* where) {
 #include <string.h>
 #include "recomp/recomp_types.h"
 #include "com_mocks.h"
+#include "d3d11_renderer.h"
 
 /* Import bridge table (defined in main.c) */
 extern recomp_dispatch_entry_t g_import_bridges[];
@@ -133,6 +134,7 @@ static mock_com_obj_t* alloc_mock(uint32_t tag, uint32_t vtable_addr) {
  * 0xBB001120-0xBB00113F  IDirectInputDevice (32 slots)
  * 0xBB001140-0xBB00115F  IDirectSound (16 slots)
  * 0xBB001160-0xBB00117F  IDirectSoundBuffer (32 slots)
+ * 0xBB001180-0xBB00119F  IDirect3DTexture (16 slots)
  * ============================================================ */
 
 #define MK_DD       0xBB001000
@@ -146,6 +148,7 @@ static mock_com_obj_t* alloc_mock(uint32_t tag, uint32_t vtable_addr) {
 #define MK_DIDEV    0xBB001120
 #define MK_DS       0xBB001140
 #define MK_DSB      0xBB001160
+#define MK_D3DTEX   0xBB001180
 
 /* ============================================================
  * Forward declarations for all mock objects
@@ -161,6 +164,7 @@ static uint32_t g_dinput_vtable_addr;
 static uint32_t g_didevice_vtable_addr;
 static uint32_t g_dsound_vtable_addr;
 static uint32_t g_dsbuffer_vtable_addr;
+static uint32_t g_d3dtexture_vtable_addr;
 
 /* Pixel buffer for surfaces (640x480x2 = 614400 bytes) */
 #define SURFACE_BUF_SIZE (640 * 480 * 2)
@@ -175,6 +179,12 @@ static mock_com_obj_t* g_back_surface = NULL;
 static uint32_t g_display_width = 640;
 static uint32_t g_display_height = 480;
 static uint32_t g_display_bpp = 16;
+
+/* Captured HWND for D3D11 renderer */
+static HWND g_game_hwnd = NULL;
+
+/* Texture handle counter (D3D5 texture handles are 1-based) */
+static uint32_t g_next_texture_handle = 1;
 
 /* ============================================================
  * Generic COM stubs by arg count (stdcall)
@@ -343,6 +353,13 @@ static void dd_SetCooperativeLevel(void) {
     uint32_t flags = MEM32(g_esp + 12);
     COM_LOG("[COM] IDirectDraw::SetCooperativeLevel(hwnd=0x%08X, flags=0x%08X)\n",
             hwnd, flags);
+
+    /* Capture HWND for D3D11 renderer */
+    if (hwnd && !g_game_hwnd) {
+        g_game_hwnd = (HWND)(uintptr_t)hwnd;
+        COM_LOG("[COM] Captured game HWND: 0x%08X\n", hwnd);
+    }
+
     g_eax = 0;
     g_esp += 16; /* pop ret + 3 args */
 }
@@ -356,6 +373,12 @@ static void dd_SetDisplayMode(void) {
     g_display_width = w;
     g_display_height = h;
     g_display_bpp = bpp;
+
+    /* Initialize D3D11 renderer now that we have HWND and resolution */
+    if (g_game_hwnd && !d3d11_is_initialized()) {
+        d3d11_init((void*)g_game_hwnd, w, h);
+    }
+
     g_eax = 0;
     g_esp += 20; /* pop ret + 4 args */
 }
@@ -475,6 +498,29 @@ static void dd_EnumDisplayModes(void) {
  * [31] SetPalette (2) [32] Unlock (2)
  * ============================================================ */
 
+static void dds_QueryInterface(void) {
+    /* this=esp+4, riid=esp+8, ppvObj=esp+12 */
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t riid_ptr = MEM32(g_esp + 8);
+    uint32_t ppv = MEM32(g_esp + 12);
+
+    /* Check GUID to determine what interface is requested.
+     * IID_IDirect3DTexture  = {2CDCD9E0-...} (first DWORD = 0x2CDCD9E0)
+     * IID_IDirect3DTexture2 = {93281502-...} (first DWORD = 0x93281502)
+     * We treat any QI from a surface as a texture interface request. */
+    uint32_t guid_dw0 = MEM32(riid_ptr);
+    COM_LOG("[COM] IDirectDrawSurface::QueryInterface(riid_dw0=0x%08X)\n", guid_dw0);
+
+    /* Create an IDirect3DTexture mock that points back to this surface */
+    mock_com_obj_t* tex = alloc_mock(MOCK_TAG_D3D, g_d3dtexture_vtable_addr);
+    tex->extra[0] = pThis; /* Back-pointer to the surface */
+    tex->extra[1] = 0;     /* Texture handle (assigned on GetHandle) */
+    MEM32(ppv) = (uint32_t)(uintptr_t)tex;
+
+    g_eax = 0; /* S_OK */
+    g_esp += 16; /* pop ret + 3 args */
+}
+
 static void dds_Release(void) {
     uint32_t pThis = MEM32(g_esp + 4);
     mock_com_obj_t* obj = (mock_com_obj_t*)(uintptr_t)pThis;
@@ -557,6 +603,19 @@ static void dds_GetSurfaceDesc(void) {
 
 static void dds_Flip(void) {
     /* this=esp+4, pSurf=esp+8, flags=esp+12 */
+    if (d3d11_is_initialized()) {
+        /* Upload the back buffer 2D surface before presenting */
+        if (g_back_surface && g_back_surface->extra[0]) {
+            d3d11_upload_surface(
+                (uint8_t*)(uintptr_t)g_back_surface->extra[0],
+                g_back_surface->extra[1],
+                g_back_surface->extra[2],
+                g_back_surface->extra[4],
+                g_back_surface->extra[3]
+            );
+        }
+        d3d11_present();
+    }
     g_eax = 0;
     g_esp += 16;
 }
@@ -823,17 +882,37 @@ static void d3ddev_GetCaps(void) {
 }
 
 static void d3ddev_BeginScene(void) {
+    d3d11_begin_scene();
     g_eax = 0;
     g_esp += 8;
 }
 
 static void d3ddev_EndScene(void) {
+    d3d11_end_scene();
     g_eax = 0;
     g_esp += 8;
 }
 
 static void d3ddev_Execute(void) {
     /* this=esp+4, pEB=esp+8, pViewport=esp+12, flags=esp+16 */
+    uint32_t pEB = MEM32(g_esp + 8);
+
+    if (pEB && d3d11_is_initialized()) {
+        mock_com_obj_t* eb = (mock_com_obj_t*)(uintptr_t)pEB;
+        uint8_t* buffer_data = (uint8_t*)(uintptr_t)eb->extra[0];
+        /* Execute data stored in extra[2..6]:
+         * extra[2] = dwVertexOffset, extra[3] = dwVertexCount
+         * extra[4] = dwInstructionOffset, extra[5] = dwInstructionLength */
+        uint32_t vertex_offset = eb->extra[2];
+        uint32_t vertex_count = eb->extra[3];
+        uint32_t inst_offset = eb->extra[4];
+        uint32_t inst_length = eb->extra[5];
+
+        if (buffer_data && vertex_count > 0 && inst_length > 0) {
+            d3d11_execute(buffer_data, vertex_offset, vertex_count, inst_offset, inst_length);
+        }
+    }
+
     g_eax = 0;
     g_esp += 20;
 }
@@ -888,6 +967,18 @@ static void d3ddev_GetDirect3D(void) {
 
 static void d3dvp_SetViewport(void) {
     /* this=esp+4, pData=esp+8 */
+    /* D3DVIEWPORT structure:
+     * +0  dwSize, +4 dwX, +8 dwY, +12 dwWidth, +16 dwHeight
+     * +20 dvScaleX, +24 dvScaleY, +28 dvMaxX, +32 dvMaxY
+     * +36 dvMinZ, +40 dvMaxZ */
+    uint32_t pData = MEM32(g_esp + 8);
+    if (pData && d3d11_is_initialized()) {
+        uint32_t x = MEM32(pData + 4);
+        uint32_t y = MEM32(pData + 8);
+        uint32_t w = MEM32(pData + 12);
+        uint32_t h = MEM32(pData + 16);
+        d3d11_set_viewport(x, y, w, h);
+    }
     g_eax = 0;
     g_esp += 12;
 }
@@ -932,6 +1023,106 @@ static void d3deb_Unlock(void) {
 
 static void d3deb_SetExecuteData(void) {
     /* this=esp+4, pData=esp+8 */
+    /* D3DEXECUTEDATA structure:
+     * +0  dwSize
+     * +4  dwVertexOffset
+     * +8  dwVertexCount
+     * +12 dwInstructionOffset
+     * +16 dwInstructionLength
+     * +20 dwHVertexOffset
+     * +24 dwStatus
+     */
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t pData = MEM32(g_esp + 8);
+    mock_com_obj_t* eb = (mock_com_obj_t*)(uintptr_t)pThis;
+
+    if (pData) {
+        eb->extra[2] = MEM32(pData + 4);  /* dwVertexOffset */
+        eb->extra[3] = MEM32(pData + 8);  /* dwVertexCount */
+        eb->extra[4] = MEM32(pData + 12); /* dwInstructionOffset */
+        eb->extra[5] = MEM32(pData + 16); /* dwInstructionLength */
+    }
+
+    g_eax = 0;
+    g_esp += 12;
+}
+
+/* ============================================================
+ * IDirect3DTexture Methods
+ *
+ * [0] QueryInterface (3) [1] AddRef (1) [2] Release (1)
+ * [3] Initialize (3) [4] GetHandle (3) [5] PaletteChanged (3)
+ * [6] Load (2) [7] Unload (1)
+ * ============================================================ */
+
+static void d3dtex_GetHandle(void) {
+    /* this=esp+4, pDevice=esp+8, pHandle=esp+12 */
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t pHandle = MEM32(g_esp + 12);
+
+    mock_com_obj_t* tex_obj = (mock_com_obj_t*)(uintptr_t)pThis;
+    /* extra[0] = pointer to the underlying surface mock */
+    mock_com_obj_t* surf = (mock_com_obj_t*)(uintptr_t)tex_obj->extra[0];
+
+    /* Assign a texture handle if not already assigned */
+    uint32_t handle = tex_obj->extra[1];
+    if (handle == 0) {
+        handle = g_next_texture_handle++;
+        tex_obj->extra[1] = handle;
+
+        /* Register with D3D11 renderer */
+        if (surf && surf->extra[0]) {
+            d3d11_register_texture(handle,
+                (uint8_t*)(uintptr_t)surf->extra[0],  /* pixels */
+                surf->extra[1],   /* width */
+                surf->extra[2],   /* height */
+                surf->extra[4],   /* pitch */
+                surf->extra[3]    /* bpp */
+            );
+        }
+        COM_LOG("[COM] IDirect3DTexture::GetHandle -> %u (surf=0x%08X, %ux%u)\n",
+                handle, (uint32_t)(uintptr_t)surf,
+                surf ? surf->extra[1] : 0, surf ? surf->extra[2] : 0);
+    }
+
+    if (pHandle) MEM32(pHandle) = handle;
+    g_eax = 0;
+    g_esp += 16; /* pop ret + 3 args */
+}
+
+static void d3dtex_Load(void) {
+    /* this=esp+4, pSrcTexture=esp+8 */
+    /* Copy texture data from source to this texture */
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t pSrc = MEM32(g_esp + 8);
+    mock_com_obj_t* dst_tex = (mock_com_obj_t*)(uintptr_t)pThis;
+    mock_com_obj_t* src_tex = (mock_com_obj_t*)(uintptr_t)pSrc;
+
+    if (dst_tex && src_tex) {
+        mock_com_obj_t* dst_surf = (mock_com_obj_t*)(uintptr_t)dst_tex->extra[0];
+        mock_com_obj_t* src_surf = (mock_com_obj_t*)(uintptr_t)src_tex->extra[0];
+        if (dst_surf && src_surf && dst_surf->extra[0] && src_surf->extra[0]) {
+            uint32_t w = dst_surf->extra[1];
+            uint32_t h = dst_surf->extra[2];
+            uint32_t pitch = dst_surf->extra[4];
+            uint32_t src_pitch = src_surf->extra[4];
+            uint32_t src_h = src_surf->extra[2];
+            uint32_t copy_h = (h < src_h) ? h : src_h;
+            uint32_t copy_pitch = (pitch < src_pitch) ? pitch : src_pitch;
+            for (uint32_t y = 0; y < copy_h; y++) {
+                memcpy((void*)(uintptr_t)(dst_surf->extra[0] + y * pitch),
+                       (void*)(uintptr_t)(src_surf->extra[0] + y * src_pitch),
+                       copy_pitch);
+            }
+
+            /* Invalidate D3D11 texture so it gets re-uploaded */
+            uint32_t handle = dst_tex->extra[1];
+            if (handle > 0) {
+                d3d11_invalidate_texture(handle);
+            }
+        }
+    }
+
     g_eax = 0;
     g_esp += 12;
 }
@@ -1219,7 +1410,7 @@ void com_mocks_init(void) {
         recomp_func_t funcs[DDS_METHODS];
         for (int i = 0; i < DDS_METHODS; i++) markers[i] = MK_DDS + i;
 
-        funcs[0]  = com_stub_3arg;          /* [0]  QueryInterface */
+        funcs[0]  = dds_QueryInterface;      /* [0]  QueryInterface */
         funcs[1]  = dd_AddRef;              /* [1]  AddRef */
         funcs[2]  = dds_Release;            /* [2]  Release */
         funcs[3]  = com_stub_2arg;          /* [3]  AddAttachedSurface */
@@ -1379,6 +1570,26 @@ void com_mocks_init(void) {
 
         g_d3dexecbuf_vtable_addr = alloc_vtable(markers, 10);
         for (int i = 0; i < 10; i++)
+            register_bridge(markers[i], funcs[i]);
+    }
+
+    /* ---- IDirect3DTexture (8 methods) ---- */
+    {
+        uint32_t markers[8];
+        recomp_func_t funcs[8];
+        for (int i = 0; i < 8; i++) markers[i] = MK_D3DTEX + i;
+
+        funcs[0] = com_stub_3arg;    /* QueryInterface */
+        funcs[1] = dd_AddRef;        /* AddRef */
+        funcs[2] = dd_Release;       /* Release */
+        funcs[3] = com_stub_3arg;    /* Initialize */
+        funcs[4] = d3dtex_GetHandle; /* GetHandle (3) */
+        funcs[5] = com_stub_3arg;    /* PaletteChanged */
+        funcs[6] = d3dtex_Load;      /* Load (2) */
+        funcs[7] = com_stub_1arg;    /* Unload */
+
+        g_d3dtexture_vtable_addr = alloc_vtable(markers, 8);
+        for (int i = 0; i < 8; i++)
             register_bridge(markers[i], funcs[i]);
     }
 

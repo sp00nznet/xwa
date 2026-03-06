@@ -12,8 +12,9 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 3** | **Complete** | x86-to-C code generation (2,701 functions, 606,424 lines of C) |
 | **Phase 4** | **Complete** | Compilation and linking (0 errors, 1 warning) |
 | **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
-| **Phase 6** | **In Progress** | Win32/DirectX HAL — COM mocks operational, main loop running |
-| Phase 7 | Pending | D3D11 rendering backend, audio, full game logic |
+| **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
+| **Phase 7** | **In Progress** | D3D11 rendering backend initialized, execute buffer parser wired |
+| Phase 8 | Pending | Game tick implementation, audio, full game logic |
 
 ### Runtime Progress
 
@@ -29,6 +30,7 @@ The recompiled binary boots through the full game initialization sequence and en
 - **45 manual overrides** including 6 callback functions missed by code generator
 - **Callee-saved register protection**: g_ebx/g_esi/g_edi automatically preserved across all calls
 - **6 SafeDisc-encrypted jump tables** reconstructed with switch/goto
+- **D3D11 rendering backend**: Device (feature level 11.0), swap chain, HLSL shaders, execute buffer parser, texture manager, 2D surface blit — all wired and initialized
 
 ### Fixes Applied During Runtime Bringup
 
@@ -50,6 +52,8 @@ The recompiled binary boots through the full game initialization sequence and en
 | 14 | Callee-saved register protection in RECOMP_CALL | Fixes systemic ebx/esi/edi corruption |
 | 15 | 6 callback function manual overrides | Missed entry points for function pointers |
 | 16 | Watchdog uses TerminateProcess (avoids loader lock) | Clean shutdown on hang |
+| 17 | D3D11 rendering backend (device, shaders, pipeline) | Modern GPU rendering via execute buffer translation |
+| 18 | IDirect3DTexture mock with GetHandle/Load | Texture handle tracking for execute buffer rendering |
 
 ## Binary Analysis
 
@@ -123,14 +127,18 @@ xwa-recomp/
 │   ├── fix_test_cond.py        # Fix TEST codegen bug (same-register CMP → TEST_NS/G/LE)
 │   └── regen_0000.py           # Targeted regeneration of recomp_0000.c + dispatch/header
 ├── src/
-│   └── game/
-│       ├── main.c              # Entry point, VEH handler, memory setup, manual overrides
-│       ├── imports.c           # Win32/DirectX import bridges (179 functions)
-│       ├── com_mocks.c         # COM mock objects (DirectDraw, Direct3D, DirectInput, etc.)
-│       ├── com_mocks.h         # COM mock types and creation APIs
-│       └── recomp/
-│           ├── recomp_types.h  # Register model, memory macros, dispatch
-│           └── gen/            # Auto-generated code (gitignored)
+│   ├── game/
+│   │   ├── main.c              # Entry point, VEH handler, memory setup, manual overrides
+│   │   ├── imports.c           # Win32/DirectX import bridges (179 functions)
+│   │   ├── com_mocks.c         # COM mock objects (DirectDraw, Direct3D, DirectInput, etc.)
+│   │   ├── com_mocks.h         # COM mock types and creation APIs
+│   │   └── recomp/
+│   │       ├── recomp_types.h  # Register model, memory macros, dispatch
+│   │       └── gen/            # Auto-generated code (gitignored)
+│   └── hal/
+│       ├── d3d11_renderer.c    # D3D11 backend: device, execute buffer parser, textures
+│       ├── d3d11_renderer.h    # D3D5 structures, render state enums, renderer API
+│       └── shaders.h           # HLSL shader source (compiled at runtime)
 ├── config/
 │   ├── pe_analysis.json        # PE metadata
 │   └── functions.json          # Function list with addresses/sizes

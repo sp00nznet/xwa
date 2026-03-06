@@ -45,6 +45,7 @@ set(RUNTIME_SOURCES
     src/game/main.c
     src/game/imports.c
     src/game/com_mocks.c
+    src/hal/d3d11_renderer.c
 )
 
 # Generated recompiled code (if present)
@@ -70,6 +71,7 @@ target_include_directories(xwa_recomp PRIVATE
     src/game
     src/game/recomp
     src/game/recomp/gen
+    src/hal
 )
 
 # ============================================================
@@ -87,12 +89,11 @@ target_link_libraries(xwa_recomp PRIVATE
     winmm
     dbghelp
 
-    # TODO: DirectX libraries for HAL
-    # d3d11
-    # dxgi
-    # dxguid
-    # xinput
-    # xaudio2
+    # DirectX libraries for HAL
+    d3d11
+    dxgi
+    dxguid
+    d3dcompiler
 )
 
 # ============================================================

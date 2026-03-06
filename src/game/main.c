@@ -479,8 +479,12 @@ static void manual_sub_00539760(void) {
 /* sub_005397D0: Main game tick function.
  * Handles input, game state updates, rendering for one frame.
  * TODO: Properly implement this large function (~300 bytes).
- * For now, stub it to return 0 (skip game logic). */
+ * For now, stub it to return 0 (skip game logic), but present
+ * a frame so the D3D11 window stays visible. */
 static void manual_sub_005397D0(void) {
+    /* Game tick is stubbed - rendering is driven by PeekMessage idle present.
+     * When this function is properly implemented, it will call BeginScene,
+     * Execute (with execute buffers), EndScene, and Flip. */
     g_eax = 0;
     g_esp += 4;  /* pop return address */
 }
