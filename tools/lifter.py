@@ -588,6 +588,9 @@ class Lifter:
             lines.append(f"MEMSET32((void*)ADDR(edi), eax, ecx); {comment}")
             lines.append(f"edi += ecx * 4; ecx = 0;")
 
+        elif m == 'rep stosw':
+            lines.append(f"{{ uint32_t _i; for (_i = 0; _i < ecx; _i++) {{ MEM16(edi) = (uint16_t)LO16(eax); edi += 2; }} ecx = 0; }} {comment}")
+
         elif m == 'movsb':
             lines.append(f"MEM8(edi) = MEM8(esi); esi += _df; edi += _df; {comment}")
 
@@ -596,6 +599,9 @@ class Lifter:
 
         elif m == 'stosb':
             lines.append(f"MEM8(edi) = LO8(eax); edi += _df; {comment}")
+
+        elif m == 'stosw':
+            lines.append(f"MEM16(edi) = (uint16_t)LO16(eax); edi += _df * 2; {comment}")
 
         elif m == 'stosd':
             lines.append(f"MEM32(edi) = eax; edi += _df * 4; {comment}")
@@ -677,6 +683,11 @@ class Lifter:
                 lines.append(f"if ({cond}) goto L_{target:08X}; {comment}")
             else:
                 lines.append(f"if ({cond}) {{ /* indirect jcc */ }} {comment}")
+
+        elif m == 'jecxz' or m == 'jcxz':
+            target = insn.get_branch_target()
+            if target:
+                lines.append(f"if (ecx == 0) goto L_{target:08X}; {comment}")
 
         # --- x87 FPU ---
         elif m == 'fld':

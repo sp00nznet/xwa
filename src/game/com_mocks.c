@@ -313,12 +313,14 @@ static void dd_CreateSurface(void) {
         }
     } else {
         /* Off-screen or texture surface */
-        uint32_t w = MEM32(pDesc + 8);   /* dwWidth (offset 8) */
-        uint32_t h = MEM32(pDesc + 12);  /* dwHeight (offset 12) */
+        /* DDSURFACEDESC: dwHeight at offset 8, dwWidth at offset 12 */
+        uint32_t h = MEM32(pDesc + 8);   /* dwHeight (offset 8) */
+        uint32_t w = MEM32(pDesc + 12);  /* dwWidth (offset 12) */
         uint32_t bpp = 16;
-        /* Check for dwWidth/dwHeight flags (DDSD_WIDTH=0x4, DDSD_HEIGHT=0x2) */
+        /* DDSD_HEIGHT=0x2, DDSD_WIDTH=0x4 */
         if (!(flags & 0x4) || w == 0) w = g_display_width;
         if (!(flags & 0x2) || h == 0) h = g_display_height;
+        COM_LOG("[COM]   offscreen: w=%u h=%u\n", w, h);
         uint32_t size = w * h * (bpp / 8);
         uint8_t* buf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
         surf = create_mock_surface(buf);
@@ -328,8 +330,8 @@ static void dd_CreateSurface(void) {
     }
 
     MEM32(ppSurf) = (uint32_t)(uintptr_t)surf;
-    COM_LOG("[COM]   -> surface at 0x%08X (buf=0x%08X)\n",
-            (uint32_t)(uintptr_t)surf, surf->extra[0]);
+    { static int _cs; fprintf(stderr, "[COM] CreateSurface #%d: surf=0x%08X buf=0x%08X w=%u h=%u caps=0x%X\n",
+            _cs++, (uint32_t)(uintptr_t)surf, surf->extra[0], surf->extra[1], surf->extra[2], caps); }
 
     g_eax = 0; /* DD_OK */
     g_esp += 20; /* pop ret + 4 args */
@@ -373,6 +375,14 @@ static void dd_SetDisplayMode(void) {
     g_display_width = w;
     g_display_height = h;
     g_display_bpp = bpp;
+
+    /* Set game-internal display state globals.
+     * These are normally set by sub_0053ED60 (DD init) which may not execute
+     * correctly in recomp. The rendering code reads these to select bpp paths. */
+    MEM32(0x9F700A) = bpp;   /* display BPP - used by all 2D blit functions */
+    MEM32(0x9F7002) = bpp;   /* pitch divisor / bpp copy */
+    MEM32(0x9F708E) = w - 1; /* display width - 1 (0x27F for 640) */
+    MEM32(0x9F7096) = h - 1; /* display height - 1 (0x1DF for 480) */
 
     /* Initialize D3D11 renderer now that we have HWND and resolution */
     if (g_game_hwnd && !d3d11_is_initialized()) {
@@ -549,6 +559,7 @@ static void dds_Lock(void) {
     /* this=esp+4, pDestRect=esp+8, pDesc=esp+12, flags=esp+16, hEvent=esp+20 */
     uint32_t pThis = MEM32(g_esp + 4);
     uint32_t pDesc = MEM32(g_esp + 12);
+    { static int _lc; if (_lc < 30) { const char* stype = (pThis == (uint32_t)(uintptr_t)g_primary_surface) ? "PRIMARY" : (pThis == (uint32_t)(uintptr_t)g_back_surface) ? "BACK" : "OFFSCREEN"; fprintf(stderr, "[COM] dds_Lock #%d (this=0x%08X [%s], desc=0x%08X)\n", _lc, pThis, stype, pDesc); _lc++; } }
 
     mock_com_obj_t* surf = (mock_com_obj_t*)(uintptr_t)pThis;
     uint32_t pixbuf = surf->extra[0];
@@ -559,12 +570,14 @@ static void dds_Lock(void) {
 
     if (pDesc) {
         /* Fill DDSURFACEDESC with surface info */
+        /* dwHeight at offset 8, dwWidth at offset 12 */
         MEM32(pDesc + 4) = 0x100F; /* DDSD_PITCH|DDSD_WIDTH|DDSD_HEIGHT|DDSD_LPSURFACE|DDSD_PIXELFORMAT */
-        MEM32(pDesc + 8) = width;
-        MEM32(pDesc + 12) = height;
+        MEM32(pDesc + 8) = height;
+        MEM32(pDesc + 12) = width;
         MEM32(pDesc + 16) = pitch;
         MEM32(pDesc + 36) = pixbuf;  /* lpSurface at offset 36 (0x24) */
     }
+    { static int _ll; if (_ll < 30) { fprintf(stderr, "[COM]   Lock -> lpSurface=0x%08X w=%u h=%u pitch=%u\n", pixbuf, width, height, pitch); _ll++; } }
 
     g_eax = 0; /* DD_OK */
     g_esp += 24; /* pop ret + 5 args */
@@ -572,6 +585,23 @@ static void dds_Lock(void) {
 
 static void dds_Unlock(void) {
     /* this=esp+4, pRect=esp+8 */
+    uint32_t pThis = MEM32(g_esp + 4);
+    { static int _uc; if (_uc < 40) {
+        mock_com_obj_t* surf = (mock_com_obj_t*)(uintptr_t)pThis;
+        if (surf && surf->extra[0]) {
+            uint8_t* buf = (uint8_t*)(uintptr_t)surf->extra[0];
+            uint32_t total = surf->extra[1] * surf->extra[2] * 2;
+            int nz = 0; uint32_t first_nz_off = 0;
+            for (uint32_t i = 0; i < total; i++) {
+                if (buf[i]) { nz = 1; first_nz_off = i; break; }
+            }
+            const char* stype = (pThis == (uint32_t)(uintptr_t)g_primary_surface) ? "PRIMARY" :
+                                (pThis == (uint32_t)(uintptr_t)g_back_surface) ? "BACK" : "OFFSCREEN";
+            fprintf(stderr, "[COM] dds_Unlock(%s 0x%08X) w=%u h=%u nonzero=%d first_nz_off=%u\n",
+                    stype, pThis, surf->extra[1], surf->extra[2], nz, first_nz_off);
+        }
+        _uc++;
+    } }
     g_eax = 0;
     g_esp += 12;
 }
@@ -584,8 +614,9 @@ static void dds_GetSurfaceDesc(void) {
     mock_com_obj_t* surf = (mock_com_obj_t*)(uintptr_t)pThis;
     if (pDesc) {
         MEM32(pDesc + 4) = 0x1006; /* flags */
-        MEM32(pDesc + 8) = surf->extra[1]; /* width */
-        MEM32(pDesc + 12) = surf->extra[2]; /* height */
+        /* dwHeight at offset 8, dwWidth at offset 12 */
+        MEM32(pDesc + 8) = surf->extra[2]; /* height */
+        MEM32(pDesc + 12) = surf->extra[1]; /* width */
         MEM32(pDesc + 16) = surf->extra[4]; /* pitch */
         MEM32(pDesc + 72) = 32;  /* DDPIXELFORMAT.dwSize */
         MEM32(pDesc + 76) = 0x40;  /* DDPF_RGB */
@@ -606,6 +637,15 @@ static void dds_Flip(void) {
     if (d3d11_is_initialized()) {
         /* Upload the back buffer 2D surface before presenting */
         if (g_back_surface && g_back_surface->extra[0]) {
+            { static int _fc; if (_fc < 20) {
+                uint8_t* buf = (uint8_t*)(uintptr_t)g_back_surface->extra[0];
+                uint32_t sz = g_back_surface->extra[1] * g_back_surface->extra[2] * 2;
+                int nz = 0; uint32_t nz_count = 0;
+                for (uint32_t i = 0; i < sz; i++) { if (buf[i]) { nz = 1; nz_count++; } }
+                fprintf(stderr, "[COM] dds_Flip #%d: back_buf=0x%X %ux%u nz_bytes=%u/%u\n",
+                    _fc, g_back_surface->extra[0], g_back_surface->extra[1], g_back_surface->extra[2], nz_count, sz);
+                _fc++;
+            } }
             d3d11_upload_surface(
                 (uint8_t*)(uintptr_t)g_back_surface->extra[0],
                 g_back_surface->extra[1],
@@ -613,6 +653,9 @@ static void dds_Flip(void) {
                 g_back_surface->extra[4],
                 g_back_surface->extra[3]
             );
+            /* Clear back buffer after upload so we can detect game-drawn pixels next frame */
+            memset((void*)(uintptr_t)g_back_surface->extra[0], 0,
+                   g_back_surface->extra[2] * g_back_surface->extra[4]);
         }
         d3d11_present();
     }
@@ -622,12 +665,119 @@ static void dds_Flip(void) {
 
 static void dds_Blt(void) {
     /* this=esp+4, pDestRect=esp+8, pSrcSurf=esp+12, pSrcRect=esp+16, flags=esp+20, pBltFx=esp+24 */
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t pDestRect = MEM32(g_esp + 8);
+    uint32_t pSrcSurf = MEM32(g_esp + 12);
+    uint32_t pSrcRect = MEM32(g_esp + 16);
+    uint32_t dwFlags = MEM32(g_esp + 20);
+    uint32_t pBltFx = MEM32(g_esp + 24);
+
+    mock_com_obj_t* dst = (mock_com_obj_t*)(uintptr_t)pThis;
+    mock_com_obj_t* src = pSrcSurf ? (mock_com_obj_t*)(uintptr_t)pSrcSurf : NULL;
+
+    { static int _bc; if (_bc < 10) { fprintf(stderr, "[COM] dds_Blt(dst=0x%08X, src=0x%08X, flags=0x%08X, bltfx=0x%08X)\n", pThis, pSrcSurf, dwFlags, pBltFx); _bc++; } }
+
+    if (!src && dst && dst->extra[0] && (dwFlags & 0x400) && pBltFx) {
+        /* DDBLT_COLORFILL (0x400): fill destination with solid color */
+        /* DDBLTFX.dwFillColor is at offset 80 */
+        uint32_t fillColor = MEM32(pBltFx + 80);
+        uint32_t dstW = dst->extra[1], dstH = dst->extra[2];
+        uint32_t dstPitch = dst->extra[4];
+        uint32_t bpp = dst->extra[3] / 8;
+        if (bpp == 0) bpp = 2;
+        uint8_t* dstBuf = (uint8_t*)(uintptr_t)dst->extra[0];
+
+        /* Determine fill region from pDestRect (RECT: left, top, right, bottom) */
+        uint32_t x0 = 0, y0 = 0, x1 = dstW, y1 = dstH;
+        if (pDestRect) {
+            x0 = MEM32(pDestRect + 0);
+            y0 = MEM32(pDestRect + 4);
+            x1 = MEM32(pDestRect + 8);
+            y1 = MEM32(pDestRect + 12);
+            if (x1 > dstW) x1 = dstW;
+            if (y1 > dstH) y1 = dstH;
+        }
+
+        { static int _cf; if (_cf < 5) { fprintf(stderr, "[COM]   ColorFill: color=0x%04X rect=(%u,%u)-(%u,%u)\n", fillColor, x0, y0, x1, y1); _cf++; } }
+
+        if (bpp == 2) {
+            uint16_t fill16 = (uint16_t)fillColor;
+            for (uint32_t y = y0; y < y1; y++) {
+                uint16_t* row = (uint16_t*)(dstBuf + y * dstPitch);
+                for (uint32_t x = x0; x < x1; x++) {
+                    row[x] = fill16;
+                }
+            }
+        } else {
+            /* Generic byte fill for other bpp */
+            for (uint32_t y = y0; y < y1; y++) {
+                memset(dstBuf + y * dstPitch + x0 * bpp, (uint8_t)fillColor, (x1 - x0) * bpp);
+            }
+        }
+    } else if (src && dst && src->extra[0] && dst->extra[0]) {
+        /* Source-to-destination surface copy */
+        uint32_t srcW = src->extra[1], srcH = src->extra[2], srcPitch = src->extra[4];
+        uint32_t dstW = dst->extra[1], dstH = dst->extra[2], dstPitch = dst->extra[4];
+        uint32_t copyW = srcW < dstW ? srcW : dstW;
+        uint32_t copyH = srcH < dstH ? srcH : dstH;
+        uint32_t bpp = src->extra[3] / 8;
+        if (bpp == 0) bpp = 2;
+        uint32_t rowBytes = copyW * bpp;
+        uint8_t* srcBuf = (uint8_t*)(uintptr_t)src->extra[0];
+        uint8_t* dstBuf = (uint8_t*)(uintptr_t)dst->extra[0];
+        for (uint32_t y = 0; y < copyH; y++) {
+            memcpy(dstBuf + y * dstPitch, srcBuf + y * srcPitch, rowBytes);
+        }
+    }
     g_eax = 0;
     g_esp += 28; /* pop ret + 6 args */
 }
 
 static void dds_BltFast(void) {
     /* this=esp+4, x=esp+8, y=esp+12, pSrcSurf=esp+16, pSrcRect=esp+20, dwTrans=esp+24 */
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t dstX = MEM32(g_esp + 8);
+    uint32_t dstY = MEM32(g_esp + 12);
+    uint32_t pSrcSurf = MEM32(g_esp + 16);
+    uint32_t pSrcRect = MEM32(g_esp + 20);
+
+    mock_com_obj_t* dst = (mock_com_obj_t*)(uintptr_t)pThis;
+    mock_com_obj_t* src = pSrcSurf ? (mock_com_obj_t*)(uintptr_t)pSrcSurf : NULL;
+
+    { static int _bf; if (_bf < 20) {
+        int nz = 0;
+        if (src && src->extra[0]) {
+            uint8_t* sb = (uint8_t*)(uintptr_t)src->extra[0];
+            uint32_t sz = src->extra[1] * src->extra[2] * 2;
+            for (uint32_t i = 0; i < sz && i < 2000; i++) { if (sb[i]) { nz = 1; break; } }
+        }
+        fprintf(stderr, "[COM] dds_BltFast(dst=0x%08X, x=%u, y=%u, src=0x%08X, src_nonzero=%d)\n", pThis, dstX, dstY, pSrcSurf, nz); _bf++;
+    } }
+    /* Copy src rect to dst at (dstX, dstY) */
+    if (src && dst && src->extra[0] && dst->extra[0]) {
+        uint32_t srcX = 0, srcY = 0, srcW = src->extra[1], srcH = src->extra[2];
+        if (pSrcRect) {
+            srcX = MEM32(pSrcRect + 0); /* left */
+            srcY = MEM32(pSrcRect + 4); /* top */
+            srcW = MEM32(pSrcRect + 8) - srcX; /* right - left */
+            srcH = MEM32(pSrcRect + 12) - srcY; /* bottom - top */
+        }
+        uint32_t dstW = dst->extra[1], dstH = dst->extra[2];
+        uint32_t srcPitch = src->extra[4], dstPitch = dst->extra[4];
+        uint32_t bpp = src->extra[3] / 8;
+        if (bpp == 0) bpp = 2;
+        /* Clip to destination bounds */
+        if (dstX + srcW > dstW) srcW = dstW - dstX;
+        if (dstY + srcH > dstH) srcH = dstH - dstY;
+        uint32_t rowBytes = srcW * bpp;
+        uint8_t* srcBuf = (uint8_t*)(uintptr_t)src->extra[0];
+        uint8_t* dstBuf = (uint8_t*)(uintptr_t)dst->extra[0];
+        for (uint32_t y = 0; y < srcH; y++) {
+            memcpy(dstBuf + (dstY + y) * dstPitch + dstX * bpp,
+                   srcBuf + (srcY + y) * srcPitch + srcX * bpp,
+                   rowBytes);
+        }
+    }
     g_eax = 0;
     g_esp += 28; /* pop ret + 6 args */
 }

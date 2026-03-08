@@ -350,6 +350,7 @@ static void bridge__llseek_005A9084(void) { /* KERNEL32.dll:_llseek (3 args) */
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
     if (fn) g_eax = fn(a0, a1, a2);
+    { static int _ls; if (_ls < 30) { fprintf(stderr, "  _llseek(hFile=0x%X, offset=%d, origin=%u) = %u\n", a0, (int32_t)a1, a2, g_eax); } _ls++; }
     g_esp += 16;
 }
 
@@ -430,13 +431,13 @@ static void bridge__lopen_005A90A0(void) { /* KERNEL32.dll:_lopen (2 args) */
 }
 
 static void bridge__lread_005A90A4(void) { /* KERNEL32.dll:_lread (3 args) */
-    BRIDGE_TRACE("KERNEL32.dll:_lread");
     static STDFN3 fn = NULL;
     if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "_lread");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
     if (fn) g_eax = fn(a0, a1, a2);
+    { static int _lr; if (_lr < 50) { fprintf(stderr, "  _lread(hFile=0x%X, buf=0x%08X, count=%u) = %u\n", a0, a1, a2, g_eax); } _lr++; }
     g_esp += 16;
 }
 
@@ -1221,6 +1222,7 @@ static void bridge_ReadFile_005A919C(void) { /* KERNEL32.dll:ReadFile (5 args) *
     uint32_t a3 = MEM32(g_esp + 16);
     uint32_t a4 = MEM32(g_esp + 20);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
+    { static int _rf; if (_rf < 30) { fprintf(stderr, "  ReadFile(hFile=0x%X, buf=0x%08X, count=%u, ret=%u)\n", a0, a1, a2, g_eax); } _rf++; }
     g_esp += 24;
 }
 
@@ -1809,10 +1811,21 @@ static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 a
     uint32_t a4 = MEM32(g_esp + 20);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
     peek_count++;
+    /* Watchpoint: detect when 9F7042 changes */
+    {
+        static uint32_t prev_9f7042 = 0xFFFFFFFF;
+        uint32_t cur = MEM32(0x9F7042);
+        if (cur != prev_9f7042) {
+            fprintf(stderr, "[WATCH] 9F7042 changed: %u -> %u at PeekMessage #%u\n", prev_9f7042, cur, peek_count);
+            fflush(stderr);
+            prev_9f7042 = cur;
+        }
+    }
     if (peek_count <= 20 || (peek_count % 10000 == 0)) {
         MSG* pmsg = (MSG*)(uintptr_t)a0;
-        fprintf(stderr, "[MSG] PeekMessage #%u: ret=%u msg=0x%X hwnd=0x%X remove=%u\n",
-                peek_count, g_eax, pmsg->message, (uint32_t)(uintptr_t)pmsg->hwnd, a4);
+        fprintf(stderr, "[MSG] PeekMessage #%u: ret=%u msg=0x%X remove=%u | 9F7042=%u A2143D=%u A1C8D5=0x%X A1C089=%u\n",
+                peek_count, g_eax, pmsg->message, a4,
+                MEM32(0x9F7042), MEM32(0xA2143D), MEM32(0xA1C8D5), MEM32(0xA1C089));
         fflush(stderr);
     }
     /* Keep D3D11 window alive while game tick is stubbed:
@@ -2094,8 +2107,9 @@ static void bridge_SmushStartup_005A92E8(void) { /* tgsmush.dll:SmushStartup */
 static void bridge_SmushPlay_005A92EC(void) { /* tgsmush.dll:SmushPlay */
     BRIDGE_TRACE("tgsmush.dll:SmushPlay");
     static int w = 0;
-    if (!w) { fprintf(stderr, "STUB: tgsmush.dll:SmushPlay\n"); w = 1; }
-    g_eax = 0; g_esp += 4;
+    if (!w) { fprintf(stderr, "STUB: tgsmush.dll:SmushPlay -> 1 (finished)\n"); w = 1; }
+    g_eax = 1; /* 1 = finished, 0 = still playing */
+    g_esp += 4;
 }
 
 static void bridge_SmushSetVolume_005A92F0(void) { /* tgsmush.dll:SmushSetVolume */

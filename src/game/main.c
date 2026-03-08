@@ -370,30 +370,39 @@ static void manual_sub_0057E4F0(void) {
     extern void sub_0053EF80(void);
     #define esp g_esp
 
+    fprintf(stderr, "[57E4F0] ENTER\n"); fflush(stderr);
     RECOMP_CALL(sub_0053F010);
+    fprintf(stderr, "[57E4F0] after 53F010\n"); fflush(stderr);
     PUSH32(esp, 0);
     PUSH32(esp, 0x00601C9Cu);
     RECOMP_CALL(sub_0055BC20);
     g_eax = MEM32(0x9F4B40);
     esp += 8;
+    fprintf(stderr, "[57E4F0] movie1: 9F4B40=%u\n", g_eax); fflush(stderr);
     if (g_eax != 0) goto frame_skip;
     PUSH32(esp, 0);
     PUSH32(esp, 0x00601C94u);
     RECOMP_CALL(sub_0055BC20);
     g_eax = MEM32(0x9F4B40);
     esp += 8;
+    fprintf(stderr, "[57E4F0] movie2: 9F4B40=%u\n", g_eax); fflush(stderr);
     if (g_eax != 0) goto frame_skip;
     PUSH32(esp, 0);
     PUSH32(esp, 0x00601C88u);
     RECOMP_CALL(sub_0055BC20);
     esp += 8;
+    fprintf(stderr, "[57E4F0] movie3 done\n"); fflush(stderr);
 frame_skip:
+    fprintf(stderr, "[57E4F0] frame_skip\n"); fflush(stderr);
     RECOMP_CALL(sub_0053F5D0);
+    fprintf(stderr, "[57E4F0] after flip, registering callbacks\n"); fflush(stderr);
     PUSH32(esp, 0x00584F30u);
     PUSH32(esp, 0x00584F50u);
     RECOMP_CALL(sub_00541810);
     esp += 8;
+    fprintf(stderr, "[57E4F0] after 541810, calling 53EF80\n"); fflush(stderr);
     RECOMP_CALL(sub_0053EF80);
+    fprintf(stderr, "[57E4F0] EXIT eax=%u\n", g_eax); fflush(stderr);
     MEM32(0x9F60D4) = g_eax;
     g_eax = 0;
     esp += 4;  /* pop return address */
@@ -409,11 +418,24 @@ static void manual_sub_00584F30(void) {
     extern void sub_00528A50(void);
     extern void sub_0055D720(void);
     #define esp g_esp
+    fprintf(stderr, "[584F30] ENTER g_esp=0x%08X\n", g_esp); fflush(stderr);
     RECOMP_CALL(sub_005580D0);
-    RECOMP_CALL(sub_00528A50);
+    fprintf(stderr, "[584F30] after 5580D0 g_esp=0x%08X\n", g_esp); fflush(stderr);
+    {
+        uint32_t _esp_save = g_esp;
+        RECOMP_CALL(sub_00528A50);
+        if (g_esp != _esp_save) {
+            fprintf(stderr, "[584F30] FIXING 528A50 esp drift: 0x%08X -> 0x%08X (delta=%d)\n",
+                    _esp_save, g_esp, (int)(g_esp - _esp_save)); fflush(stderr);
+            g_esp = _esp_save;
+        }
+    }
+    fprintf(stderr, "[584F30] after 528A50 g_esp=0x%08X\n", g_esp); fflush(stderr);
     RECOMP_CALL(sub_0055D720);
+    fprintf(stderr, "[584F30] after 55D720 g_esp=0x%08X\n", g_esp); fflush(stderr);
     g_eax = 0;
     esp += 4;
+    fprintf(stderr, "[584F30] EXIT g_esp=0x%08X\n", g_esp); fflush(stderr);
     #undef esp
 }
 
@@ -424,6 +446,7 @@ static void manual_sub_00584F50(void) {
     extern void sub_00558100(void);
     extern void sub_00541810(void);
     #define esp g_esp
+    fprintf(stderr, "[584F50] ENTER g_esp=0x%08X\n", g_esp); fflush(stderr);
     g_eax = MEM32(0xABD1E4);
     PUSH32(esp, g_eax);
     RECOMP_CALL(sub_00558100);
@@ -434,6 +457,7 @@ static void manual_sub_00584F50(void) {
     esp += 8;
     g_eax = 0;
     esp += 4;
+    fprintf(stderr, "[584F50] EXIT g_esp=0x%08X\n", g_esp); fflush(stderr);
     #undef esp
 }
 
@@ -476,18 +500,260 @@ static void manual_sub_00539760(void) {
     #undef esp
 }
 
+/* sub_00559B50: Frontend display/input callback.
+ * Dead code after ret in sub_00559A90 (missed by code generator).
+ * Called frequently via dispatch mechanism (registered by sub_00541890).
+ * Shows UI, waits for Enter/Escape, returns 0 or 1. */
+static void manual_sub_00559B50(void) {
+    extern void sub_0055BA70(void);
+    extern void sub_0055B590(void);
+    extern void sub_00531D70(void);
+    extern void sub_0053F830(void);
+    extern void sub_00535470(void);
+    extern void sub_00532350(void);
+    extern void sub_0053F8D0(void);
+    extern void sub_00558C90(void);
+    extern void sub_0055CB50(void);
+    extern void sub_005575A0(void);
+    extern void sub_00555CF0(void);
+    extern void sub_00555FE0(void);
+    extern void sub_0055B570(void);
+    extern void sub_0055B5B0(void);
+    extern void sub_00532080(void);
+    #define esp g_esp
+    /* 0x559B50: entry */
+    g_eax = MEM32(esp + 0x4);
+    esp = esp - 0x10u;
+    /* test eax, eax */
+    PUSH32(esp, g_esi);
+    { static int _cb; if (_cb < 10) { fprintf(stderr, "[559B50] call #%d, arg(eax)=%u\n", _cb, g_eax); _cb++; } }
+    if (CMP_NE(g_eax, 0)) goto L_BB6;
+    /* 0x559B5C: eax==0 path */
+    { static int _p0; if (_p0 < 3) { fprintf(stderr, "[559B50] eax==0 path, calling sub_55BA70/55B590/531D70/53F830...\n"); _p0++; } }
+    PUSH32(esp, 0x123u);
+    PUSH32(esp, 0x1A1u);
+    RECOMP_CALL(sub_0055BA70);
+    esp = esp + 8;
+    RECOMP_CALL(sub_0055B590);
+    PUSH32(esp, 0x0060377Cu);
+    PUSH32(esp, 0x0060375Cu);
+    RECOMP_CALL(sub_00531D70);
+    esp = esp + 8;
+    { static int _f8; if (_f8 < 3) { fprintf(stderr, "[559B50] sub_531D70 ret=%u, calling sub_53F830 (9F702A=%u 9F702E=0x%X)\n", g_eax, MEM32(0x9F702A), MEM32(0x9F702E)); _f8++; } }
+    RECOMP_CALL(sub_0053F830);
+    { static int _f9; if (_f9 < 3) { fprintf(stderr, "[559B50] sub_53F830 ret=%u\n", g_eax); _f9++; } }
+    PUSH32(esp, 0);
+    PUSH32(esp, 0);
+    PUSH32(esp, 0x0060377Cu);
+    RECOMP_CALL(sub_00535470);
+    esp = esp + 0xCu;
+    { static int _s5; if (_s5 < 3) {
+        uint32_t lpSurf = MEM32(0x9F60D4);
+        fprintf(stderr, "[559B50] after sub_535470: lpSurface=0x%X bpp_9F700A=%u pitch_9F6FFA=%u", lpSurf, MEM32(0x9F700A), MEM32(0x9F6FFA));
+        if (lpSurf) {
+            uint8_t* p = (uint8_t*)(uintptr_t)lpSurf;
+            int nz = 0;
+            for (uint32_t i = 0; i < 640*480*2; i++) { if (p[i]) { nz = 1; fprintf(stderr, " first_nz=%u(0x%02X)", i, p[i]); break; } }
+            if (!nz) fprintf(stderr, " ALL ZERO");
+        }
+        fprintf(stderr, "\n"); _s5++;
+    } }
+    PUSH32(esp, 0);
+    PUSH32(esp, 0);
+    PUSH32(esp, 0x0060374Cu);
+    RECOMP_CALL(sub_00532350);
+    esp = esp + 0xCu;
+    { static int _s3; if (_s3 < 3) {
+        uint32_t lpSurf = MEM32(0x9F60D4);
+        fprintf(stderr, "[559B50] after sub_532350: lpSurface=0x%X", lpSurf);
+        if (lpSurf) {
+            uint8_t* p = (uint8_t*)(uintptr_t)lpSurf;
+            int nz = 0;
+            for (uint32_t i = 0; i < 640*480*2; i++) { if (p[i]) { nz = 1; fprintf(stderr, " first_nz=%u(0x%02X)", i, p[i]); break; } }
+            if (!nz) fprintf(stderr, " ALL ZERO");
+        }
+        fprintf(stderr, "\n"); _s3++;
+    } }
+    PUSH32(esp, 1);
+    RECOMP_CALL(sub_0053F8D0);
+    esp = esp + 4;
+L_BB6:
+    /* 0x559BB6 */
+    PUSH32(esp, 0xF5u);
+    PUSH32(esp, 0x1BDu);
+    PUSH32(esp, 0xE1u);
+    g_eax = esp + 0x10;
+    PUSH32(esp, 0xF5u);
+    PUSH32(esp, g_eax);
+    RECOMP_CALL(sub_00558C90);
+    esp = esp + 0x14u;
+    PUSH32(esp, 0xFFFFu);
+    g_ecx = esp + 0x8;
+    PUSH32(esp, g_ecx);
+    PUSH32(esp, 0x254u);
+    RECOMP_CALL(sub_0055CB50);
+    esp = esp + 4;
+    PUSH32(esp, g_eax);
+    PUSH32(esp, 0xFu);
+    RECOMP_CALL(sub_005575A0);
+    esp = esp + 0x10u;
+    PUSH32(esp, 0x109u);
+    PUSH32(esp, 0x1B8u);
+    PUSH32(esp, 0xF5u);
+    g_edx = esp + 0x10;
+    PUSH32(esp, 0xFAu);
+    PUSH32(esp, g_edx);
+    RECOMP_CALL(sub_00558C90);
+    esp = esp + 0x14u;
+    PUSH32(esp, 0x00603748u);
+    PUSH32(esp, 0xCu);
+    PUSH32(esp, 0);
+    PUSH32(esp, 0xDu);
+    g_eax = esp + 0x14;
+    PUSH32(esp, 0x00783668u);
+    PUSH32(esp, g_eax);
+    RECOMP_CALL(sub_00555CF0);
+    esp = esp + 0x18u;
+    PUSH32(esp, 0x127u);
+    PUSH32(esp, 0x1B8u);
+    PUSH32(esp, 0x113u);
+    g_ecx = esp + 0x10;
+    PUSH32(esp, 0xFAu);
+    PUSH32(esp, g_ecx);
+    g_esi = g_eax;
+    RECOMP_CALL(sub_00558C90);
+    esp = esp + 0x14u;
+    PUSH32(esp, 0x00603140u);
+    PUSH32(esp, 0x14u);
+    PUSH32(esp, 0xFFFFu);
+    PUSH32(esp, 0xFu);
+    PUSH32(esp, 0x255u);
+    RECOMP_CALL(sub_0055CB50);
+    esp = esp + 4;
+    PUSH32(esp, g_eax);
+    g_edx = esp + 0x18;
+    PUSH32(esp, g_edx);
+    RECOMP_CALL(sub_00555FE0);
+    esp = esp + 0x18u;
+    g_esi = g_esi | g_eax;
+    RECOMP_CALL(sub_0055B570);
+    /* Auto-advance: simulate Enter after 2 seconds */
+    {
+        static DWORD _auto_start = 0;
+        if (!_auto_start) _auto_start = GetTickCount();
+        if (GetTickCount() - _auto_start > 10000) {
+            static int _auto_log = 0;
+            if (!_auto_log) { fprintf(stderr, "[AUTO] Simulating Enter key in frontend menu\n"); fflush(stderr); _auto_log = 1; }
+            SET_LO8(g_eax, 0x0D);
+            /* Ensure menu item data is non-zero so the accept check passes */
+            if (MEM8(0x783668) == 0) MEM8(0x783668) = 1;
+        }
+    }
+    if (CMP_NE(LO8(g_eax), 0xDu)) goto L_C9A;
+    RECOMP_CALL(sub_0055B5B0);
+    g_esi = 1;
+    goto L_CA8;
+L_C9A:
+    RECOMP_CALL(sub_0055B570);
+    if (CMP_NE(LO8(g_eax), 0x1Bu)) goto L_CA8;
+    RECOMP_CALL(sub_0055B5B0);
+L_CA8:
+    if (TEST_Z(g_esi, g_esi)) goto L_CCC;
+    SET_LO8(g_eax, MEM8(0x783668));
+    if (TEST_Z(LO8(g_eax), LO8(g_eax))) goto L_CCC;
+    PUSH32(esp, 0x0060377Cu);
+    RECOMP_CALL(sub_00532080);
+    esp = esp + 4;
+    g_eax = 1;
+    goto L_exit;
+L_CCC:
+    g_eax = 0;
+L_exit:
+    g_esi = POP32_VAL(esp);
+    esp = esp + 0x10u;
+    esp += 4;
+    #undef esp
+}
+
+/* Frontend menu display callback (second menu screen).
+ * Called from sub_005593C0 via sub_00541890 dispatch loop.
+ * Body at L_005595AF through L_00559612 in recomp_0003.c (dead code).
+ * Prologue (0x5595A0-0x5595AE) is SafeDisc-encrypted; reconstructed
+ * from epilogue: pop edi, pop esi, add esp 0x10, ret.
+ * The body renders the menu and always returns 0 (keep polling).
+ * Auto-advance: returns 1 after 2s to exit the dispatch loop. */
+static void manual_sub_005595A0(void) {
+    extern void sub_0055B590(void);
+    extern void sub_0055BA70(void);
+    extern void sub_0053F830(void);
+    extern void sub_00534A60(void);
+    extern void sub_0053F8D0(void);
+    extern void sub_005580A0(void);
+
+    #define esp g_esp
+    /* Prologue: sub esp 0x10; push esi; push edi */
+    esp = esp - 0x10u;
+    PUSH32(esp, g_esi);
+    PUSH32(esp, g_edi);
+
+    /* Auto-advance: after 15 seconds, return 1 to exit dispatch loop */
+    {
+        static DWORD _auto_start = 0;
+        if (!_auto_start) _auto_start = GetTickCount();
+        if (GetTickCount() - _auto_start > 15000) {
+            static int _auto_log = 0;
+            if (!_auto_log) { fprintf(stderr, "[AUTO] Auto-advancing past second frontend menu\n"); fflush(stderr); _auto_log = 1; }
+            g_eax = 1;
+            goto L_exit;
+        }
+    }
+
+    /* Display body from L_005595AF through L_0055960B */
+    RECOMP_CALL(sub_0055B590);
+    SET_LO8(g_eax, MEM8(0x783450));
+    if (TEST_NZ(LO8(g_eax), LO8(g_eax))) goto L_D2;
+    SET_LO8(g_eax, MEM8(0x7835E0));
+    if (TEST_Z(LO8(g_eax), LO8(g_eax))) goto L_D2;
+    PUSH32(esp, 0xECu);
+    PUSH32(esp, 0x20Eu);
+    goto L_D9;
+L_D2:
+    PUSH32(esp, 0xECu);
+    PUSH32(esp, 0x5Au);
+L_D9:
+    RECOMP_CALL(sub_0055BA70);
+    esp = esp + 8;
+    RECOMP_CALL(sub_0053F830);
+    PUSH32(esp, 0);
+    PUSH32(esp, 0);
+    PUSH32(esp, 0x00602D1Cu);
+    RECOMP_CALL(sub_00534A60);
+    esp = esp + 0xCu;
+    PUSH32(esp, 1);
+    RECOMP_CALL(sub_0053F8D0);
+    esp = esp + 4;
+    PUSH32(esp, 0x14u);
+    RECOMP_CALL(sub_005580A0);
+    esp = esp + 4;
+    g_eax = 0;
+
+L_exit:
+    g_edi = POP32_VAL(esp);
+    g_esi = POP32_VAL(esp);
+    esp = esp + 0x10u;
+    esp += 4;
+    #undef esp
+}
+
 /* sub_005397D0: Main game tick function.
  * Handles input, game state updates, rendering for one frame.
  * TODO: Properly implement this large function (~300 bytes).
  * For now, stub it to return 0 (skip game logic), but present
  * a frame so the D3D11 window stays visible. */
-static void manual_sub_005397D0(void) {
-    /* Game tick is stubbed - rendering is driven by PeekMessage idle present.
-     * When this function is properly implemented, it will call BeginScene,
-     * Execute (with execute buffers), EndScene, and Flip. */
-    g_eax = 0;
-    g_esp += 4;  /* pop return address */
-}
+/* sub_005397D0 is now a proper generated function in recomp_0003.c.
+ * It was previously stubbed because the code generator treated it as dead code
+ * within sub_00539740 (it follows a ret at 0x5397C3). The function has been
+ * split out with its missing prologue (0x5397D0-0x5397E0) restored. */
 
 /* Stub for sub_00556B20 (font/resource loader) - returns 1 (success).
  * The real function tries to load .abp font files (which don't exist),
@@ -654,6 +920,13 @@ static LRESULT CALLBACK native_wndproc_bridge(HWND hwnd, UINT msg, WPARAM wParam
         fflush(stderr);
     }
 
+    /* Force game to stay active even when window loses focus */
+    if (msg == 0x001C /* WM_ACTIVATEAPP */ && wParam == 0) {
+        fprintf(stderr, "[WND] WM_ACTIVATEAPP deactivate intercepted, forcing active\n");
+        fflush(stderr);
+        wParam = 1;  /* Force "activated" so game doesn't pause */
+    }
+
     /* Save callee-saved globals - WndProc is re-entrant from native Windows
      * callbacks and must not corrupt the caller's register state */
     uint32_t saved_esp = g_esp;
@@ -710,6 +983,64 @@ static LRESULT CALLBACK native_wndproc_bridge(HWND hwnd, UINT msg, WPARAM wParam
  * We overwrite it with our native bridge address. */
 
 /* Manual override table */
+/* =================================================================
+ * Native file I/O replacements.
+ * The game's recompiled CRT has corrupted internal state (_nstream gets
+ * zeroed, FILE structs break). Replace the VFS-level file wrappers with
+ * native host CRT calls. FILE* is treated as opaque by all callers.
+ * ================================================================= */
+
+/* sub_0052AD30: VFS fopen wrapper.
+ * Args: esp+4 = filename (char*), esp+8 = mode (char*).
+ * Returns: FILE* in eax (0 on failure). cdecl. */
+static void native_fopen_0052AD30(void) {
+    #define esp g_esp
+    uint32_t fn_addr = MEM32(esp + 4);
+    uint32_t mode_addr = MEM32(esp + 8);
+    const char *filename = (const char*)ADDR(fn_addr);
+    const char *mode = (const char*)ADDR(mode_addr);
+    FILE *fp = fopen(filename, mode);
+    static int _nfo = 0;
+    if (_nfo < 30) {
+        fprintf(stderr, "[NATIVE_FOPEN] '%s' mode='%s' -> %p\n", filename, mode, fp);
+        _nfo++;
+    }
+    if (fp) MEM16(0x7829C8) = (uint16_t)(MEM16(0x7829C8) + 1);
+    g_eax = (uint32_t)(uintptr_t)fp;
+    esp += 4;
+    #undef esp
+}
+
+/* sub_0052AEF0: VFS fread wrapper.
+ * Args: esp+4 = FILE*, esp+8 = buffer, esp+0xC = byte count.
+ * Returns: ax=1 on success (read==count), ax=0 on failure. */
+static void native_fread_0052AEF0(void) {
+    #define esp g_esp
+    FILE *fp = (FILE*)(uintptr_t)MEM32(esp + 4);
+    uint32_t buf_addr = MEM32(esp + 8);
+    uint32_t count = MEM32(esp + 0xC);
+    void *buf = (void*)ADDR(buf_addr);
+    size_t nread = fread(buf, 1, count, fp);
+    /* Return ax=1 on success, ax=0 on failure (match original semantics) */
+    g_eax = (nread == count) ? 1 : 0;
+    esp += 4;
+    #undef esp
+}
+
+/* sub_0052ADD0: VFS fclose wrapper.
+ * Args: esp+4 = FILE*. cdecl. */
+static void native_fclose_0052ADD0(void) {
+    #define esp g_esp
+    FILE *fp = (FILE*)(uintptr_t)MEM32(esp + 4);
+    if (fp) {
+        MEM16(0x7829C8) = (uint16_t)(MEM16(0x7829C8) - 1);
+        fclose(fp);
+    }
+    g_eax = (uint32_t)(uintptr_t)fp;
+    esp += 4;
+    #undef esp
+}
+
 static recomp_dispatch_entry_t g_manual_overrides[] = {
     { 0x00000000, stub_null_funcptr },  /* NULL function pointer calls */
     { 0x005A0750, stub_safedisc_nop },
@@ -774,10 +1105,16 @@ static recomp_dispatch_entry_t g_manual_overrides[] = {
     { 0x00584F50, manual_sub_00584F50 },
     /* Inner cleanup callback (frees music/sound resources) */
     { 0x00539760, manual_sub_00539760 },
-    /* Main game tick (stubbed - returns 0) */
-    { 0x005397D0, manual_sub_005397D0 },
+    /* Frontend display/input callback (dead code after ret in sub_00559A90) */
+    { 0x00559B50, manual_sub_00559B50 },
+    /* Second frontend menu display callback (dead code in sub_005593C0) */
+    { 0x005595A0, manual_sub_005595A0 },
+    /* Native file I/O replacements (bypass broken CRT FILE infrastructure) */
+    { 0x0052AD30, native_fopen_0052AD30 },
+    { 0x0052AEF0, native_fread_0052AEF0 },
+    { 0x0052ADD0, native_fclose_0052ADD0 },
 };
-static const int g_manual_override_count = 45;
+static const int g_manual_override_count = 49;
 
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     for (int i = 0; i < g_manual_override_count; i++) {

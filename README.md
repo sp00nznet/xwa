@@ -13,24 +13,26 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 4** | **Complete** | Compilation and linking (0 errors, 1 warning) |
 | **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
 | **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
-| **Phase 7** | **In Progress** | D3D11 rendering backend initialized, execute buffer parser wired |
-| Phase 8 | Pending | Game tick implementation, audio, full game logic |
+| **Phase 7** | **Complete** | D3D11 rendering backend — device, shaders, execute buffer parser, 2D surface pipeline |
+| **Phase 8** | **In Progress** | Frontend menu rendering — CBM decode, RLE blit, surface compositing |
+| Phase 9 | Pending | Game tick (sub_005397D0), 3D rendering, audio, full game logic |
 
 ### Runtime Progress
 
-The recompiled binary boots through the full game initialization sequence and enters the main message loop:
+The recompiled binary boots through full initialization, loads game assets, and renders the concourse menu:
 
-- **29M+ PeekMessage calls** per 15-second run — stable main loop, zero crashes
+- **Stable main loop**: 29M+ PeekMessage calls per 15-second run, zero crashes
 - **VC6 CRT initialization**: heap, locks, stdio, atexit all functional
-- **39 .dat resource files** opened and loaded (LightingEffects.dat through cursor.dat)
-- **strings.txt** parsed line-by-line for localization data
-- **Window creation**: "X-Wing Alliance" window at 1536x864
+- **Native file I/O**: 8 VFS-level CRT functions replaced with host CRT (fopen/fread/fclose/fseek/ftell/fwrite) — game's recompiled CRT was corrupted
+- **39 .dat resource files** + **CBM concourse backgrounds** loaded successfully
+- **Window creation**: "X-Wing Alliance" window at 1920x1080 (native resolution)
 - **DirectX COM mocks**: Full mock objects for IDirectDraw, IDirectDrawSurface, IDirect3D, IDirect3DDevice, IDirectInput, IDirectInputDevice, IDirectSound, IDirectSoundBuffer (178 vtable bridges)
 - **357 total bridges** registered (179 Win32 API + 178 COM vtable)
 - **45 manual overrides** including 6 callback functions missed by code generator
 - **Callee-saved register protection**: g_ebx/g_esi/g_edi automatically preserved across all calls
 - **6 SafeDisc-encrypted jump tables** reconstructed with switch/goto
-- **D3D11 rendering backend**: Device (feature level 11.0), swap chain, HLSL shaders, execute buffer parser, texture manager, 2D surface blit — all wired and initialized
+- **D3D11 rendering backend**: Device (feature level 11.0), swap chain, HLSL shaders, execute buffer parser, texture manager, 2D surface blit (RGB565→BGRA8)
+- **2D rendering pipeline**: CBM RLE decode → offscreen surface → BltFast → back buffer → D3D11 upload → present. ~23% surface coverage per frame (menu background with transparency)
 
 ### Fixes Applied During Runtime Bringup
 
@@ -54,6 +56,11 @@ The recompiled binary boots through the full game initialization sequence and en
 | 16 | Watchdog uses TerminateProcess (avoids loader lock) | Clean shutdown on hang |
 | 17 | D3D11 rendering backend (device, shaders, pipeline) | Modern GPU rendering via execute buffer translation |
 | 18 | IDirect3DTexture mock with GetHandle/Load | Texture handle tracking for execute buffer rendering |
+| 19 | Native CRT file I/O (8 VFS functions replaced) | Game's recompiled CRT was corrupted; host CRT works |
+| 20 | `rep stosw` implementation (32 instances) | RLE pixel fill was silently no-op'd |
+| 21 | Display BPP global (0x9F700A) initialization | All 2D blit functions use this for 8/16bpp path selection |
+| 22 | `test REG; mov REG; jcc` codegen fix | Flag evaluation used wrong (post-mov) register value |
+| 23 | BltFast surface copy implementation | Offscreen→back buffer compositing for menu rendering |
 
 ## Binary Analysis
 

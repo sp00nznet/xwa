@@ -869,6 +869,15 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
  * ============================================================ */
 
 void d3d11_upload_surface(uint8_t* pixels, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp) {
+    { static int _uc; if (_uc < 10) {
+        /* Check if pixel data is non-zero */
+        int nonzero = 0;
+        for (uint32_t i = 0; i < width * height * (bpp/8) && i < 1000; i++) {
+            if (pixels[i] != 0) { nonzero = 1; break; }
+        }
+        fprintf(stderr, "[D3D11] upload_surface: w=%u h=%u bpp=%u staging=%p nonzero=%d\n",
+                width, height, bpp, (void*)g_staging_tex, nonzero); _uc++;
+    } }
     if (!g_d3d11_initialized) return;
     if (!pixels || !g_staging_tex) return;
 
