@@ -578,7 +578,11 @@ class Lifter:
             if len(ops) == 2:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
-                lines.append(f"{self._fmt_write(ops[0], f'{a} >> {b}')}; {comment}")
+                # SHR sets CF to last bit shifted out; needed for adc/sbb/rcl after shr
+                if b == '1':
+                    lines.append(f"_cf = {a} & 1; {self._fmt_write(ops[0], f'{a} >> {b}')}; {comment}")
+                else:
+                    lines.append(f"{self._fmt_write(ops[0], f'{a} >> {b}')}; {comment}")
 
         elif m == 'sar':
             if len(ops) == 2:

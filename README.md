@@ -14,14 +14,14 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
 | **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
 | **Phase 7** | **Complete** | D3D11 rendering backend — device, shaders, execute buffer parser, 2D surface pipeline |
-| **Phase 8** | **In Progress** | Frontend menu rendering — concourse visible, investigating visual fidelity |
+| **Phase 8** | **In Progress** | Frontend menu rendering — concourse fully visible, investigating text/UI overlay |
 | Phase 9 | Pending | Game tick (sub_005397D0), 3D rendering, audio, full game logic |
 
 ### Current Screenshot
 
 ![Concourse Menu](docs/menu.png)
 
-*Concourse menu rendering with D3D11 backend. Empire and Rebel faction symbols visible. Visual fidelity improvements in progress.*
+*Concourse menu rendering with D3D11 backend. Full background, holographic globe, Empire and Rebel faction symbols all rendering correctly via RLE-decoded CBM surfaces.*
 
 ### Runtime Progress
 
@@ -40,7 +40,7 @@ The recompiled binary boots through full initialization, loads game assets, and 
 - **D3D11 rendering backend**: Device (feature level 11.0), swap chain, HLSL shaders, execute buffer parser, texture manager, 2D surface blit (RGB565→BGRA8)
 - **2D rendering pipeline**: CBM RLE decode → offscreen surface → BltFast → back buffer → D3D11 upload → present. ~32% surface coverage per frame
 - **Source color keying**: SetColorKey + BltFast DDBLTFAST_SRCCOLORKEY support for transparent sprite compositing
-- **Concourse menu visible**: Background, Empire/Rebel faction symbols, holographic globe all rendering. Investigating visual fidelity (dark/scattered appearance)
+- **Concourse menu fully rendered**: Background nebula, holographic globe with lens flare, Empire/Rebel faction symbols all rendering correctly. 70% pixel coverage via RLE-decoded CBM surfaces with 16-bit palette lookup
 
 ### Fixes Applied During Runtime Bringup
 
@@ -72,6 +72,8 @@ The recompiled binary boots through full initialization, loads game assets, and 
 | 24 | Source color keying (SetColorKey + BltFast) | Transparent sprite compositing via DDBLTFAST_SRCCOLORKEY |
 | 25 | Font file loading (.abp format) | times0/2/5.abp loaded for concourse text rendering |
 | 26 | Inner timing loop + callback dispatch | Nested event loop at 24fps with registered menu callbacks |
+| 27 | `AND reg, imm; jcc` codegen fix (25 instances) | RLE literal pixel copy was completely skipped — concourse went from 23% to 70% pixel coverage |
+| 28 | `test reg; mov reg; jcc` codegen fix (3 BPP instances) | BPP dispatch used wrong register value after mov overwrote flags source |
 
 ## Binary Analysis
 

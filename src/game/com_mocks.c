@@ -174,6 +174,7 @@ static uint8_t* g_backbuf_buffer = NULL;
 /* Global mock objects (for cross-reference) */
 static mock_com_obj_t* g_primary_surface = NULL;
 static mock_com_obj_t* g_back_surface = NULL;
+static mock_com_obj_t* g_main_offscreen = NULL; /* first fullscreen offscreen surface = BltFast source */
 
 /* Stored display mode */
 static uint32_t g_display_width = 640;
@@ -330,8 +331,25 @@ static void dd_CreateSurface(void) {
     }
 
     MEM32(ppSurf) = (uint32_t)(uintptr_t)surf;
-    { static int _cs; fprintf(stderr, "[COM] CreateSurface #%d: surf=0x%08X buf=0x%08X w=%u h=%u caps=0x%X\n",
-            _cs++, (uint32_t)(uintptr_t)surf, surf->extra[0], surf->extra[1], surf->extra[2], caps); }
+
+    /* Track the first fullscreen offscreen surface — this is the BltFast source.
+     * Also fix the game's cached render buffer pointers (0x6000EC/0x6002BC/0x5FFDC0)
+     * which point to stale 0xA0000 (legacy VGA mapping, silently fails on writes).
+     * Must be done HERE, not in Lock, because the background CBM decode happens
+     * during initialization before Lock is ever called. */
+    if (!g_main_offscreen && !(caps & 0x200) && surf->extra[1] == g_display_width && surf->extra[2] == g_display_height) {
+        g_main_offscreen = surf;
+        uint32_t pixbuf = surf->extra[0];
+        uint32_t old_val = MEM32(0x6002BC);
+        MEM32(0x6000EC) = pixbuf;
+        MEM32(0x6002BC) = pixbuf;
+        MEM32(0x5FFDC0) = pixbuf;
+        fprintf(stderr, "[COM] Fixed render buffer at CreateSurface: 0x6002BC 0x%08X -> 0x%08X\n", old_val, pixbuf);
+    }
+
+    { static int _cs; fprintf(stderr, "[COM] CreateSurface #%d: surf=0x%08X buf=0x%08X w=%u h=%u caps=0x%X main=%d\n",
+            _cs++, (uint32_t)(uintptr_t)surf, surf->extra[0], surf->extra[1], surf->extra[2], caps,
+            (surf == g_main_offscreen)); }
 
     g_eax = 0; /* DD_OK */
     g_esp += 20; /* pop ret + 4 args */
@@ -577,7 +595,26 @@ static void dds_Lock(void) {
         MEM32(pDesc + 16) = pitch;
         MEM32(pDesc + 36) = pixbuf;  /* lpSurface at offset 36 (0x24) */
     }
-    { static int _ll; if (_ll < 30) { fprintf(stderr, "[COM]   Lock -> lpSurface=0x%08X w=%u h=%u pitch=%u\n", pixbuf, width, height, pitch); _ll++; } }
+
+    /* Fix game's cached render buffer: the game stores the surface pointer at
+     * 0x6000EC/0x6002BC during DD init, pointing to stale/invalid memory (0xA0000).
+     * Update these globals to our actual surface buffer so the RLE drawing code
+     * writes to the same memory that BltFast reads from.
+     * Only update when locking the MAIN offscreen surface (the BltFast source). */
+    if (g_main_offscreen && pThis == (uint32_t)(uintptr_t)g_main_offscreen) {
+        uint32_t old_6002BC = MEM32(0x6002BC);
+        if (old_6002BC != pixbuf) {
+            MEM32(0x6000EC) = pixbuf;
+            MEM32(0x6002BC) = pixbuf;
+            MEM32(0x5FFDC0) = pixbuf;
+            { static int _fix; if (_fix < 5) {
+                fprintf(stderr, "[COM] Fixed render buffer: 0x6002BC 0x%08X -> 0x%08X\n", old_6002BC, pixbuf);
+                _fix++;
+            } }
+        }
+    }
+
+    { static int _ll; if (_ll < 30) { fprintf(stderr, "[COM]   Lock -> lpSurface=0x%08X w=%u h=%u pitch=%u (0x6002BC=0x%08X)\n", pixbuf, width, height, pitch, MEM32(0x6002BC)); _ll++; } }
 
     g_eax = 0; /* DD_OK */
     g_esp += 24; /* pop ret + 5 args */
@@ -808,9 +845,11 @@ static void dds_BltFast(void) {
     mock_com_obj_t* src = pSrcSurf ? (mock_com_obj_t*)(uintptr_t)pSrcSurf : NULL;
 
     { static int _bf; if (_bf < 20) {
-        fprintf(stderr, "[COM] dds_BltFast(dst=0x%08X, x=%u, y=%u, src=0x%08X, dwTrans=0x%X, srcCK=%u/0x%04X)\n",
-            pThis, dstX, dstY, pSrcSurf, dwTrans,
-            src ? src->extra[6] : 0, src ? src->extra[5] : 0); _bf++;
+        fprintf(stderr, "[COM] dds_BltFast(dst=0x%08X[buf=0x%08X], x=%u, y=%u, src=0x%08X[buf=0x%08X %ux%u], dwTrans=0x%X, 0x6002BC=0x%08X)\n",
+            pThis, dst ? dst->extra[0] : 0, dstX, dstY,
+            pSrcSurf, src ? src->extra[0] : 0,
+            src ? src->extra[1] : 0, src ? src->extra[2] : 0,
+            dwTrans, MEM32(0x6002BC)); _bf++;
     } }
     /* Copy src rect to dst at (dstX, dstY) with optional source color keying */
     if (src && dst && src->extra[0] && dst->extra[0]) {
