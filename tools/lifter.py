@@ -7,6 +7,7 @@ PUSH32/POP32 macros, MEM* memory access, pattern-matched condition
 generation from flag-setters to flag-consumers.
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 from capstone.x86 import (
@@ -117,6 +118,7 @@ class Lifter:
         self.code_start = code_start
         self.code_end = code_end
         self._flag_state = None  # (setter_mnemonic, operands_str)
+        self._flag_clobber_pending = False  # True when _check_flag_clobber emitted an open brace
         self._fp_depth = 0  # FPU stack depth tracking
 
     def _fmt_read(self, op) -> str:
@@ -306,6 +308,80 @@ class Lifter:
         else:
             return f"/* flag from {setter} */ {cmp_macro}({ops})"
 
+    def _get_written_reg_name(self, op) -> str:
+        """If op is a register operand, return its base C name (e.g. 'eax'). Else None."""
+        if op.type != X86_OP_REG:
+            return None
+        r = op.reg
+        if r in REG_NAMES_32:
+            return REG_NAMES_32[r]
+        if r in REG_NAMES_16:
+            return REG_NAMES_16[r]
+        if r in REG_NAMES_8L:
+            return REG_NAMES_8L[r]
+        if r in REG_NAMES_8H:
+            return REG_NAMES_8H[r]
+        return None
+
+    def _close_flag_clobber(self, lines) -> None:
+        """Close any pending flag-clobber brace block."""
+        if self._flag_clobber_pending:
+            lines.append(f"}}")
+            self._flag_clobber_pending = False
+
+    def _set_flag_state(self, lines, setter, ops_str) -> None:
+        """Set flag_state, closing any pending clobber brace first."""
+        self._close_flag_clobber(lines)
+        self._flag_state = (setter, ops_str)
+
+    def _check_flag_clobber(self, dst_op, lines) -> None:
+        """
+        If the destination register of a non-flag-setting instruction (MOV, MOVZX,
+        MOVSX, LEA) would overwrite a register referenced in the current _flag_state,
+        emit a save of the old value and rewrite _flag_state to use the saved name.
+
+        This fixes the test-after-MOV codegen bug:
+            test eax, eax       ; sets flags from eax
+            mov eax, [addr]     ; overwrites eax (does NOT change flags)
+            je label            ; should test OLD eax, not new
+
+        Without this fix, the lifter would emit:
+            eax = MEM32(addr);
+            if (TEST_Z(eax, eax)) goto label;   // BUG: tests new value
+
+        With this fix:
+            { uint32_t _old_eax = eax;
+            eax = MEM32(addr);
+            if (TEST_Z(_old_eax, _old_eax)) goto label; }
+        """
+        if self._flag_state is None:
+            return
+        reg_name = self._get_written_reg_name(dst_op)
+        if reg_name is None:
+            return
+        setter, ops_str = self._flag_state
+        # Check if the register name appears as a whole word in the operands string.
+        # We need word-boundary matching: "eax" in "eax, eax" but not in "MEM32(eax + 0x10)".
+        # However for flag_state from test/cmp, the operands are direct register reads,
+        # so we check if the register name appears as a standalone token.
+        # Match the register name as a whole word (not inside MEM/ADDR expressions)
+        # The operands string from test/cmp looks like "eax, eax" or "ecx, 0" etc.
+        if not re.search(r'\b' + re.escape(reg_name) + r'\b', ops_str):
+            return
+        # Don't emit save if the register appears only inside MEM/ADDR expressions,
+        # since those read from memory addresses and the register value in the address
+        # is consumed at the MEM read, not at condition evaluation time.
+        # For test/cmp, the operands are typically direct register reads though.
+        # To be safe, skip if ALL occurrences are inside MEM/ADDR/LO16/HI8 calls.
+        # Simple heuristic: if the register appears as a bare token (not preceded by '('),
+        # it needs saving.
+        old_name = f"_old_{reg_name}"
+        new_ops = re.sub(r'\b' + re.escape(reg_name) + r'\b', old_name, ops_str)
+        self._flag_state = (setter, new_ops)
+        # Prepend the save line. The caller must wrap in braces if a condition follows.
+        lines.append(f"{{ uint32_t {old_name} = {reg_name};")
+        self._flag_clobber_pending = True
+
     def lift_instruction(self, insn) -> list:
         """
         Lift a single x86 instruction to C statement(s).
@@ -321,16 +397,19 @@ class Lifter:
         # --- Data Movement ---
         if m == 'mov':
             if len(ops) == 2:
+                self._check_flag_clobber(ops[0], lines)
                 val = self._fmt_read(ops[1])
                 lines.append(f"{self._fmt_write(ops[0], val)}; {comment}")
 
         elif m == 'movzx':
             if len(ops) == 2:
+                self._check_flag_clobber(ops[0], lines)
                 val = self._fmt_read(ops[1])
                 lines.append(f"{self._fmt_write(ops[0], f'(uint32_t){val}')}; {comment}")
 
         elif m == 'movsx':
             if len(ops) == 2:
+                self._check_flag_clobber(ops[0], lines)
                 val = self._fmt_read(ops[1])
                 src_size = ops[1].size
                 if src_size == 1:
@@ -341,6 +420,7 @@ class Lifter:
 
         elif m == 'lea':
             if len(ops) == 2 and ops[1].type == X86_OP_MEM:
+                self._check_flag_clobber(ops[0], lines)
                 addr = self._fmt_lea(ops[1].mem)
                 lines.append(f"{self._fmt_write(ops[0], addr)}; {comment}")
 
@@ -390,14 +470,14 @@ class Lifter:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
                 lines.append(f"{self._fmt_write(ops[0], f'{a} + {b}')}; {comment}")
-                self._flag_state = ('add', f"{a}, {b}")
+                self._set_flag_state(lines, 'add', f"{a}, {b}")
 
         elif m == 'sub':
             if len(ops) == 2:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
                 lines.append(f"{self._fmt_write(ops[0], f'{a} - {b}')}; {comment}")
-                self._flag_state = ('sub', f"{a}, {b}")
+                self._set_flag_state(lines, 'sub', f"{a}, {b}")
 
         elif m == 'inc':
             if len(ops) == 1:
@@ -406,7 +486,7 @@ class Lifter:
                 # Flags are set based on the RESULT (post-increment value).
                 # By the time the condition is evaluated in C, the register already
                 # holds the result, so compare against 0 (not 1).
-                self._flag_state = ('inc', f"{a}, 0")
+                self._set_flag_state(lines, 'inc', f"{a}, 0")
 
         elif m == 'dec':
             if len(ops) == 1:
@@ -415,13 +495,13 @@ class Lifter:
                 # Flags are set based on the RESULT (post-decrement value).
                 # By the time the condition is evaluated in C, the register already
                 # holds the result, so compare against 0 (not 1).
-                self._flag_state = ('dec', f"{a}, 0")
+                self._set_flag_state(lines, 'dec', f"{a}, 0")
 
         elif m == 'neg':
             if len(ops) == 1:
                 a = self._fmt_read(ops[0])
                 lines.append(f"{self._fmt_write(ops[0], f'(uint32_t)(-(int32_t){a})')}; {comment}")
-                self._flag_state = ('sub', f"0, {a}")
+                self._set_flag_state(lines, 'sub', f"0, {a}")
 
         elif m == 'not':
             if len(ops) == 1:
@@ -467,14 +547,14 @@ class Lifter:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
                 lines.append(f"{self._fmt_write(ops[0], f'{a} & {b}')}; {comment}")
-                self._flag_state = ('and', f"{a}, {b}")
+                self._set_flag_state(lines, 'and', f"{a}, {b}")
 
         elif m == 'or':
             if len(ops) == 2:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
                 lines.append(f"{self._fmt_write(ops[0], f'{a} | {b}')}; {comment}")
-                self._flag_state = ('or', f"{a}, {b}")
+                self._set_flag_state(lines, 'or', f"{a}, {b}")
 
         elif m == 'xor':
             if len(ops) == 2:
@@ -485,7 +565,7 @@ class Lifter:
                     lines.append(f"{self._fmt_write(ops[0], '0')}; {comment}")
                 else:
                     lines.append(f"{self._fmt_write(ops[0], f'{a} ^ {b}')}; {comment}")
-                self._flag_state = ('xor', f"{a}, {b}")
+                self._set_flag_state(lines, 'xor', f"{a}, {b}")
 
         # --- Shifts ---
         elif m == 'shl' or m == 'sal':
@@ -524,27 +604,30 @@ class Lifter:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
                 lines.append(f"/* cmp {a}, {b} */ {comment}")
-                self._flag_state = ('cmp', f"{a}, {b}")
+                self._set_flag_state(lines, 'cmp', f"{a}, {b}")
 
         elif m == 'test':
             if len(ops) == 2:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
                 lines.append(f"/* test {a}, {b} */ {comment}")
-                self._flag_state = ('test', f"{a}, {b}")
+                self._set_flag_state(lines, 'test', f"{a}, {b}")
 
         elif m == 'bt':
             if len(ops) == 2:
                 a = self._fmt_read(ops[0])
                 b = self._fmt_read(ops[1])
                 lines.append(f"/* bt {a}, {b} */ {comment}")
-                self._flag_state = ('bt', f"{a}, {b}")
+                self._set_flag_state(lines, 'bt', f"{a}, {b}")
 
         # --- Setcc ---
         elif m in SETCC_MAP:
             if len(ops) == 1:
                 cond = self._make_condition(m)
                 lines.append(f"{self._fmt_write(ops[0], f'({cond}) ? 1 : 0')}; {comment}")
+                if self._flag_clobber_pending:
+                    lines.append(f"}}")
+                    self._flag_clobber_pending = False
 
         # --- CMOVcc ---
         elif m in CMOVCC_MAP:
@@ -553,6 +636,9 @@ class Lifter:
                 src = self._fmt_read(ops[1])
                 dst = self._fmt_read(ops[0])
                 lines.append(f"if ({cond}) {{ {self._fmt_write(ops[0], src)}; }} {comment}")
+                if self._flag_clobber_pending:
+                    lines.append(f"}}")
+                    self._flag_clobber_pending = False
 
         # --- Carry arithmetic ---
         elif m == 'adc':
@@ -614,7 +700,7 @@ class Lifter:
 
         elif m == 'scasb':
             lines.append(f"/* scasb */ _cf = (LO8(eax) < MEM8(edi)); edi += _df; {comment}")
-            self._flag_state = ('cmp', f"LO8(eax), MEM8(edi)")
+            self._set_flag_state(lines, 'cmp', f"LO8(eax), MEM8(edi)")
 
         elif m in ('repne scasb', 'repnz scasb'):
             # x86: compare THEN advance, but advance happens even on the terminating iteration
@@ -683,6 +769,9 @@ class Lifter:
                 lines.append(f"if ({cond}) goto L_{target:08X}; {comment}")
             else:
                 lines.append(f"if ({cond}) {{ /* indirect jcc */ }} {comment}")
+            if self._flag_clobber_pending:
+                lines.append(f"}}")
+                self._flag_clobber_pending = False
 
         elif m == 'jecxz' or m == 'jcxz':
             target = insn.get_branch_target()
@@ -820,7 +909,7 @@ class Lifter:
                 lines.append(f"fp_pop(); fp_pop();")
             else:
                 lines.append(f"fp_pop();")
-            self._flag_state = ('fcom', '_fpu_cmp')
+            self._set_flag_state(lines, 'fcom', '_fpu_cmp')
 
         elif m in ('fcom', 'fcomp', 'fucom', 'fucomp'):
             if ops:
@@ -830,7 +919,7 @@ class Lifter:
                 lines.append(f"_fpu_cmp = (_st[0] < _st[1]) ? -1 : (_st[0] > _st[1]) ? 1 : 0; {comment}")
             if m in ('fcomp', 'fucomp'):
                 lines.append(f"fp_pop();")
-            self._flag_state = ('fcom', '_fpu_cmp')
+            self._set_flag_state(lines, 'fcom', '_fpu_cmp')
 
         elif m == 'fnstsw' or m == 'fstsw':
             lines.append(f"/* fnstsw - FPU status to ax */ {comment}")
@@ -940,6 +1029,102 @@ class Lifter:
         elif m == 'fninit' or m == 'finit':
             lines.append(f"/* finit */ {comment}")
 
+        # --- FPU integer arithmetic ---
+        elif m == 'fiadd':
+            if ops and ops[0].type == X86_OP_MEM:
+                addr = self._fmt_mem_addr(ops[0].mem)
+                if ops[0].size == 2:
+                    lines.append(f"_st[0] += (double)(int16_t)MEM16({addr}); {comment}")
+                else:
+                    lines.append(f"_st[0] += (double)(int32_t)MEM32({addr}); {comment}")
+
+        elif m == 'fimul':
+            if ops and ops[0].type == X86_OP_MEM:
+                addr = self._fmt_mem_addr(ops[0].mem)
+                if ops[0].size == 2:
+                    lines.append(f"_st[0] *= (double)(int16_t)MEM16({addr}); {comment}")
+                else:
+                    lines.append(f"_st[0] *= (double)(int32_t)MEM32({addr}); {comment}")
+
+        elif m == 'fisub':
+            if ops and ops[0].type == X86_OP_MEM:
+                addr = self._fmt_mem_addr(ops[0].mem)
+                if ops[0].size == 2:
+                    lines.append(f"_st[0] -= (double)(int16_t)MEM16({addr}); {comment}")
+                else:
+                    lines.append(f"_st[0] -= (double)(int32_t)MEM32({addr}); {comment}")
+
+        elif m == 'fidiv':
+            if ops and ops[0].type == X86_OP_MEM:
+                addr = self._fmt_mem_addr(ops[0].mem)
+                if ops[0].size == 2:
+                    lines.append(f"_st[0] /= (double)(int16_t)MEM16({addr}); {comment}")
+                else:
+                    lines.append(f"_st[0] /= (double)(int32_t)MEM32({addr}); {comment}")
+
+        elif m == 'ficomp':
+            if ops and ops[0].type == X86_OP_MEM:
+                addr = self._fmt_mem_addr(ops[0].mem)
+                if ops[0].size == 2:
+                    cast_val = f"(double)(int16_t)MEM16({addr})"
+                else:
+                    cast_val = f"(double)(int32_t)MEM32({addr})"
+                lines.append(f"_fpu_cmp = (_st[0] > {cast_val}) ? 1 : (_st[0] < {cast_val}) ? -1 : 0; {comment}")
+                lines.append(f"fp_pop();")
+                self._set_flag_state(lines, 'fcom', '_fpu_cmp')
+
+        elif m == 'ficom':
+            if ops and ops[0].type == X86_OP_MEM:
+                addr = self._fmt_mem_addr(ops[0].mem)
+                if ops[0].size == 2:
+                    cast_val = f"(double)(int16_t)MEM16({addr})"
+                else:
+                    cast_val = f"(double)(int32_t)MEM32({addr})"
+                lines.append(f"_fpu_cmp = (_st[0] > {cast_val}) ? 1 : (_st[0] < {cast_val}) ? -1 : 0; {comment}")
+                self._set_flag_state(lines, 'fcom', '_fpu_cmp')
+
+        elif m == 'fist':
+            if ops and ops[0].type == X86_OP_MEM:
+                addr = self._fmt_mem_addr(ops[0].mem)
+                if ops[0].size == 2:
+                    lines.append(f"MEM16({addr}) = (int16_t)_st[0]; {comment}")
+                else:
+                    lines.append(f"MEM32({addr}) = (uint32_t)(int32_t)_st[0]; {comment}")
+
+        # --- Double-precision shifts ---
+        elif m == 'shrd':
+            if len(ops) == 3:
+                dst = self._fmt_read(ops[0])
+                src = self._fmt_read(ops[1])
+                cnt = self._fmt_read(ops[2])
+                if ops[0].size == 2:
+                    lines.append(f"{{ uint32_t _t = ((uint32_t){src} << 16) | {dst}; _t >>= ({cnt} & 31); {self._fmt_write(ops[0], '(uint16_t)_t')}; }} {comment}")
+                else:
+                    lines.append(f"{{ uint64_t _t = ((uint64_t){src} << 32) | {dst}; _t >>= ({cnt} & 31); {self._fmt_write(ops[0], '(uint32_t)_t')}; }} {comment}")
+
+        elif m == 'shld':
+            if len(ops) == 3:
+                dst = self._fmt_read(ops[0])
+                src = self._fmt_read(ops[1])
+                cnt = self._fmt_read(ops[2])
+                if ops[0].size == 2:
+                    lines.append(f"{{ uint32_t _t = ((uint32_t){dst} << 16) | {src}; _t <<= ({cnt} & 31); {self._fmt_write(ops[0], '(uint16_t)(_t >> 16)')}; }} {comment}")
+                else:
+                    lines.append(f"{{ uint64_t _t = ((uint64_t){dst} << 32) | {src}; _t <<= ({cnt} & 31); {self._fmt_write(ops[0], '(uint32_t)(_t >> 32)')}; }} {comment}")
+
+        # --- Loop instruction ---
+        elif m == 'loop':
+            target = insn.get_branch_target()
+            if target:
+                lines.append(f"ecx = ecx - 1; if (ecx != 0) goto L_{target:08X}; {comment}")
+
+        # --- movsw (move word string) ---
+        elif m == 'movsw':
+            lines.append(f"MEM16(edi) = MEM16(esi); esi += _df * 2; edi += _df * 2; {comment}")
+
+        elif m == 'rep movsw':
+            lines.append(f"{{ uint32_t _i; for (_i = 0; _i < ecx; _i++) {{ MEM16(edi) = MEM16(esi); esi += 2; edi += 2; }} ecx = 0; }} {comment}")
+
         else:
             lines.append(f"/* UNIMPLEMENTED: {insn.mnemonic} {insn.op_str} */ {comment}")
 
@@ -994,6 +1179,7 @@ class Lifter:
         for addr in sorted_addrs:
             block = func.blocks[addr]
             self._flag_state = None
+            self._flag_clobber_pending = False
             block_lines = self.lift_basic_block(block)
             lines.extend(block_lines)
             lines.append("")

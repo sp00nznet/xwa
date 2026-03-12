@@ -653,9 +653,48 @@ static void dds_Flip(void) {
                 g_back_surface->extra[4],
                 g_back_surface->extra[3]
             );
-            /* Clear back buffer after upload so we can detect game-drawn pixels next frame */
-            memset((void*)(uintptr_t)g_back_surface->extra[0], 0,
-                   g_back_surface->extra[2] * g_back_surface->extra[4]);
+            /* Dump frame 50 to BMP for debugging */
+            { static int _dumped = 0; _dumped++; if (_dumped == 50) {
+                uint32_t w = g_back_surface->extra[1], h = g_back_surface->extra[2];
+                uint32_t pitch = g_back_surface->extra[4];
+                uint8_t* px = (uint8_t*)(uintptr_t)g_back_surface->extra[0];
+                FILE* fp = fopen("D:\\recomp\\pc\\xwa\\frame_dump.bmp", "wb");
+                if (fp) {
+                    uint32_t row32 = w * 3; if (row32 % 4) row32 += 4 - (row32 % 4);
+                    uint32_t img_size = row32 * h;
+                    uint8_t hdr[54] = {0};
+                    hdr[0]='B'; hdr[1]='M';
+                    *(uint32_t*)(hdr+2) = 54 + img_size;
+                    *(uint32_t*)(hdr+10) = 54;
+                    *(uint32_t*)(hdr+14) = 40;
+                    *(int32_t*)(hdr+18) = (int32_t)w;
+                    *(int32_t*)(hdr+22) = -(int32_t)h; /* top-down */
+                    *(uint16_t*)(hdr+26) = 1;
+                    *(uint16_t*)(hdr+28) = 24;
+                    *(uint32_t*)(hdr+34) = img_size;
+                    fwrite(hdr, 1, 54, fp);
+                    uint8_t* row = (uint8_t*)HeapAlloc(GetProcessHeap(), 0, row32);
+                    for (uint32_t y = 0; y < h; y++) {
+                        uint16_t* sp = (uint16_t*)(px + y * pitch);
+                        memset(row, 0, row32);
+                        for (uint32_t x = 0; x < w; x++) {
+                            uint16_t c = sp[x];
+                            uint8_t r = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
+                            uint8_t g = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
+                            uint8_t b = (uint8_t)((c & 0x1F) * 255 / 31);
+                            row[x*3+0] = b; row[x*3+1] = g; row[x*3+2] = r;
+                        }
+                        fwrite(row, 1, row32, fp);
+                    }
+                    HeapFree(GetProcessHeap(), 0, row);
+                    fclose(fp);
+                    fprintf(stderr, "[DUMP] Wrote frame to D:\\recomp\\pc\\xwa\\frame_dump.bmp (%ux%u)\n", w, h);
+                }
+            } }
+            /* NOTE: Do NOT clear the back buffer after upload.
+             * The game does incremental drawing - it redraws only the parts
+             * that changed each frame, relying on the back buffer retaining
+             * previous content (as real DirectDraw Flip swaps front/back). */
         }
         d3d11_present();
     }
@@ -733,6 +772,29 @@ static void dds_Blt(void) {
     g_esp += 28; /* pop ret + 6 args */
 }
 
+static void dds_SetColorKey(void) {
+    /* this=esp+4, dwFlags=esp+8, lpDDColorKey=esp+12 */
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t dwFlags = MEM32(g_esp + 8);
+    uint32_t pCK = MEM32(g_esp + 12);
+    mock_com_obj_t* surf = (mock_com_obj_t*)(uintptr_t)pThis;
+    if (surf && pCK) {
+        uint32_t ckLow = MEM32(pCK + 0);
+        uint32_t ckHigh = MEM32(pCK + 4);
+        if (dwFlags & 0x8) { /* DDCKEY_SRCBLT */
+            surf->extra[5] = ckLow;   /* source color key low */
+            surf->extra[6] = 1;       /* source color key valid */
+        }
+        if (dwFlags & 0x2) { /* DDCKEY_DESTBLT */
+            surf->extra[7] = ckLow;   /* dest color key low */
+            surf->extra[8] = 1;       /* dest color key valid */
+        }
+        { static int _ck; if (_ck < 20) { fprintf(stderr, "[COM] SetColorKey(surf=0x%08X, flags=0x%X, low=0x%04X, high=0x%04X)\n", pThis, dwFlags, ckLow, ckHigh); _ck++; } }
+    }
+    g_eax = 0;
+    g_esp += 16; /* pop ret + 3 args */
+}
+
 static void dds_BltFast(void) {
     /* this=esp+4, x=esp+8, y=esp+12, pSrcSurf=esp+16, pSrcRect=esp+20, dwTrans=esp+24 */
     uint32_t pThis = MEM32(g_esp + 4);
@@ -740,20 +802,17 @@ static void dds_BltFast(void) {
     uint32_t dstY = MEM32(g_esp + 12);
     uint32_t pSrcSurf = MEM32(g_esp + 16);
     uint32_t pSrcRect = MEM32(g_esp + 20);
+    uint32_t dwTrans = MEM32(g_esp + 24);
 
     mock_com_obj_t* dst = (mock_com_obj_t*)(uintptr_t)pThis;
     mock_com_obj_t* src = pSrcSurf ? (mock_com_obj_t*)(uintptr_t)pSrcSurf : NULL;
 
     { static int _bf; if (_bf < 20) {
-        int nz = 0;
-        if (src && src->extra[0]) {
-            uint8_t* sb = (uint8_t*)(uintptr_t)src->extra[0];
-            uint32_t sz = src->extra[1] * src->extra[2] * 2;
-            for (uint32_t i = 0; i < sz && i < 2000; i++) { if (sb[i]) { nz = 1; break; } }
-        }
-        fprintf(stderr, "[COM] dds_BltFast(dst=0x%08X, x=%u, y=%u, src=0x%08X, src_nonzero=%d)\n", pThis, dstX, dstY, pSrcSurf, nz); _bf++;
+        fprintf(stderr, "[COM] dds_BltFast(dst=0x%08X, x=%u, y=%u, src=0x%08X, dwTrans=0x%X, srcCK=%u/0x%04X)\n",
+            pThis, dstX, dstY, pSrcSurf, dwTrans,
+            src ? src->extra[6] : 0, src ? src->extra[5] : 0); _bf++;
     } }
-    /* Copy src rect to dst at (dstX, dstY) */
+    /* Copy src rect to dst at (dstX, dstY) with optional source color keying */
     if (src && dst && src->extra[0] && dst->extra[0]) {
         uint32_t srcX = 0, srcY = 0, srcW = src->extra[1], srcH = src->extra[2];
         if (pSrcRect) {
@@ -769,13 +828,31 @@ static void dds_BltFast(void) {
         /* Clip to destination bounds */
         if (dstX + srcW > dstW) srcW = dstW - dstX;
         if (dstY + srcH > dstH) srcH = dstH - dstY;
-        uint32_t rowBytes = srcW * bpp;
         uint8_t* srcBuf = (uint8_t*)(uintptr_t)src->extra[0];
         uint8_t* dstBuf = (uint8_t*)(uintptr_t)dst->extra[0];
-        for (uint32_t y = 0; y < srcH; y++) {
-            memcpy(dstBuf + (dstY + y) * dstPitch + dstX * bpp,
-                   srcBuf + (srcY + y) * srcPitch + srcX * bpp,
-                   rowBytes);
+
+        /* DDBLTFAST_SRCCOLORKEY = 0x08 */
+        int use_src_ck = (dwTrans & 0x08) && src->extra[6];
+        uint16_t ck16 = (uint16_t)src->extra[5];
+
+        if (use_src_ck && bpp == 2) {
+            /* Per-pixel color key test for 16bpp */
+            for (uint32_t y = 0; y < srcH; y++) {
+                uint16_t* sp = (uint16_t*)(srcBuf + (srcY + y) * srcPitch + srcX * 2);
+                uint16_t* dp = (uint16_t*)(dstBuf + (dstY + y) * dstPitch + dstX * 2);
+                for (uint32_t x = 0; x < srcW; x++) {
+                    if (sp[x] != ck16)
+                        dp[x] = sp[x];
+                }
+            }
+        } else {
+            /* No color keying - fast memcpy path */
+            uint32_t rowBytes = srcW * bpp;
+            for (uint32_t y = 0; y < srcH; y++) {
+                memcpy(dstBuf + (dstY + y) * dstPitch + dstX * bpp,
+                       srcBuf + (srcY + y) * srcPitch + srcX * bpp,
+                       rowBytes);
+            }
         }
     }
     g_eax = 0;
@@ -813,20 +890,130 @@ static void dds_Restore(void) {
     g_esp += 8;
 }
 
+/* Track the DC-to-surface mapping for ReleaseDC */
+#define MAX_SURFACE_DCS 4
+static struct {
+    HDC hdc;
+    HDC memdc;
+    HBITMAP dib;
+    void* dib_bits;
+    mock_com_obj_t* surf;
+} g_surface_dcs[MAX_SURFACE_DCS];
+
 static void dds_GetDC(void) {
     /* this=esp+4, phDC=esp+8 */
+    uint32_t pThis = MEM32(g_esp + 4);
     uint32_t phDC = MEM32(g_esp + 8);
-    /* Return a real DC from the desktop window */
-    HDC hdc = GetDC(NULL);
-    if (phDC) MEM32(phDC) = (uint32_t)(uintptr_t)hdc;
+    mock_com_obj_t* surf = (mock_com_obj_t*)(uintptr_t)pThis;
+
+    if (!surf || !surf->extra[0] || !surf->extra[1] || !surf->extra[2]) {
+        if (phDC) MEM32(phDC) = 0;
+        g_eax = 0x80004005u; /* E_FAIL */
+        g_esp += 12;
+        return;
+    }
+
+    uint32_t w = surf->extra[1];
+    uint32_t h = surf->extra[2];
+    uint32_t bpp = surf->extra[3] ? surf->extra[3] : 16;
+
+    /* Create a memory DC with a 16-bit RGB565 DIB section */
+    HDC screenDC = GetDC(NULL);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    ReleaseDC(NULL, screenDC);
+
+    /* Set up BITMAPINFO for RGB565 */
+    struct {
+        BITMAPINFOHEADER bmiHeader;
+        DWORD masks[3]; /* BI_BITFIELDS: R, G, B masks */
+    } bmi;
+    memset(&bmi, 0, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = (LONG)w;
+    bmi.bmiHeader.biHeight = -(LONG)h; /* top-down */
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 16;
+    bmi.bmiHeader.biCompression = BI_BITFIELDS;
+    bmi.masks[0] = 0xF800; /* R */
+    bmi.masks[1] = 0x07E0; /* G */
+    bmi.masks[2] = 0x001F; /* B */
+
+    void* dibBits = NULL;
+    HBITMAP hDib = CreateDIBSection(memDC, (BITMAPINFO*)&bmi, DIB_RGB_COLORS, &dibBits, NULL, 0);
+    if (!hDib || !dibBits) {
+        DeleteDC(memDC);
+        if (phDC) MEM32(phDC) = 0;
+        g_eax = 0x80004005u;
+        g_esp += 12;
+        return;
+    }
+    SelectObject(memDC, hDib);
+
+    /* Copy current surface pixels into the DIB so GDI sees current content */
+    uint32_t pitch = surf->extra[4] ? surf->extra[4] : w * 2;
+    uint32_t dib_pitch = (w * 2 + 3) & ~3; /* DIB rows are DWORD-aligned */
+    uint8_t* src = (uint8_t*)(uintptr_t)surf->extra[0];
+    uint8_t* dst = (uint8_t*)dibBits;
+    for (uint32_t y = 0; y < h; y++) {
+        memcpy(dst + y * dib_pitch, src + y * pitch, w * 2);
+    }
+
+    /* Store the mapping for ReleaseDC */
+    for (int i = 0; i < MAX_SURFACE_DCS; i++) {
+        if (!g_surface_dcs[i].hdc) {
+            g_surface_dcs[i].hdc = memDC;
+            g_surface_dcs[i].memdc = memDC;
+            g_surface_dcs[i].dib = hDib;
+            g_surface_dcs[i].dib_bits = dibBits;
+            g_surface_dcs[i].surf = surf;
+            break;
+        }
+    }
+
+    if (phDC) MEM32(phDC) = (uint32_t)(uintptr_t)memDC;
+    fprintf(stderr, "[COM] dds_GetDC(surf=0x%X %ux%u) -> DC=0x%X\n",
+            pThis, w, h, (uint32_t)(uintptr_t)memDC);
     g_eax = 0;
     g_esp += 12;
 }
 
 static void dds_ReleaseDC(void) {
     /* this=esp+4, hDC=esp+8 */
-    uint32_t hdc = MEM32(g_esp + 8);
-    ReleaseDC(NULL, (HDC)(uintptr_t)hdc);
+    uint32_t pThis = MEM32(g_esp + 4);
+    uint32_t hdc_val = MEM32(g_esp + 8);
+    HDC hdc = (HDC)(uintptr_t)hdc_val;
+
+    { static int _rc; if (_rc < 5) { fprintf(stderr, "[COM] dds_ReleaseDC(surf=0x%X hdc=0x%X)\n", pThis, hdc_val); _rc++; } }
+
+    /* Find the mapping and copy DIB bits back to surface */
+    int found = 0;
+    for (int i = 0; i < MAX_SURFACE_DCS; i++) {
+        if (g_surface_dcs[i].hdc == hdc) {
+            found = 1;
+            mock_com_obj_t* surf = g_surface_dcs[i].surf;
+            if (surf && surf->extra[0]) {
+                uint32_t w = surf->extra[1];
+                uint32_t h = surf->extra[2];
+                uint32_t pitch = surf->extra[4] ? surf->extra[4] : w * 2;
+                uint32_t dib_pitch = (w * 2 + 3) & ~3;
+                uint8_t* dst = (uint8_t*)(uintptr_t)surf->extra[0];
+                uint8_t* src = (uint8_t*)g_surface_dcs[i].dib_bits;
+                for (uint32_t y = 0; y < h; y++) {
+                    memcpy(dst + y * pitch, src + y * dib_pitch, w * 2);
+                }
+            }
+            DeleteObject(g_surface_dcs[i].dib);
+            DeleteDC(g_surface_dcs[i].memdc);
+            memset(&g_surface_dcs[i], 0, sizeof(g_surface_dcs[i]));
+            break;
+        }
+    }
+    if (!found) {
+        /* Fallback: just delete the DC directly */
+        static int _warn; if (_warn < 5) { fprintf(stderr, "[COM] dds_ReleaseDC: DC 0x%X not tracked, deleting directly\n", hdc_val); _warn++; }
+        DeleteDC(hdc);
+    }
+
     g_eax = 0;
     g_esp += 12;
 }
@@ -1589,7 +1776,7 @@ void com_mocks_init(void) {
         funcs[26] = dds_ReleaseDC;         /* [26] ReleaseDC (2) */
         funcs[27] = dds_Restore;           /* [27] Restore (1) */
         funcs[28] = com_stub_2arg;          /* [28] SetClipper */
-        funcs[29] = com_stub_3arg;          /* [29] SetColorKey */
+        funcs[29] = dds_SetColorKey;         /* [29] SetColorKey */
         funcs[30] = com_stub_3arg;          /* [30] SetOverlayPosition */
         funcs[31] = dds_SetPalette;        /* [31] SetPalette (2) */
         funcs[32] = dds_Unlock;            /* [32] Unlock (2) */

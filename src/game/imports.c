@@ -1811,32 +1811,17 @@ static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 a
     uint32_t a4 = MEM32(g_esp + 20);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
     peek_count++;
-    /* Watchpoint: detect when 9F7042 changes */
-    {
-        static uint32_t prev_9f7042 = 0xFFFFFFFF;
-        uint32_t cur = MEM32(0x9F7042);
-        if (cur != prev_9f7042) {
-            fprintf(stderr, "[WATCH] 9F7042 changed: %u -> %u at PeekMessage #%u\n", prev_9f7042, cur, peek_count);
-            fflush(stderr);
-            prev_9f7042 = cur;
-        }
-    }
-    if (peek_count <= 20 || (peek_count % 10000 == 0)) {
-        MSG* pmsg = (MSG*)(uintptr_t)a0;
-        fprintf(stderr, "[MSG] PeekMessage #%u: ret=%u msg=0x%X remove=%u | 9F7042=%u A2143D=%u A1C8D5=0x%X A1C089=%u\n",
-                peek_count, g_eax, pmsg->message, a4,
-                MEM32(0x9F7042), MEM32(0xA2143D), MEM32(0xA1C8D5), MEM32(0xA1C089));
-        fflush(stderr);
-    }
-    /* Keep D3D11 window alive while game tick is stubbed:
-     * present a frame every ~1000 PeekMessage calls (roughly 60 fps) */
+    /* Keep D3D11 window alive with periodic presents (~30fps) */
     {
         extern int d3d11_is_initialized(void);
-        extern void d3d11_begin_scene(void);
         extern void d3d11_present(void);
-        if (d3d11_is_initialized() && (peek_count % 1000 == 0)) {
-            d3d11_begin_scene();
-            d3d11_present();
+        static DWORD last_present_time = 0;
+        if (d3d11_is_initialized()) {
+            DWORD now = GetTickCount();
+            if (now - last_present_time >= 33) { /* ~30fps keepalive */
+                d3d11_present();
+                last_present_time = now;
+            }
         }
     }
     g_esp += 24;

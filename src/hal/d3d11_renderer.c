@@ -586,8 +586,42 @@ void d3d11_end_scene(void) {
     /* No-op: actual present happens on Flip */
 }
 
+static void draw_surface_quad(void) {
+    /* Redraw the fullscreen surface quad (last uploaded texture).
+     * Needed because DXGI_SWAP_EFFECT_DISCARD invalidates backbuffer after Present. */
+    if (!g_staging_srv || !g_quad_vb || !g_quad_ib) return;
+
+    float clear_color[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+    ID3D11DeviceContext_ClearRenderTargetView(g_context, g_rtv, clear_color);
+    ID3D11DeviceContext_OMSetRenderTargets(g_context, 1, &g_rtv, NULL);
+
+    D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)g_vp_width, (float)g_vp_height, 0.0f, 1.0f };
+    ID3D11DeviceContext_RSSetViewports(g_context, 1, &vp);
+
+    ID3D11DeviceContext_OMSetDepthStencilState(g_context, g_dss_disabled, 0);
+    float bf[4] = { 0, 0, 0, 0 };
+    ID3D11DeviceContext_OMSetBlendState(g_context, g_blend_opaque, bf, 0xFFFFFFFF);
+
+    ID3D11DeviceContext_VSSetShader(g_context, g_vs_tlvertex, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
+    ID3D11DeviceContext_PSSetShader(g_context, g_ps_textured, NULL, 0);
+    ID3D11DeviceContext_PSSetShaderResources(g_context, 0, 1, &g_staging_srv);
+    ID3D11DeviceContext_PSSetSamplers(g_context, 0, 1, &g_sampler_point);
+
+    UINT stride = sizeof(D3DTLVERTEX);
+    UINT off = 0;
+    ID3D11DeviceContext_IASetVertexBuffers(g_context, 0, 1, &g_quad_vb, &stride, &off);
+    ID3D11DeviceContext_IASetIndexBuffer(g_context, g_quad_ib, DXGI_FORMAT_R16_UINT, 0);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetInputLayout(g_context, g_input_layout);
+    ID3D11DeviceContext_DrawIndexed(g_context, 6, 0, 0);
+}
+
 void d3d11_present(void) {
     if (!g_d3d11_initialized) return;
+
+    /* Always redraw the surface quad before presenting */
+    draw_surface_quad();
 
     IDXGISwapChain_Present(g_swapchain, 1, 0);
     g_frame_count++;
@@ -869,15 +903,6 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
  * ============================================================ */
 
 void d3d11_upload_surface(uint8_t* pixels, uint32_t width, uint32_t height, uint32_t pitch, uint32_t bpp) {
-    { static int _uc; if (_uc < 10) {
-        /* Check if pixel data is non-zero */
-        int nonzero = 0;
-        for (uint32_t i = 0; i < width * height * (bpp/8) && i < 1000; i++) {
-            if (pixels[i] != 0) { nonzero = 1; break; }
-        }
-        fprintf(stderr, "[D3D11] upload_surface: w=%u h=%u bpp=%u staging=%p nonzero=%d\n",
-                width, height, bpp, (void*)g_staging_tex, nonzero); _uc++;
-    } }
     if (!g_d3d11_initialized) return;
     if (!pixels || !g_staging_tex) return;
 
@@ -902,34 +927,13 @@ void d3d11_upload_surface(uint8_t* pixels, uint32_t width, uint32_t height, uint
             memcpy(rgba + y * width, pixels + y * pitch, width * 4);
         }
     }
-
     ID3D11DeviceContext_UpdateSubresource(g_context, (ID3D11Resource*)g_staging_tex,
                                           0, NULL, rgba, width * 4, 0);
 
     HeapFree(GetProcessHeap(), 0, rgba);
 
-    /* Draw fullscreen quad with the surface texture */
-    /* Disable depth, use textured shader */
-    ID3D11DeviceContext_OMSetDepthStencilState(g_context, g_dss_disabled, 0);
-    float blend_factor[4] = { 0, 0, 0, 0 };
-    ID3D11DeviceContext_OMSetBlendState(g_context, g_blend_opaque, blend_factor, 0xFFFFFFFF);
-
-    ID3D11DeviceContext_PSSetShader(g_context, g_ps_textured, NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(g_context, 0, 1, &g_staging_srv);
-    ID3D11DeviceContext_PSSetSamplers(g_context, 0, 1, &g_sampler_point);
-
-    UINT stride = sizeof(D3DTLVERTEX);
-    UINT off = 0;
-    ID3D11DeviceContext_IASetVertexBuffers(g_context, 0, 1, &g_quad_vb, &stride, &off);
-    ID3D11DeviceContext_IASetIndexBuffer(g_context, g_quad_ib, DXGI_FORMAT_R16_UINT, 0);
-    ID3D11DeviceContext_DrawIndexed(g_context, 6, 0, 0);
-    g_draw_calls++;
-    g_total_triangles += 2;
-
-    /* Restore depth state */
-    apply_depth_state();
-    /* Restore sampler */
-    ID3D11DeviceContext_PSSetSamplers(g_context, 0, 1, &g_sampler_linear);
+    /* The surface quad is now drawn in draw_surface_quad(), called from d3d11_present().
+     * This ensures the last uploaded surface is always visible even between Flips. */
 }
 
 /* ============================================================

@@ -637,18 +637,6 @@ L_BB6:
     esp = esp + 0x18u;
     g_esi = g_esi | g_eax;
     RECOMP_CALL(sub_0055B570);
-    /* Auto-advance: simulate Enter after 2 seconds */
-    {
-        static DWORD _auto_start = 0;
-        if (!_auto_start) _auto_start = GetTickCount();
-        if (GetTickCount() - _auto_start > 10000) {
-            static int _auto_log = 0;
-            if (!_auto_log) { fprintf(stderr, "[AUTO] Simulating Enter key in frontend menu\n"); fflush(stderr); _auto_log = 1; }
-            SET_LO8(g_eax, 0x0D);
-            /* Ensure menu item data is non-zero so the accept check passes */
-            if (MEM8(0x783668) == 0) MEM8(0x783668) = 1;
-        }
-    }
     if (CMP_NE(LO8(g_eax), 0xDu)) goto L_C9A;
     RECOMP_CALL(sub_0055B5B0);
     g_esi = 1;
@@ -914,9 +902,13 @@ extern void sub_0053E340(void);
 static LRESULT CALLBACK native_wndproc_bridge(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     static uint32_t wndproc_count = 0;
     wndproc_count++;
-    if (wndproc_count <= 30 || (wndproc_count % 5000 == 0)) {
-        fprintf(stderr, "[WND] WndProc #%u: msg=0x%04X wParam=0x%X lParam=0x%X esp=0x%08X\n",
-                wndproc_count, msg, (uint32_t)wParam, (uint32_t)lParam, g_esp);
+    /* Always log input messages; log others only for first 30 or every 5000 */
+    int is_input = (msg == 0x0200 || msg == 0x0201 || msg == 0x0202 ||
+                    msg == 0x0204 || msg == 0x0205 || msg == 0x0100 ||
+                    msg == 0x0101 || msg == 0x0102);
+    if (is_input || wndproc_count <= 30 || (wndproc_count % 5000 == 0)) {
+        fprintf(stderr, "[WND] #%u: msg=0x%04X wP=0x%X lP=0x%X\n",
+                wndproc_count, msg, (uint32_t)wParam, (uint32_t)lParam);
         fflush(stderr);
     }
 
@@ -981,6 +973,73 @@ static LRESULT CALLBACK native_wndproc_bridge(HWND hwnd, UINT msg, WPARAM wParam
  *   C7 44 24 18 50 E6 53 00  (mov [esp+0x18], 0x0053E650)
  * The immediate operand 0x0053E650 is at file/VA offset 0x0053EB4B.
  * We overwrite it with our native bridge address. */
+
+/* shim_0052A198: Mid-function ITAIL target inside sub_00529ECD.
+ * Tail-called from sub_00529950. At entry, the stack frame is already
+ * set up: sub esp,0x108 + push ebx,ebp,esi,edi.
+ * This code builds a sort index for CBM entries, then tears down the
+ * stack frame and returns 1 (success). */
+static void shim_0052A198(void) {
+    extern void sub_0059CF70(void);
+    extern void sub_0052ADD0(void);
+    #define esp g_esp
+    uint32_t eax, ecx, edx, esi, edi, ebx, ebp;
+    (void)ebp;
+
+    /* Retrieve ebx from saved position on stack.
+     * Stack layout: [locals 0x108][ebx][ebp][esi][edi] <- esp
+     * So ebx is at esp + 0x10 + 0x108 - 4... actually ebx was pushed first,
+     * then ebp, esi, edi. So: esp+0x0C = ebx value (edi@esp, esi@esp+4, ebp@esp+8, ebx@esp+0xC).
+     * But the code uses ebx for comparison without setting it first, so it must
+     * already be in g_ebx from the caller. */
+    ebx = g_ebx;
+
+    eax = MEM32(0xABD7DC);
+    ecx = MEM32(0xABD22C);
+    PUSH32(esp, 0x0052A210u);
+    PUSH32(esp, 0x128u);
+    PUSH32(esp, eax);
+    PUSH32(esp, ecx);
+    RECOMP_CALL(sub_0059CF70);
+    edx = MEM32(esp + 0x24);
+    esp = esp + 0x10u;
+    PUSH32(esp, edx);
+    RECOMP_CALL(sub_0052ADD0);
+    edx = MEM32(0xABD7DC);
+    eax = 0;
+    esp = esp + 4;
+    /* cmp edx, ebx */
+    ecx = 0x100u;
+    edi = 0x00ABD280u;
+    MEMSET32((void*)ADDR(edi), eax, ecx);
+    edi += ecx * 4; ecx = 0;
+    if (CMP_BE(edx, ebx)) goto L_done;
+
+    ecx = MEM32(0xABD22C);
+    ecx = ecx + 0x100u;
+L_loop:
+    esi = MEM32(ecx);
+    MEM32(esi * 4 + 0xABD280) = eax;
+    eax = eax + 1;
+    ecx = ecx + 0x128u;
+    /* cmp eax, edx */
+    if (CMP_B(eax, edx)) goto L_loop;
+
+L_done:
+    edi = POP32_VAL(esp);
+    esi = POP32_VAL(esp);
+    ebp = POP32_VAL(esp);
+    eax = 1;
+    ebx = POP32_VAL(esp);
+    esp = esp + 0x108u;
+    esp += 4; /* pop return address */
+
+    g_eax = eax;
+    g_ebx = ebx;
+    g_esi = esi;
+    g_edi = edi;
+    #undef esp
+}
 
 /* Manual override table */
 /* =================================================================
@@ -1113,8 +1172,11 @@ static recomp_dispatch_entry_t g_manual_overrides[] = {
     { 0x0052AD30, native_fopen_0052AD30 },
     { 0x0052AEF0, native_fread_0052AEF0 },
     { 0x0052ADD0, native_fclose_0052ADD0 },
+    /* Mid-function ITAIL target in sub_00529ECD (CBM sort index builder).
+     * Tail-called from sub_00529950 at 0x52A198. */
+    { 0x0052A198, shim_0052A198 },
 };
-static const int g_manual_override_count = 49;
+static const int g_manual_override_count = 50;
 
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     for (int i = 0; i < g_manual_override_count; i++) {

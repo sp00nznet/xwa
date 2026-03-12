@@ -14,8 +14,14 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
 | **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
 | **Phase 7** | **Complete** | D3D11 rendering backend — device, shaders, execute buffer parser, 2D surface pipeline |
-| **Phase 8** | **In Progress** | Frontend menu rendering — CBM decode, RLE blit, surface compositing |
+| **Phase 8** | **In Progress** | Frontend menu rendering — concourse visible, investigating visual fidelity |
 | Phase 9 | Pending | Game tick (sub_005397D0), 3D rendering, audio, full game logic |
+
+### Current Screenshot
+
+![Concourse Menu](docs/menu.png)
+
+*Concourse menu rendering with D3D11 backend. Empire and Rebel faction symbols visible. Visual fidelity improvements in progress.*
 
 ### Runtime Progress
 
@@ -32,7 +38,9 @@ The recompiled binary boots through full initialization, loads game assets, and 
 - **Callee-saved register protection**: g_ebx/g_esi/g_edi automatically preserved across all calls
 - **6 SafeDisc-encrypted jump tables** reconstructed with switch/goto
 - **D3D11 rendering backend**: Device (feature level 11.0), swap chain, HLSL shaders, execute buffer parser, texture manager, 2D surface blit (RGB565→BGRA8)
-- **2D rendering pipeline**: CBM RLE decode → offscreen surface → BltFast → back buffer → D3D11 upload → present. ~23% surface coverage per frame (menu background with transparency)
+- **2D rendering pipeline**: CBM RLE decode → offscreen surface → BltFast → back buffer → D3D11 upload → present. ~32% surface coverage per frame
+- **Source color keying**: SetColorKey + BltFast DDBLTFAST_SRCCOLORKEY support for transparent sprite compositing
+- **Concourse menu visible**: Background, Empire/Rebel faction symbols, holographic globe all rendering. Investigating visual fidelity (dark/scattered appearance)
 
 ### Fixes Applied During Runtime Bringup
 
@@ -61,6 +69,9 @@ The recompiled binary boots through full initialization, loads game assets, and 
 | 21 | Display BPP global (0x9F700A) initialization | All 2D blit functions use this for 8/16bpp path selection |
 | 22 | `test REG; mov REG; jcc` codegen fix | Flag evaluation used wrong (post-mov) register value |
 | 23 | BltFast surface copy implementation | Offscreen→back buffer compositing for menu rendering |
+| 24 | Source color keying (SetColorKey + BltFast) | Transparent sprite compositing via DDBLTFAST_SRCCOLORKEY |
+| 25 | Font file loading (.abp format) | times0/2/5.abp loaded for concourse text rendering |
+| 26 | Inner timing loop + callback dispatch | Nested event loop at 24fps with registered menu callbacks |
 
 ## Binary Analysis
 
