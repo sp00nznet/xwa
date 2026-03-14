@@ -593,6 +593,18 @@ L_BB6:
     PUSH32(esp, 0x254u);
     RECOMP_CALL(sub_0055CB50);
     esp = esp + 4;
+    { static int _td; if (_td < 5) {
+        uint32_t font15 = MEM32(0xF * 4 + 0x9FBC69);
+        uint32_t lpSurf = MEM32(0x9F60D4);
+        fprintf(stderr, "[TEXT] sub_5575A0: str=0x%08X('%s') fontIdx=0xF fontPtr=0x%08X lpSurf=0x%X\n",
+                g_eax, g_eax ? (const char*)(uintptr_t)g_eax : "(null)",
+                font15, lpSurf);
+        fprintf(stderr, "[TEXT]   clipRect: L=%d T=%d R=%d B=%d\n",
+                (int32_t)MEM32(0x9F708A), (int32_t)MEM32(0x9F7092),
+                (int32_t)MEM32(0x9F708E), (int32_t)MEM32(0x9F7096));
+        fflush(stderr);
+        _td++;
+    } }
     PUSH32(esp, g_eax);
     PUSH32(esp, 0xFu);
     RECOMP_CALL(sub_005575A0);
@@ -912,6 +924,7 @@ static LRESULT CALLBACK native_wndproc_bridge(HWND hwnd, UINT msg, WPARAM wParam
         fflush(stderr);
     }
 
+
     /* Force game to stay active even when window loses focus */
     if (msg == 0x001C /* WM_ACTIVATEAPP */ && wParam == 0) {
         fprintf(stderr, "[WND] WM_ACTIVATEAPP deactivate intercepted, forcing active\n");
@@ -937,6 +950,16 @@ static LRESULT CALLBACK native_wndproc_bridge(HWND hwnd, UINT msg, WPARAM wParam
     if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth;
     sub_0053E340();
     g_call_depth--;
+
+    /* Diagnostic: after mouse messages, check stored globals */
+    if ((msg == 0x0200 || msg == 0x0201 || msg == 0x0202) && (wndproc_count % 10 == 0)) {
+        fprintf(stderr, "[INPUT] mouseXY=(%u,%u) btn=%u/%u rel=%u/%u gate=%u\n",
+                MEM32(0x9F65ED), MEM32(0x9F65F1),
+                MEM8(0x9F6882), MEM8(0x9F6883),
+                MEM8(0x9F6884), MEM8(0x9F6885),
+                MEM8(0x9F6888));
+        fflush(stderr);
+    }
 
     /* Restore callee-saved globals */
     g_esp = saved_esp;
@@ -1051,52 +1074,28 @@ L_done:
 
 /* sub_0052AD30: VFS fopen wrapper.
  * Args: esp+4 = filename (char*), esp+8 = mode (char*).
- * Returns: FILE* in eax (0 on failure). cdecl. */
+ * Returns: FILE* in eax (0 on failure). cdecl.
+ * Forwards to the game's own CRT fopen (sub_0059ADD0) so the returned
+ * FILE* is compatible with the game's CRT fgets/fread/fclose. */
+extern void sub_0059ADD0(void);
 static void native_fopen_0052AD30(void) {
+    /* VFS fopen wrapper. Returns host CRT FILE*.
+     * All VFS wrappers and game CRT file functions also use host CRT. */
     #define esp g_esp
     uint32_t fn_addr = MEM32(esp + 4);
     uint32_t mode_addr = MEM32(esp + 8);
     const char *filename = (const char*)ADDR(fn_addr);
     const char *mode = (const char*)ADDR(mode_addr);
     FILE *fp = fopen(filename, mode);
-    static int _nfo = 0;
-    if (_nfo < 30) {
-        fprintf(stderr, "[NATIVE_FOPEN] '%s' mode='%s' -> %p\n", filename, mode, fp);
-        _nfo++;
-    }
-    if (fp) MEM16(0x7829C8) = (uint16_t)(MEM16(0x7829C8) + 1);
     g_eax = (uint32_t)(uintptr_t)fp;
-    esp += 4;
-    #undef esp
-}
-
-/* sub_0052AEF0: VFS fread wrapper.
- * Args: esp+4 = FILE*, esp+8 = buffer, esp+0xC = byte count.
- * Returns: ax=1 on success (read==count), ax=0 on failure. */
-static void native_fread_0052AEF0(void) {
-    #define esp g_esp
-    FILE *fp = (FILE*)(uintptr_t)MEM32(esp + 4);
-    uint32_t buf_addr = MEM32(esp + 8);
-    uint32_t count = MEM32(esp + 0xC);
-    void *buf = (void*)ADDR(buf_addr);
-    size_t nread = fread(buf, 1, count, fp);
-    /* Return ax=1 on success, ax=0 on failure (match original semantics) */
-    g_eax = (nread == count) ? 1 : 0;
-    esp += 4;
-    #undef esp
-}
-
-/* sub_0052ADD0: VFS fclose wrapper.
- * Args: esp+4 = FILE*. cdecl. */
-static void native_fclose_0052ADD0(void) {
-    #define esp g_esp
-    FILE *fp = (FILE*)(uintptr_t)MEM32(esp + 4);
     if (fp) {
-        MEM16(0x7829C8) = (uint16_t)(MEM16(0x7829C8) - 1);
-        fclose(fp);
+        MEM16(0x7829C8) = (uint16_t)(MEM16(0x7829C8) + 1);
     }
-    g_eax = (uint32_t)(uintptr_t)fp;
-    esp += 4;
+    { static int _nfo = 0; if (_nfo < 30) {
+        fprintf(stderr, "[NATIVE_FOPEN] '%s' mode='%s' -> %p\n", filename, mode, fp);
+        fflush(stderr); _nfo++;
+    } }
+    esp += 4; /* pop return address */
     #undef esp
 }
 
@@ -1168,15 +1167,13 @@ static recomp_dispatch_entry_t g_manual_overrides[] = {
     { 0x00559B50, manual_sub_00559B50 },
     /* Second frontend menu display callback (dead code in sub_005593C0) */
     { 0x005595A0, manual_sub_005595A0 },
-    /* Native file I/O replacements (bypass broken CRT FILE infrastructure) */
+    /* VFS fopen wrapper — forwards to game CRT fopen */
     { 0x0052AD30, native_fopen_0052AD30 },
-    { 0x0052AEF0, native_fread_0052AEF0 },
-    { 0x0052ADD0, native_fclose_0052ADD0 },
     /* Mid-function ITAIL target in sub_00529ECD (CBM sort index builder).
      * Tail-called from sub_00529950 at 0x52A198. */
     { 0x0052A198, shim_0052A198 },
 };
-static const int g_manual_override_count = 50;
+static const int g_manual_override_count = 48;
 
 recomp_func_t recomp_lookup_manual(uint32_t va) {
     for (int i = 0; i < g_manual_override_count; i++) {

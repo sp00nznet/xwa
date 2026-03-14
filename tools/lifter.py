@@ -119,6 +119,7 @@ class Lifter:
         self.code_end = code_end
         self._flag_state = None  # (setter_mnemonic, operands_str)
         self._flag_clobber_pending = False  # True when _check_flag_clobber emitted an open brace
+        self._old_vars = set()  # Track _old_ variables needed for function-scope declarations
         self._fp_depth = 0  # FPU stack depth tracking
 
     def _fmt_read(self, op) -> str:
@@ -324,10 +325,8 @@ class Lifter:
         return None
 
     def _close_flag_clobber(self, lines) -> None:
-        """Close any pending flag-clobber brace block."""
-        if self._flag_clobber_pending:
-            lines.append(f"}}")
-            self._flag_clobber_pending = False
+        """Close any pending flag-clobber (no-op now, declarations at function scope)."""
+        self._flag_clobber_pending = False
 
     def _set_flag_state(self, lines, setter, ops_str) -> None:
         """Set flag_state, closing any pending clobber brace first."""
@@ -378,8 +377,9 @@ class Lifter:
         old_name = f"_old_{reg_name}"
         new_ops = re.sub(r'\b' + re.escape(reg_name) + r'\b', old_name, ops_str)
         self._flag_state = (setter, new_ops)
-        # Prepend the save line. The caller must wrap in braces if a condition follows.
-        lines.append(f"{{ uint32_t {old_name} = {reg_name};")
+        # Save the old value. Declaration emitted at function scope.
+        self._old_vars.add(old_name)
+        lines.append(f"{old_name} = {reg_name};")
         self._flag_clobber_pending = True
 
     def lift_instruction(self, insn) -> list:
@@ -629,9 +629,7 @@ class Lifter:
             if len(ops) == 1:
                 cond = self._make_condition(m)
                 lines.append(f"{self._fmt_write(ops[0], f'({cond}) ? 1 : 0')}; {comment}")
-                if self._flag_clobber_pending:
-                    lines.append(f"}}")
-                    self._flag_clobber_pending = False
+                self._flag_clobber_pending = False
 
         # --- CMOVcc ---
         elif m in CMOVCC_MAP:
@@ -640,9 +638,7 @@ class Lifter:
                 src = self._fmt_read(ops[1])
                 dst = self._fmt_read(ops[0])
                 lines.append(f"if ({cond}) {{ {self._fmt_write(ops[0], src)}; }} {comment}")
-                if self._flag_clobber_pending:
-                    lines.append(f"}}")
-                    self._flag_clobber_pending = False
+                self._flag_clobber_pending = False
 
         # --- Carry arithmetic ---
         elif m == 'adc':
@@ -773,9 +769,7 @@ class Lifter:
                 lines.append(f"if ({cond}) goto L_{target:08X}; {comment}")
             else:
                 lines.append(f"if ({cond}) {{ /* indirect jcc */ }} {comment}")
-            if self._flag_clobber_pending:
-                lines.append(f"}}")
-                self._flag_clobber_pending = False
+            self._flag_clobber_pending = False
 
         elif m == 'jecxz' or m == 'jcxz':
             target = insn.get_branch_target()
@@ -1176,17 +1170,25 @@ class Lifter:
         lines.append(f"    uint32_t _cf = 0;  /* carry flag */")
         lines.append(f"    int _df = 1;  /* direction flag (1=forward, -1=backward) */")
         lines.append(f"    uint16_t _fpu_cw = 0x037F;  /* FPU control word */")
-        lines.append(f"")
 
-        # Emit blocks in address order
+        # Emit blocks in address order, collecting _old_ variable names
+        self._old_vars = set()
         sorted_addrs = sorted(func.blocks.keys())
+        body_lines = []
         for addr in sorted_addrs:
             block = func.blocks[addr]
             self._flag_state = None
             self._flag_clobber_pending = False
             block_lines = self.lift_basic_block(block)
-            lines.extend(block_lines)
-            lines.append("")
+            body_lines.extend(block_lines)
+            body_lines.append("")
+
+        # Emit _old_ variable declarations at function scope
+        if self._old_vars:
+            for var in sorted(self._old_vars):
+                lines.append(f"    uint32_t {var} = 0;")
+        lines.append(f"")
+        lines.extend(body_lines)
 
         lines.append("}")
         return '\n'.join(lines)

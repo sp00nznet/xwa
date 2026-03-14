@@ -14,14 +14,14 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
 | **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
 | **Phase 7** | **Complete** | D3D11 rendering backend — device, shaders, execute buffer parser, 2D surface pipeline |
-| **Phase 8** | **In Progress** | Frontend menu rendering — concourse fully visible, investigating text/UI overlay |
-| Phase 9 | Pending | Game tick (sub_005397D0), 3D rendering, audio, full game logic |
+| **Phase 8** | **In Progress** | Frontend menu rendering — concourse with text labels, string tables loaded |
+| Phase 9 | Pending | DirectInput mouse/keyboard, 3D rendering, audio, full game logic |
 
 ### Current Screenshot
 
 ![Concourse Menu](docs/menu.png)
 
-*Concourse menu rendering with D3D11 backend. Full background, holographic globe, Empire and Rebel faction symbols all rendering correctly via RLE-decoded CBM surfaces.*
+*Concourse pilot creation screen with text rendering. "Create a new pilot." and "Create Pilot" labels drawn from fronttxt.txt string table. Full background, holographic globe, Empire/Rebel faction symbols via RLE-decoded CBM surfaces.*
 
 ### Runtime Progress
 
@@ -29,18 +29,20 @@ The recompiled binary boots through full initialization, loads game assets, and 
 
 - **Stable main loop**: 29M+ PeekMessage calls per 15-second run, zero crashes
 - **VC6 CRT initialization**: heap, locks, stdio, atexit all functional
-- **Native file I/O**: 8 VFS-level CRT functions replaced with host CRT (fopen/fread/fclose/fseek/ftell/fwrite) — game's recompiled CRT was corrupted
+- **Native file I/O**: All game CRT file functions replaced with host CRT (fopen/fgets/fclose/fseek/ftell/fread/fwrite) — original MSVC 6.0 FILE* struct layout incompatible with modern CRT
+- **String tables loaded**: strings.txt (184KB, ~1,500 game strings) and fronttxt.txt (47KB, menu labels) parsed correctly
+- **Text rendering**: GDI font glyph capture (.abp files), pixel-level text drawing on concourse surfaces
 - **39 .dat resource files** + **CBM concourse backgrounds** loaded successfully
 - **Window creation**: "X-Wing Alliance" window at 1920x1080 (native resolution)
 - **DirectX COM mocks**: Full mock objects for IDirectDraw, IDirectDrawSurface, IDirect3D, IDirect3DDevice, IDirectInput, IDirectInputDevice, IDirectSound, IDirectSoundBuffer (178 vtable bridges)
 - **357 total bridges** registered (179 Win32 API + 178 COM vtable)
-- **45 manual overrides** including 6 callback functions missed by code generator
+- **48 manual overrides** including 6 callback functions missed by code generator
 - **Callee-saved register protection**: g_ebx/g_esi/g_edi automatically preserved across all calls
 - **6 SafeDisc-encrypted jump tables** reconstructed with switch/goto
 - **D3D11 rendering backend**: Device (feature level 11.0), swap chain, HLSL shaders, execute buffer parser, texture manager, 2D surface blit (RGB565→BGRA8)
 - **2D rendering pipeline**: CBM RLE decode → offscreen surface → BltFast → back buffer → D3D11 upload → present. ~32% surface coverage per frame
 - **Source color keying**: SetColorKey + BltFast DDBLTFAST_SRCCOLORKEY support for transparent sprite compositing
-- **Concourse menu fully rendered**: Background nebula, holographic globe with lens flare, Empire/Rebel faction symbols all rendering correctly. 70% pixel coverage via RLE-decoded CBM surfaces with 16-bit palette lookup
+- **Concourse menu with text**: Background nebula, holographic globe with lens flare, Empire/Rebel faction symbols, and text labels ("Create Pilot", "Fly Solo", etc.) all rendering correctly. 70% pixel coverage via RLE-decoded CBM surfaces with 16-bit palette lookup
 
 ### Fixes Applied During Runtime Bringup
 
@@ -74,6 +76,9 @@ The recompiled binary boots through full initialization, loads game assets, and 
 | 26 | Inner timing loop + callback dispatch | Nested event loop at 24fps with registered menu callbacks |
 | 27 | `AND reg, imm; jcc` codegen fix (25 instances) | RLE literal pixel copy was completely skipped — concourse went from 23% to 70% pixel coverage |
 | 28 | `test reg; mov reg; jcc` codegen fix (3 BPP instances) | BPP dispatch used wrong register value after mov overwrote flags source |
+| 29 | `_old_` variable scoping fix (lifter + generator) | Block-scoped declarations broke across goto labels; moved to function scope |
+| 30 | Game CRT file I/O native replacements (7 functions) | MSVC 6.0 FILE* layout differs from host CRT — ftell returned -1, crashing string parser |
+| 31 | String table loading (strings.txt + fronttxt.txt) | 184KB game strings + 47KB menu labels parsed and available for text rendering |
 
 ## Binary Analysis
 
@@ -93,7 +98,7 @@ The recompiled binary boots through full initialization, loads game assets, and 
 
 | Metric | Value |
 |--------|-------|
-| Functions recompiled | 2,701 |
+| Functions recompiled | 2,702 |
 | Total lines of C | 606,424 |
 | Generated code size | 33.4 MB |
 | Source files | 6 + header + dispatch table |

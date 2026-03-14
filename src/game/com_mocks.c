@@ -166,6 +166,37 @@ static uint32_t g_dsound_vtable_addr;
 static uint32_t g_dsbuffer_vtable_addr;
 static uint32_t g_d3dtexture_vtable_addr;
 
+/* ============================================================
+ * DirectInput State Tracking
+ * ============================================================ */
+
+/* Device types stored in mock_com_obj_t.extra[2] */
+#define DIDEV_TYPE_UNKNOWN   0
+#define DIDEV_TYPE_KEYBOARD  1
+#define DIDEV_TYPE_MOUSE     2
+#define DIDEV_TYPE_JOYSTICK  3
+
+/* VK-to-DIK scancode mapping table (built once) */
+static uint8_t g_vk_to_dik[256];
+static int g_vk_to_dik_initialized = 0;
+
+static void init_vk_to_dik_table(void) {
+    if (g_vk_to_dik_initialized) return;
+    memset(g_vk_to_dik, 0, sizeof(g_vk_to_dik));
+    for (int vk = 0; vk < 256; vk++) {
+        UINT sc = MapVirtualKeyA(vk, 0 /* MAPVK_VK_TO_VSC */);
+        if (sc > 0 && sc < 256)
+            g_vk_to_dik[vk] = (uint8_t)sc;
+    }
+    g_vk_to_dik_initialized = 1;
+}
+
+/* Mouse state for relative movement tracking */
+static POINT g_mouse_last_pos = { 0, 0 };
+static int g_mouse_tracking = 0;
+static LONG g_mouse_dx = 0;
+static LONG g_mouse_dy = 0;
+
 /* Pixel buffer for surfaces (640x480x2 = 614400 bytes) */
 #define SURFACE_BUF_SIZE (640 * 480 * 2)
 static uint8_t* g_surface_buffer = NULL;
@@ -844,7 +875,7 @@ static void dds_BltFast(void) {
     mock_com_obj_t* dst = (mock_com_obj_t*)(uintptr_t)pThis;
     mock_com_obj_t* src = pSrcSurf ? (mock_com_obj_t*)(uintptr_t)pSrcSurf : NULL;
 
-    { static int _bf; if (_bf < 20) {
+    { static int _bf; if (_bf < 200) {
         fprintf(stderr, "[COM] dds_BltFast(dst=0x%08X[buf=0x%08X], x=%u, y=%u, src=0x%08X[buf=0x%08X %ux%u], dwTrans=0x%X, 0x6002BC=0x%08X)\n",
             pThis, dst ? dst->extra[0] : 0, dstX, dstY,
             pSrcSurf, src ? src->extra[0] : 0,
@@ -1039,6 +1070,37 @@ static void dds_ReleaseDC(void) {
                 uint8_t* src = (uint8_t*)g_surface_dcs[i].dib_bits;
                 for (uint32_t y = 0; y < h; y++) {
                     memcpy(dst + y * pitch, src + y * dib_pitch, w * 2);
+                }
+                /* Font rendering: game renders text to surface 0x9F702E via GetDC
+                 * but reads pixels from surface 0x9F7036 via Lock. Copy DIB bits
+                 * to the paired surface so pixel readback finds the rendered text. */
+                uint32_t surf702E = MEM32(0x9F702E);
+                uint32_t surf7036 = MEM32(0x9F7036);
+                if (pThis == surf702E && surf7036 && surf7036 != surf702E) {
+                    mock_com_obj_t* paired = (mock_com_obj_t*)(uintptr_t)surf7036;
+                    if (paired->extra[0] && paired->extra[1] == w && paired->extra[2] == h) {
+                        uint32_t ppitch = paired->extra[4] ? paired->extra[4] : w * 2;
+                        uint8_t* pdst = (uint8_t*)(uintptr_t)paired->extra[0];
+                        /* Count non-zero pixels in DIB to verify GDI rendered text */
+                        int nz = 0;
+                        for (uint32_t y2 = 0; y2 < h && !nz; y2++)
+                            for (uint32_t x2 = 0; x2 < w && !nz; x2++)
+                                if (((uint16_t*)(src + y2 * dib_pitch))[x2]) nz = 1;
+                        { static int _pc; if (_pc < 5) {
+                            fprintf(stderr, "[COM] ReleaseDC paired copy: surf=0x%X→0x%X %ux%u dib_has_pixels=%d\n",
+                                pThis, surf7036, w, h, nz);
+                            fflush(stderr); _pc++;
+                        } }
+                        for (uint32_t y = 0; y < h; y++) {
+                            memcpy(pdst + y * ppitch, src + y * dib_pitch, w * 2);
+                        }
+                    } else {
+                        static int _pf; if (_pf < 3) {
+                            fprintf(stderr, "[COM] ReleaseDC paired SKIP: paired->extra[0]=0x%X dims=%ux%u vs %ux%u\n",
+                                paired->extra[0], paired->extra[1], paired->extra[2], w, h);
+                            fflush(stderr); _pf++;
+                        }
+                    }
                 }
             }
             DeleteObject(g_surface_dcs[i].dib);
@@ -1514,10 +1576,27 @@ static void d3dtex_Load(void) {
 
 static void di_CreateDevice(void) {
     /* this=esp+4, rguid=esp+8, ppDevice=esp+12, pUnkOuter=esp+16 */
+    uint32_t rguid = MEM32(g_esp + 8);
     uint32_t ppDev = MEM32(g_esp + 12);
     mock_com_obj_t* dev = alloc_mock(MOCK_TAG_DIDEVICE, g_didevice_vtable_addr);
+
+    /* Identify device type from GUID.
+     * GUID_SysKeyboard: {6F1D2B61-D5A0-11CF-BFC7-444553540000}
+     * GUID_SysMouse:    {6F1D2B60-D5A0-11CF-BFC7-444553540000} */
+    uint32_t dev_type = DIDEV_TYPE_UNKNOWN;
+    if (rguid) {
+        uint32_t guid_data1 = MEM32(rguid);
+        if (guid_data1 == 0x6F1D2B61)
+            dev_type = DIDEV_TYPE_KEYBOARD;
+        else if (guid_data1 == 0x6F1D2B60)
+            dev_type = DIDEV_TYPE_MOUSE;
+        else
+            dev_type = DIDEV_TYPE_JOYSTICK; /* assume joystick for any other GUID */
+    }
+    dev->extra[2] = dev_type;
+
     MEM32(ppDev) = (uint32_t)(uintptr_t)dev;
-    COM_LOG("[COM] IDirectInput::CreateDevice -> 0x%08X\n", (uint32_t)(uintptr_t)dev);
+    COM_LOG("[COM] IDirectInput::CreateDevice(type=%u) -> 0x%08X\n", dev_type, (uint32_t)(uintptr_t)dev);
     g_eax = 0;
     g_esp += 20;
 }
@@ -1566,13 +1645,64 @@ static void di_EnumDevices(void) {
 
 static void didev_GetDeviceState(void) {
     /* this=esp+4, cbData=esp+8, lpvData=esp+12 */
+    uint32_t pThis = MEM32(g_esp + 4);
     uint32_t cbData = MEM32(g_esp + 8);
     uint32_t lpvData = MEM32(g_esp + 12);
-    /* Zero-fill the state buffer (no keys pressed, joystick centered) */
-    if (lpvData && cbData > 0) {
-        memset((void*)(uintptr_t)lpvData, 0, cbData);
+
+    if (!lpvData || cbData == 0) {
+        g_eax = 0;
+        g_esp += 16;
+        return;
     }
-    g_eax = 0;
+
+    /* Zero-fill first, then populate with real data */
+    memset((void*)(uintptr_t)lpvData, 0, cbData);
+
+    /* Determine device type from the mock object */
+    mock_com_obj_t* dev = (mock_com_obj_t*)(uintptr_t)pThis;
+    uint32_t dev_type = dev->extra[2];
+
+    if (dev_type == DIDEV_TYPE_KEYBOARD && cbData >= 256) {
+        /* Fill 256-byte DirectInput keyboard state.
+         * DIK scancodes = hardware scan codes. 0x80 = pressed. */
+        init_vk_to_dik_table();
+        BYTE vk_state[256];
+        if (GetKeyboardState(vk_state)) {
+            uint8_t* di_state = (uint8_t*)(uintptr_t)lpvData;
+            for (int vk = 0; vk < 256; vk++) {
+                if (vk_state[vk] & 0x80) {
+                    uint8_t dik = g_vk_to_dik[vk];
+                    if (dik > 0)
+                        di_state[dik] = 0x80;
+                }
+            }
+        }
+    } else if (dev_type == DIDEV_TYPE_MOUSE && cbData >= 16) {
+        /* DIMOUSESTATE: lX(4), lY(4), lZ(4), rgbButtons[4] */
+        POINT cur;
+        GetCursorPos(&cur);
+        LONG dx = 0, dy = 0;
+        if (g_mouse_tracking) {
+            dx = cur.x - g_mouse_last_pos.x;
+            dy = cur.y - g_mouse_last_pos.y;
+        }
+        g_mouse_last_pos = cur;
+        g_mouse_tracking = 1;
+
+        /* Write DIMOUSESTATE */
+        int32_t* state = (int32_t*)(uintptr_t)lpvData;
+        state[0] = (int32_t)dx;       /* lX - relative X */
+        state[1] = (int32_t)dy;       /* lY - relative Y */
+        state[2] = 0;                 /* lZ - wheel (TODO) */
+        /* rgbButtons[4] at offset 12 */
+        uint8_t* buttons = (uint8_t*)(uintptr_t)(lpvData + 12);
+        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) buttons[0] = 0x80;
+        if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) buttons[1] = 0x80;
+        if (GetAsyncKeyState(VK_MBUTTON) & 0x8000) buttons[2] = 0x80;
+    }
+    /* For joystick/unknown: leave zeroed (centered, no buttons) */
+
+    g_eax = 0;  /* DI_OK */
     g_esp += 16;
 }
 

@@ -130,19 +130,29 @@ def lift_function_linear(lifter, name, instructions, leaders, func_start):
     lines.append(f'    uint32_t _cf = 0;')
     lines.append(f'    int _df = 1;')
     lines.append(f'    uint16_t _fpu_cw = 0x037F;')
-    lines.append(f'')
 
     lifter._flag_state = None
+    lifter._old_vars = set()
 
+    # Lift all instructions into body_lines, collecting _old_ variable names
+    body_lines = []
     for insn in instructions:
         # Emit label if this is a block leader
         if insn.address in leaders:
-            lines.append(f'L_{insn.address:08X}:')
+            body_lines.append(f'L_{insn.address:08X}:')
 
         # Lift the instruction
         lifted = lifter.lift_instruction(insn)
         for line in lifted:
-            lines.append(f'    {line}')
+            body_lines.append(f'    {line}')
+
+    # Emit _old_ variable declarations at function scope
+    if lifter._old_vars:
+        for var in sorted(lifter._old_vars):
+            lines.append(f'    uint32_t {var} = 0;')
+    lines.append(f'')
+
+    lines.extend(body_lines)
 
     # Ensure function doesn't fall off the end without return
     if instructions and not instructions[-1].is_ret:

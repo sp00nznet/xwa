@@ -9966,6 +9966,12 @@
     "num_instructions": 1405
   },
   {
+    "address": "0x005397D0",
+    "address_int": 5478352,
+    "name": "sub_005397D0",
+    "num_instructions": 50
+  },
+  {
     "address": "0x0053AA90",
     "address_int": 5483152,
     "name": "sub_0053AA90",
