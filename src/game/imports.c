@@ -1643,6 +1643,11 @@ static void bridge_CreateWindowExA_005A9240(void) { /* USER32.dll:CreateWindowEx
         a6 = 740; a7 = 580; /* width, height (640+borders) */
     }
     if (fn) g_eax = fn(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11);
+    /* Force window to foreground and give it keyboard focus */
+    if (g_eax) {
+        SetForegroundWindow((HWND)(uintptr_t)g_eax);
+        SetFocus((HWND)(uintptr_t)g_eax);
+    }
     fprintf(stderr, "[TRACE]   -> hwnd=0x%08X\n", g_eax);
     g_esp += 52;
 }
@@ -1837,7 +1842,16 @@ static void bridge_ShowCursor_005A927C(void) { /* USER32.dll:ShowCursor (1 args)
     static uint32_t sc_count = 0;
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "ShowCursor");
     uint32_t a0 = MEM32(g_esp + 4);
-    if (fn) g_eax = fn(a0);
+    /* Simulate ShowCursor counter but keep real cursor visible.
+     * Call real ShowCursor(TRUE) once to ensure visibility, then
+     * just track the game's counter without affecting the real cursor. */
+    {
+        static int32_t cursor_count = 0;
+        static int _ensured = 0;
+        if (!_ensured) { if (fn) fn(1); _ensured = 1; } /* ensure cursor visible */
+        if (a0) cursor_count++; else cursor_count--;
+        g_eax = (uint32_t)cursor_count;
+    }
     sc_count++;
     if (sc_count <= 10 || (sc_count % 100000 == 0)) {
         fprintf(stderr, "[CURSOR] ShowCursor(%u) = %d (0x%08X) #%u\n",
