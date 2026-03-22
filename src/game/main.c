@@ -668,6 +668,12 @@ L_BB6:
     RECOMP_CALL(sub_00555FE0);
     esp = esp + 0x18u;
     g_esi = g_esi | g_eax;
+    { static int _nc; if (_nc < 20) {
+        fprintf(stderr, "[CREATE] frame: esi=%u charR=%u charW=%u name='%.12s' (0x%02X)\n",
+            g_esi, MEM32(0x9F6F83), MEM32(0x9F6F7F),
+            (const char*)(uintptr_t)0x783668, MEM8(0x783668));
+        fflush(stderr); _nc++;
+    } }
     RECOMP_CALL(sub_0055B570);
     if (CMP_NE(LO8(g_eax), 0xDu)) goto L_C9A;
     RECOMP_CALL(sub_0055B5B0);

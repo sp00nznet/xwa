@@ -1811,14 +1811,18 @@ static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 a
     uint32_t a4 = MEM32(g_esp + 20);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
     peek_count++;
-    /* Keep D3D11 window alive with periodic presents (~30fps) */
+    /* Keep D3D11 window alive with periodic presents (~30fps).
+     * Upload the latest back buffer content before each present so
+     * the display always shows the current game state. */
     {
         extern int d3d11_is_initialized(void);
         extern void d3d11_present(void);
+        extern void com_upload_back_buffer(void);
         static DWORD last_present_time = 0;
         if (d3d11_is_initialized()) {
             DWORD now = GetTickCount();
             if (now - last_present_time >= 33) { /* ~30fps keepalive */
+                com_upload_back_buffer();
                 d3d11_present();
                 last_present_time = now;
             }

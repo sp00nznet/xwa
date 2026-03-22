@@ -702,18 +702,22 @@ static void dds_GetSurfaceDesc(void) {
 
 static void dds_Flip(void) {
     /* this=esp+4, pSurf=esp+8, flags=esp+12 */
+    static int _flip_count = 0;
+    _flip_count++;
     if (d3d11_is_initialized()) {
         /* Upload the back buffer 2D surface before presenting */
         if (g_back_surface && g_back_surface->extra[0]) {
-            { static int _fc; if (_fc < 20) {
+            if (_flip_count <= 25 || (_flip_count % 100 == 0)) {
                 uint8_t* buf = (uint8_t*)(uintptr_t)g_back_surface->extra[0];
                 uint32_t sz = g_back_surface->extra[1] * g_back_surface->extra[2] * 2;
-                int nz = 0; uint32_t nz_count = 0;
-                for (uint32_t i = 0; i < sz; i++) { if (buf[i]) { nz = 1; nz_count++; } }
-                fprintf(stderr, "[COM] dds_Flip #%d: back_buf=0x%X %ux%u nz_bytes=%u/%u\n",
-                    _fc, g_back_surface->extra[0], g_back_surface->extra[1], g_back_surface->extra[2], nz_count, sz);
-                _fc++;
-            } }
+                uint32_t nz_count = 0;
+                for (uint32_t i = 0; i < sz; i++) { if (buf[i]) nz_count++; }
+                fprintf(stderr, "[COM] dds_Flip #%d: back_buf=0x%X %ux%u nz=%u/%u this=0x%X\n",
+                    _flip_count, g_back_surface->extra[0], g_back_surface->extra[1],
+                    g_back_surface->extra[2], nz_count, sz,
+                    MEM32(g_esp + 4));
+                fflush(stderr);
+            }
             d3d11_upload_surface(
                 (uint8_t*)(uintptr_t)g_back_surface->extra[0],
                 g_back_surface->extra[1],
@@ -721,8 +725,8 @@ static void dds_Flip(void) {
                 g_back_surface->extra[4],
                 g_back_surface->extra[3]
             );
-            /* Dump frame 50 to BMP for debugging */
-            { static int _dumped = 0; _dumped++; if (_dumped == 50) {
+            /* Dump frame 150 to BMP for debugging (after screen advance) */
+            { static int _dumped = 0; _dumped++; if (_dumped == 150) {
                 uint32_t w = g_back_surface->extra[1], h = g_back_surface->extra[2];
                 uint32_t pitch = g_back_surface->extra[4];
                 uint8_t* px = (uint8_t*)(uintptr_t)g_back_surface->extra[0];
@@ -2269,4 +2273,26 @@ void bridge_DirectSoundCreate_impl(void) {
 
     g_eax = 0; /* DS_OK */
     g_esp += 16; /* pop ret + 3 args */
+}
+
+/* Upload the current back buffer to D3D11 staging texture.
+ * Called from PeekMessage keepalive to ensure the display always
+ * shows the latest rendered content, not just stale frames. */
+void com_upload_back_buffer(void) {
+    if (g_back_surface && g_back_surface->extra[0] && d3d11_is_initialized()) {
+        { static int _ubb; if (_ubb < 3) {
+            fprintf(stderr, "[UPLOAD] back_buf=0x%X %ux%u pitch=%u bpp=%u\n",
+                g_back_surface->extra[0], g_back_surface->extra[1],
+                g_back_surface->extra[2], g_back_surface->extra[4],
+                g_back_surface->extra[3]);
+            fflush(stderr); _ubb++;
+        } }
+        d3d11_upload_surface(
+            (uint8_t*)(uintptr_t)g_back_surface->extra[0],
+            g_back_surface->extra[1],
+            g_back_surface->extra[2],
+            g_back_surface->extra[4],
+            g_back_surface->extra[3]
+        );
+    }
 }
