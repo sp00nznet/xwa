@@ -7,6 +7,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <mmsystem.h>   /* timeBeginPeriod */
 #include <winternl.h>  /* NtCurrentTeb() */
 #include <stdio.h>
 #include <stdint.h>
@@ -527,6 +528,25 @@ static void manual_sub_00559B50(void) {
     /* test eax, eax */
     PUSH32(esp, g_esi);
     { static int _cb; if (_cb < 10) { fprintf(stderr, "[559B50] call #%d, arg(eax)=%u\n", _cb, g_eax); _cb++; } }
+    /* Auto-advance: after 5 seconds, inject pilot name and simulate Enter */
+    {
+        static DWORD _auto_start = 0;
+        static int _auto_done = 0;
+        if (!_auto_start) _auto_start = GetTickCount();
+        if (!_auto_done && (GetTickCount() - _auto_start > 5000)) {
+            /* Write pilot name "Pilot1" at 0x783668 */
+            const char* name = "Pilot1";
+            for (int i = 0; name[i]; i++) MEM8(0x783668 + i) = name[i];
+            MEM8(0x783668 + 6) = 0;
+            /* Inject Enter (0x0D) into character buffer */
+            uint32_t wpos = MEM32(0x9F6F7F);
+            MEM8(0x9F6B7F + wpos) = 0x0D;
+            MEM32(0x9F6F7F) = wpos + 1;
+            fprintf(stderr, "[AUTO] Injected pilot name 'Pilot1' and Enter key\n");
+            fflush(stderr);
+            _auto_done = 1;
+        }
+    }
     if (CMP_NE(g_eax, 0)) goto L_BB6;
     /* 0x559B5C: eax==0 path */
     { static int _p0; if (_p0 < 3) { fprintf(stderr, "[559B50] eax==0 path, calling sub_55BA70/55B590/531D70/53F830...\n"); _p0++; } }
@@ -2108,6 +2128,11 @@ int main(int argc, char* argv[]) {
         com_mocks_init();
     }
 
+    /* Increase Windows timer resolution to 1ms (from default 15.6ms).
+     * Critical for GetTickCount precision and Sleep(1) accuracy.
+     * The original game ran on Win98/2000 which had ~1ms timer resolution. */
+    timeBeginPeriod(1);
+
     printf("\n[*] XWA recomp infrastructure ready.\n");
     printf("[*] Dispatch table: %u functions\n", recomp_dispatch_count);
 
@@ -2193,8 +2218,8 @@ int main(int argc, char* argv[]) {
     /* Register a _onexit callback (MSVC-specific, runs during _exit too) */
     _onexit((_onexit_t)dump_trace_atexit);
 
-    /* Start watchdog timer (10 seconds) */
-    CreateThread(NULL, 0, watchdog_thread, (LPVOID)10000, 0, NULL);
+    /* Start watchdog timer (60 seconds - extended for debugging) */
+    CreateThread(NULL, 0, watchdog_thread, (LPVOID)60000, 0, NULL);
 
     /* Call the CRT entry point (WinMainCRTStartup / mainCRTStartup).
      * This handles all CRT initialization: _heap_init, _mtinit, _ioinit,

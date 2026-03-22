@@ -1866,6 +1866,16 @@ static void dsb_GetCaps(void) {
     g_esp += 12;
 }
 
+/* IDirectDraw::GetVerticalBlankStatus - always report in VBlank.
+ * The original game used this to wait for VSync before Flip.
+ * Without real DDraw, always return TRUE so the game doesn't spin forever. */
+static void dd_GetVerticalBlankStatus(void) {
+    uint32_t pIsInVB = MEM32(g_esp + 8);
+    if (pIsInVB) MEM32(pIsInVB) = 1;  /* TRUE: in vertical blank */
+    g_eax = 0;  /* DD_OK */
+    g_esp += 12;
+}
+
 /* ============================================================
  * Vtable Construction and Bridge Registration
  * ============================================================ */
@@ -1897,7 +1907,7 @@ void com_mocks_init(void) {
         funcs[14] = com_stub_2arg;         /* [14] GetGDISurface (2) */
         funcs[15] = com_stub_2arg;         /* [15] GetMonitorFrequency (2) */
         funcs[16] = com_stub_2arg;         /* [16] GetScanLine (2) */
-        funcs[17] = com_stub_2arg;         /* [17] GetVerticalBlankStatus (2) */
+        funcs[17] = dd_GetVerticalBlankStatus; /* [17] GetVerticalBlankStatus (2) */
         funcs[18] = com_stub_2arg;         /* [18] Initialize (2) */
         funcs[19] = com_stub_1arg;         /* [19] RestoreDisplayMode (1) */
         funcs[20] = dd_SetCooperativeLevel;/* [20] SetCooperativeLevel (3) */
