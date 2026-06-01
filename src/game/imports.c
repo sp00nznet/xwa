@@ -1954,24 +1954,61 @@ static void bridge_timeSetEvent_005A92A0(void) { /* WINMM.dll:timeSetEvent (5 ar
     g_esp += 24;
 }
 
+/* Virtual joystick: XWA gates the concourse on a present joystick
+ * (sub_540D40 enumerates via joyGetNumDevs/joyGetDevCapsA/joyGetPosEx; with
+ * none found, byte_9F6896[0] stays 0, sub_541030() returns 0, and sub_5397D0
+ * shows a "no joystick" dialog instead of the concourse). We report ONE
+ * centered device (id 0) so the game proceeds; axes stay centered so there is
+ * no spurious flight input. JOYERR_NOERROR=0, JOYERR_PARMS=165. */
+#define JOYERR_PARMS_ 165u
+
 static void bridge_joyGetPosEx_005A92A4(void) { /* WINMM.dll:joyGetPosEx (2 args) */
     BRIDGE_TRACE("WINMM.dll:joyGetPosEx");
-    static STDFN2 fn = NULL;
-    if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("WINMM.dll"), "joyGetPosEx");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    if (fn) g_eax = fn(a0, a1);
+    uint32_t a0 = MEM32(g_esp + 4);   /* device id */
+    uint32_t pji = MEM32(g_esp + 8);  /* JOYINFOEX* */
+    if (a0 == 0 && pji) {
+        MEM32(pji + 8)  = 0x8000; /* dwXpos centered */
+        MEM32(pji + 12) = 0x8000; /* dwYpos centered */
+        MEM32(pji + 16) = 0x8000; /* dwZpos centered */
+        MEM32(pji + 20) = 0x8000; /* dwRpos */
+        MEM32(pji + 24) = 0x8000; /* dwUpos */
+        MEM32(pji + 28) = 0x8000; /* dwVpos */
+        MEM32(pji + 32) = 0;      /* dwButtons */
+        MEM32(pji + 36) = 0;      /* dwButtonNumber */
+        MEM32(pji + 40) = (uint32_t)-1; /* dwPOV = JOY_POVCENTERED (0xFFFF) */
+        g_eax = 0;
+    } else {
+        g_eax = JOYERR_PARMS_;
+    }
     g_esp += 12;
 }
 
 static void bridge_joyGetDevCapsA_005A92A8(void) { /* WINMM.dll:joyGetDevCapsA (3 args) */
     BRIDGE_TRACE("WINMM.dll:joyGetDevCapsA");
-    static STDFN3 fn = NULL;
-    if (!fn) fn = (STDFN3)GetProcAddress(LoadLibraryA("WINMM.dll"), "joyGetDevCapsA");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    if (fn) g_eax = fn(a0, a1, a2);
+    uint32_t a0 = MEM32(g_esp + 4);    /* device id */
+    uint32_t pjc = MEM32(g_esp + 8);   /* JOYCAPSA* */
+    uint32_t sz  = MEM32(g_esp + 12);  /* size (0x194) */
+    if (a0 == 0 && pjc && sz >= 0x194) {
+        for (uint32_t i = 0; i < sz; i += 4) MEM32(pjc + i) = 0; /* zero struct */
+        MEM16(pjc + 0)    = 0x045E;   /* wMid (Microsoft) */
+        MEM16(pjc + 2)    = 0x0001;   /* wPid */
+        MEM32(pjc + 0x24) = 0;        /* wXmin */
+        MEM32(pjc + 0x28) = 0xFFFF;   /* wXmax */
+        MEM32(pjc + 0x2C) = 0;        /* wYmin */
+        MEM32(pjc + 0x30) = 0xFFFF;   /* wYmax */
+        MEM32(pjc + 0x34) = 0;        /* wZmin */
+        MEM32(pjc + 0x38) = 0xFFFF;   /* wZmax */
+        MEM32(pjc + 0x3C) = 4;        /* wNumButtons */
+        MEM32(pjc + 0x40) = 10;       /* wPeriodMin */
+        MEM32(pjc + 0x44) = 1000;     /* wPeriodMax */
+        MEM32(pjc + 0x60) = 0;        /* wCaps */
+        MEM32(pjc + 0x64) = 2;        /* wMaxAxes */
+        MEM32(pjc + 0x68) = 2;        /* wNumAxes */
+        MEM32(pjc + 0x6C) = 4;        /* wMaxButtons */
+        g_eax = 0;
+    } else {
+        g_eax = JOYERR_PARMS_;
+    }
     g_esp += 16;
 }
 
@@ -1994,9 +2031,9 @@ static void bridge_timeBeginPeriod_005A92B0(void) { /* WINMM.dll:timeBeginPeriod
 
 static void bridge_joyGetNumDevs_005A92B4(void) { /* WINMM.dll:joyGetNumDevs (0 args) */
     BRIDGE_TRACE("WINMM.dll:joyGetNumDevs");
-    static STDFN0 fn = NULL;
-    if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("WINMM.dll"), "joyGetNumDevs");
-    if (fn) g_eax = fn();
+    /* Report the standard driver slot count so sub_540D40 enumerates; our
+     * joyGetDevCapsA mock reports exactly one present device (id 0). */
+    g_eax = 16;
     g_esp += 4;
 }
 
