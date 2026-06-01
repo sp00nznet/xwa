@@ -528,8 +528,29 @@ static void manual_sub_00559B50(void) {
     /* test eax, eax */
     PUSH32(esp, g_esi);
     { static int _cb; if (_cb < 10) { fprintf(stderr, "[559B50] call #%d, arg(eax)=%u\n", _cb, g_eax); _cb++; } }
-    /* Auto-advance disabled — let user type pilot name and press Enter naturally.
-     * The game's own UI transition logic handles screen changes. */
+    /* Headless test harness (opt-in via XWA_AUTOPILOT env var): after a delay on
+     * the Create Pilot screen, queue a pilot name + Enter into the game's keyboard
+     * ring buffer the same way the game's own WM_CHAR handler (sub_0053E4xx) does:
+     *   write_idx = 0x9F6F7F, read_idx = 0x9F6F83, buffer base = 0x9F6B7F.
+     * The name-entry widget consumes A/U/T/O into 0x783668 and the create-pilot
+     * logic commits on the trailing CR. Reproduces the post-creation concourse
+     * transition without an interactive user. */
+    if (getenv("XWA_AUTOPILOT")) {
+        static DWORD _aa_start = 0;
+        static int _aa_done = 0;
+        if (!_aa_start) _aa_start = GetTickCount();
+        if (!_aa_done && GetTickCount() - _aa_start > 3000) {
+            const char* nm = "AUTO\r";
+            for (const char* p = nm; *p; p++) {
+                uint32_t w = MEM32(0x9F6F7F);
+                MEM8(0x9F6B7F + w) = (uint8_t)(unsigned char)*p;
+                MEM32(0x9F6F7F) = w + 1;
+            }
+            _aa_done = 1;
+            fprintf(stderr, "[AUTO] Injected pilot name 'AUTO'+Enter into kbd ring (write_idx=%u)\n",
+                    MEM32(0x9F6F7F)); fflush(stderr);
+        }
+    }
     if (CMP_NE(g_eax, 0)) goto L_BB6;
     /* 0x559B5C: eax==0 path */
     { static int _p0; if (_p0 < 3) { fprintf(stderr, "[559B50] eax==0 path, calling sub_55BA70/55B590/531D70/53F830...\n"); _p0++; } }
