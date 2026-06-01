@@ -14,14 +14,22 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
 | **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
 | **Phase 7** | **Complete** | D3D11 rendering backend — device, shaders, execute buffer parser, 2D surface pipeline |
-| **Phase 8** | **In Progress** | Frontend menu rendering — concourse with text labels, string tables loaded |
-| Phase 9 | Pending | DirectInput mouse/keyboard, 3D rendering, audio, full game logic |
+| **Phase 8** | **In Progress** | Frontend + concourse rendering — pilot creation, the fully-rendered Azzameen concourse room (backdrop, Emkay droid, holo-globe, animated doors), mouse hover/click input working |
+| Phase 9 | Pending | Door-screen navigation, 3D rendering, audio, full game logic |
 
 ### Current Screenshot
+
+![Concourse Room](docs/concourse_new.png)
+
+*The Azzameen family-home concourse, fully rendered after pilot creation: room backdrop, the Emkay (MK-09) droid, the holographic galaxy globe, the animated room doors, and the highlighted "Combat Simulator" door label. Reaching this required fixing a joystick-detection gate, the `.lst` resource-list parser, a `test`-after-reload codegen bug in the recompiler, and an unresolved jump-table in the `.dat` image decoder.*
+
+<details>
+<summary>Earlier: pilot creation screen</summary>
 
 ![Concourse Menu](docs/menu.png)
 
 *Concourse pilot creation screen with text rendering. "Create a new pilot." and "Create Pilot" labels drawn from fronttxt.txt string table. Full background, holographic globe, Empire/Rebel faction symbols via RLE-decoded CBM surfaces.*
+</details>
 
 ### Runtime Progress
 
