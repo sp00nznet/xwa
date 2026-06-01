@@ -446,6 +446,10 @@ class Lifter:
         elif m == 'pop':
             if len(ops) == 1:
                 if ops[0].type == X86_OP_REG:
+                    # pop is flag-neutral but overwrites the dest register: if it
+                    # clobbers a register the pending flag-state reads, save the old
+                    # value first (same test-after-reload fix as mov/lea).
+                    self._check_flag_clobber(ops[0], lines)
                     r = reg_name(ops[0].reg)
                     lines.append(f"{r} = POP32_VAL(esp); {comment}")
                 else:
