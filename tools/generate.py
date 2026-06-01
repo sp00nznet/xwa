@@ -15,8 +15,101 @@ import struct
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tools.pe_analyze import analyze_pe, build_iat_map
-from tools.lifter import Lifter
+from tools.lifter import Lifter, reg_name
 from capstone import Cs, CS_ARCH_X86, CS_MODE_32
+from capstone.x86 import X86_OP_MEM, X86_OP_REG, X86_OP_IMM
+
+
+def detect_switches(instructions, code_data, code_start, func_start, func_end):
+    """Detect compiler switch jump-tables and reconstruct their case targets by
+    reading the table from the binary at lift time.
+
+    Handles the two GCC/MSVC encodings:
+      single:  cmp idx,N ; ja default ; jmp [idx*4 + jbase]
+      indexed: cmp idx,N ; ja default ; movzx t,byte[idx+bbase] ; jmp [t*4 + jbase]
+    Returns (switches, extra_leaders):
+      switches: {jmp_va: {'reg': c_regname, 'cases': {idx_val: target_va}, 'default': va|None}}
+      extra_leaders: set of case/default target VAs to materialise as labels.
+    Conservative: only emits a switch when the bounds check is found, every table
+    entry lands inside the function, and the cmp dominates the jmp closely.
+    Otherwise the site is left as a RECOMP_ITAIL (tail-call / vtable / unknown).
+    """
+    switches = {}
+    extra = set()
+
+    def ru32(va):
+        o = va - code_start
+        if o < 0 or o + 4 > len(code_data):
+            return None
+        return struct.unpack_from('<I', code_data, o)[0]
+
+    def ru8(va):
+        o = va - code_start
+        if o < 0 or o + 1 > len(code_data):
+            return None
+        return code_data[o]
+
+    last_cmp = None        # (reg_id, imm, insn_index)
+    default_target = None  # VA the bounds 'ja' branches to (out-of-range)
+    byte_indir = None      # (dest_reg_id, src_reg_id, byte_base_va)
+
+    MAX_CASES = 512
+    for i, ins in enumerate(instructions):
+        m = ins.mnemonic
+        ops = ins.operands
+        if m == 'cmp' and len(ops) == 2 and ops[0].type == X86_OP_REG and ops[1].type == X86_OP_IMM:
+            last_cmp = (ops[0].reg, ops[1].imm & 0xFFFFFFFF, i)
+            default_target = None
+            byte_indir = None
+        elif m in ('ja', 'jnbe') and last_cmp is not None and (i - last_cmp[2]) <= 2:
+            default_target = ins.get_branch_target()
+        elif m in ('movzx', 'mov') and len(ops) == 2 and ops[0].type == X86_OP_REG \
+                and ops[1].type == X86_OP_MEM and ops[1].size == 1:
+            mem = ops[1].mem
+            if mem.index != 0 and mem.scale == 1 and mem.base == 0 and mem.disp != 0:
+                byte_indir = (ops[0].reg, mem.index, mem.disp & 0xFFFFFFFF)
+        elif m == 'jmp' and len(ops) == 1 and ops[0].type == X86_OP_MEM:
+            mem = ops[0].mem
+            jbase = mem.disp & 0xFFFFFFFF
+            if mem.index != 0 and mem.scale == 4 and 0x400000 <= jbase < code_start + len(code_data) \
+                    and last_cmp is not None and default_target is not None \
+                    and (i - last_cmp[2]) <= 8:
+                N = last_cmp[1]
+                cases = {}
+                ok = N < MAX_CASES
+                if ok and byte_indir is not None and byte_indir[0] == mem.index and byte_indir[1] == last_cmp[0]:
+                    bbase = byte_indir[2]
+                    sw_reg = last_cmp[0]
+                    for v in range(N + 1):
+                        bv = ru8(bbase + v)
+                        if bv is None:
+                            ok = False; break
+                        tgt = ru32(jbase + bv * 4)
+                        if tgt is None or not (func_start <= tgt < func_end):
+                            ok = False; break
+                        cases[v] = tgt
+                elif ok and last_cmp[0] == mem.index:
+                    sw_reg = mem.index
+                    for v in range(N + 1):
+                        tgt = ru32(jbase + v * 4)
+                        if tgt is None or not (func_start <= tgt < func_end):
+                            ok = False; break
+                        cases[v] = tgt
+                else:
+                    ok = False
+                if ok and cases:
+                    switches[ins.address] = {
+                        'reg': reg_name(sw_reg),
+                        'cases': cases,
+                        'default': default_target if (func_start <= default_target < func_end) else None,
+                    }
+                    extra.update(cases.values())
+                    if func_start <= default_target < func_end:
+                        extra.add(default_target)
+            last_cmp = None; default_target = None; byte_indir = None
+        elif m == 'call':
+            last_cmp = None; default_target = None; byte_indir = None
+    return switches, extra
 
 
 COND_JUMPS = {
@@ -116,11 +209,39 @@ def linear_disassemble_function(md, code_data, code_start, func_start, func_end)
         if li.mnemonic == 'int3':
             break
 
-    return instructions, leaders
+    # Reconstruct switch jump-tables: materialise their case targets as leaders
+    # so the emitted gotos resolve to real labels.
+    switches, extra_leaders = detect_switches(instructions, code_data, code_start,
+                                              func_start, func_end)
+    for t in extra_leaders:
+        if func_start <= t < func_end:
+            leaders.add(t)
+
+    return instructions, leaders, switches
 
 
-def lift_function_linear(lifter, name, instructions, leaders, func_start):
+def _emit_switch(sw):
+    """Emit C for a reconstructed switch jump-table (replaces RECOMP_ITAIL)."""
+    reg = sw['reg']
+    # group case indices by target so identical targets share one label line
+    by_target = {}
+    for idx, tgt in sorted(sw['cases'].items()):
+        by_target.setdefault(tgt, []).append(idx)
+    out = [f'switch ({reg}) {{ /* reconstructed jump table */']
+    for tgt, idxs in by_target.items():
+        labels = ' '.join(f'case {i}:' for i in idxs)
+        out.append(f'    {labels} goto L_{tgt:08X};')
+    if sw['default'] is not None:
+        out.append(f'    default: goto L_{sw["default"]:08X};')
+    else:
+        out.append('    default: RECOMP_ITAIL(0); return;')
+    out.append('}')
+    return out
+
+
+def lift_function_linear(lifter, name, instructions, leaders, func_start, switches=None):
     """Lift a linearly-disassembled function to C code."""
+    switches = switches or {}
     lines = []
     lines.append(f'void {name}(void) {{')
     lines.append(f'    uint32_t ebp = 0;')
@@ -140,6 +261,13 @@ def lift_function_linear(lifter, name, instructions, leaders, func_start):
         # Emit label if this is a block leader
         if insn.address in leaders:
             body_lines.append(f'L_{insn.address:08X}:')
+
+        # Reconstructed switch jump-table: emit a real switch instead of ITAIL
+        if insn.address in switches:
+            body_lines.append(f'    /* 0x{insn.address:08X}: {insn.mnemonic} {insn.op_str} (switch table) */')
+            for line in _emit_switch(switches[insn.address]):
+                body_lines.append(f'    {line}')
+            continue
 
         # Lift the instruction
         lifted = lifter.lift_instruction(insn)
@@ -258,7 +386,7 @@ def main():
         name = f'sub_{addr:08X}'
 
         try:
-            instructions, leaders = linear_disassemble_function(
+            instructions, leaders, switches = linear_disassemble_function(
                 md, code_data, code_start, addr, func_end)
 
             if not instructions:
@@ -282,7 +410,7 @@ def main():
             if not trimmed:
                 continue
 
-            code = lift_function_linear(lifter, name, trimmed, leaders, addr)
+            code = lift_function_linear(lifter, name, trimmed, leaders, addr, switches)
             chunk_funcs.append((code, addr, name))
             all_entries.append((addr, name))
 

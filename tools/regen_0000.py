@@ -95,7 +95,7 @@ def main():
         name = f'sub_{addr:08X}'
 
         try:
-            instructions, leaders = linear_disassemble_function(
+            instructions, leaders, switches = linear_disassemble_function(
                 md, code_data, code_start, addr, func_end)
 
             if not instructions:
@@ -123,7 +123,7 @@ def main():
                 chunk_funcs.append((stub, addr, name))
                 continue
 
-            code = lift_function_linear(lifter, name, trimmed, leaders, addr)
+            code = lift_function_linear(lifter, name, trimmed, leaders, addr, switches)
             chunk_funcs.append((code, addr, name))
 
         except Exception as e:
