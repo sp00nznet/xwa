@@ -20,9 +20,17 @@ EXE = 'config/xwingalliance_decrypted.exe'
 GEN = 'src/game/recomp/gen'
 
 def main():
-    targets = [int(a, 16) for a in sys.argv[1:]]
+    # Each arg is 0xADDR (auto func_end = next function) or 0xADDR:0xEND to force an
+    # explicit end — needed when functions.json wrongly splits one real function into
+    # several (internal jumps to the split-off tail otherwise become leaking ITAILs).
+    targets = []
+    for a in sys.argv[1:]:
+        if ':' in a:
+            s, e = a.split(':'); targets.append((int(s, 16), int(e, 16)))
+        else:
+            targets.append((int(a, 16), None))
     if not targets:
-        print('usage: relift_func.py 0xADDR ...'); return
+        print('usage: relift_func.py 0xADDR[:0xEND] ...'); return
     funcs = json.load(open('config/functions.json'))
     all_addrs = sorted(f['address_int'] for f in funcs)
     info = analyze_pe(EXE); iat = build_iat_map(info)
@@ -33,9 +41,12 @@ def main():
     md = Cs(CS_ARCH_X86, CS_MODE_32); md.detail = True
     lifter = Lifter(iat_map=iat, code_start=info.code_start, code_end=info.code_end)
 
-    for addr in targets:
-        nxt = [a for a in all_addrs if a > addr]
-        func_end = min(nxt[0], addr + 65536) if nxt else min(info.code_end, addr + 65536)
+    for addr, end_override in targets:
+        if end_override is not None:
+            func_end = end_override
+        else:
+            nxt = [a for a in all_addrs if a > addr]
+            func_end = min(nxt[0], addr + 65536) if nxt else min(info.code_end, addr + 65536)
         instrs, leaders, switches = linear_disassemble_function(md, code, code_start, addr, func_end)
         if not instrs:
             print(f'0x{addr:08X}: no instructions'); continue

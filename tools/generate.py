@@ -52,22 +52,51 @@ def detect_switches(instructions, code_data, code_start, func_start, func_end):
     last_cmp = None        # (reg_id, imm, insn_index)
     default_target = None  # VA the bounds 'ja' branches to (out-of-range)
     byte_indir = None      # (dest_reg_id, src_reg_id, byte_base_va)
+    cmp_mem = None         # (base,index,scale,disp,imm,insn_index) for `cmp [mem],N`
 
     MAX_CASES = 512
     for i, ins in enumerate(instructions):
         m = ins.mnemonic
         ops = ins.operands
-        if m == 'cmp' and len(ops) == 2 and ops[0].type == X86_OP_REG and ops[1].type == X86_OP_IMM:
-            last_cmp = (ops[0].reg, ops[1].imm & 0xFFFFFFFF, i)
+        if m == 'cmp' and len(ops) == 2 and ops[1].type == X86_OP_IMM \
+                and ops[0].type in (X86_OP_REG, X86_OP_MEM):
+            if ops[0].type == X86_OP_REG:
+                last_cmp = (ops[0].reg, ops[1].imm & 0xFFFFFFFF, i)
+                cmp_mem = None
+            else:  # MSVC also bounds the index in memory: `cmp [ebp+idx], N`
+                mm = ops[0].mem
+                cmp_mem = (mm.base, mm.index, mm.scale, mm.disp, ops[1].imm & 0xFFFFFFFF, i)
+                last_cmp = None
             default_target = None
             byte_indir = None
-        elif m in ('ja', 'jnbe') and last_cmp is not None and (i - last_cmp[2]) <= 2:
-            default_target = ins.get_branch_target()
+        elif m in ('ja', 'jnbe'):
+            anchor = last_cmp[2] if last_cmp is not None else (cmp_mem[5] if cmp_mem is not None else None)
+            if anchor is not None and (i - anchor) <= 2:
+                default_target = ins.get_branch_target()
+        elif m == 'mov' and len(ops) == 2 and ops[0].type == X86_OP_REG \
+                and ops[1].type == X86_OP_MEM and ops[1].size != 1 \
+                and cmp_mem is not None and last_cmp is None:
+            # `mov reg, [mem]` loading the same memory the `cmp` bounded: the bounded
+            # value is now live in reg, so treat reg as the switch index register and
+            # let the direct-jump-table logic below reconstruct it.
+            mm = ops[1].mem
+            if (mm.base, mm.index, mm.scale, mm.disp) == (cmp_mem[0], cmp_mem[1], cmp_mem[2], cmp_mem[3]):
+                last_cmp = (ops[0].reg, cmp_mem[4], i)
         elif m in ('movzx', 'mov') and len(ops) == 2 and ops[0].type == X86_OP_REG \
                 and ops[1].type == X86_OP_MEM and ops[1].size == 1:
+            # byte index-table load: dest = byte[idx + bbase]. MSVC encodes this
+            # either as [idx*1 + bbase] (index reg) or [idx + bbase] (base reg);
+            # accept both. dest may be an 8-bit subreg (e.g. `mov dl, ...` after
+            # `xor edx,edx`) — reg_name() normalises it to the 32-bit parent so it
+            # matches the full reg used by the following `jmp [reg*4 + jbase]`.
             mem = ops[1].mem
+            idx_reg = None
             if mem.index != 0 and mem.scale == 1 and mem.base == 0 and mem.disp != 0:
-                byte_indir = (ops[0].reg, mem.index, mem.disp & 0xFFFFFFFF)
+                idx_reg = mem.index
+            elif mem.base != 0 and mem.index == 0 and mem.disp != 0:
+                idx_reg = mem.base
+            if idx_reg is not None:
+                byte_indir = (ops[0].reg, idx_reg, mem.disp & 0xFFFFFFFF)
         elif m == 'jmp' and len(ops) == 1 and ops[0].type == X86_OP_MEM:
             mem = ops[0].mem
             jbase = mem.disp & 0xFFFFFFFF
@@ -77,7 +106,9 @@ def detect_switches(instructions, code_data, code_start, func_start, func_end):
                 N = last_cmp[1]
                 cases = {}
                 ok = N < MAX_CASES
-                if ok and byte_indir is not None and byte_indir[0] == mem.index and byte_indir[1] == last_cmp[0]:
+                if ok and byte_indir is not None \
+                        and reg_name(byte_indir[0]) == reg_name(mem.index) \
+                        and reg_name(byte_indir[1]) == reg_name(last_cmp[0]):
                     bbase = byte_indir[2]
                     sw_reg = last_cmp[0]
                     for v in range(N + 1):
@@ -88,7 +119,7 @@ def detect_switches(instructions, code_data, code_start, func_start, func_end):
                         if tgt is None or not (func_start <= tgt < func_end):
                             ok = False; break
                         cases[v] = tgt
-                elif ok and last_cmp[0] == mem.index:
+                elif ok and reg_name(last_cmp[0]) == reg_name(mem.index):
                     sw_reg = mem.index
                     for v in range(N + 1):
                         tgt = ru32(jbase + v * 4)
@@ -106,9 +137,9 @@ def detect_switches(instructions, code_data, code_start, func_start, func_end):
                     extra.update(cases.values())
                     if func_start <= default_target < func_end:
                         extra.add(default_target)
-            last_cmp = None; default_target = None; byte_indir = None
+            last_cmp = None; default_target = None; byte_indir = None; cmp_mem = None
         elif m == 'call':
-            last_cmp = None; default_target = None; byte_indir = None
+            last_cmp = None; default_target = None; byte_indir = None; cmp_mem = None
     return switches, extra
 
 

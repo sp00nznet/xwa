@@ -501,6 +501,62 @@ static void manual_sub_00539760(void) {
     #undef esp
 }
 
+/* Headless UI driver (opt-in via XWA_FLYDEMO env var): once the concourse is the
+ * active screen, simulate a mouse click on the Training door (drawn at 536,174),
+ * which calls sub_57E370 (training-mission setup) + sub_541810(sub_5316B0,0) — the
+ * loading screen that loads the mission and dispatches the 3D flight loop
+ * (sub_5710F0 init / sub_49E600 frame). This is the shortest concourse->flight path
+ * (no skirmish UI). Driven each frame from the PeekMessageA bridge.
+ *
+ * Active screen callback = MEM32(0xA1C8D5 + 0x850*depth), depth = MEM32(0xA1C089)
+ * (sub_541810 stores cb at dword_A1C8D5[532*dword_A1C089]).
+ * Mouse pos read by sub_55BA50 = dword_9F65ED+5 / dword_9F65F1+5.
+ * Left click read by sub_5581D0 = (dword_9F6888 ? 0 : (uint8)dword_9F6884).
+ * Holding the button across frames re-triggers and crashes, so click exactly once. */
+void xwa_ui_driver(void) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = getenv("XWA_FLYDEMO") ? 1 : 0;
+    if (!enabled) return;
+
+    uint32_t depth = MEM32(0xA1C089);
+    uint32_t cb = MEM32(0xA1C8D5 + 0x850u * depth);
+    static uint32_t last_cb = 0;
+    static int fip = 0;            /* frames since the active screen last changed */
+    static uint32_t clicked = 0;   /* one-shot: which screen we've already clicked */
+    if (cb != last_cb) {
+        const char* nm =
+            cb == 0x005316B0 ? " (LOADING SCREEN)" :
+            cb == 0x005710F0 ? " (FLIGHT INIT)" :
+            cb == 0x0049E600 ? " (*** 3D FLIGHT FRAME ***)" :
+            cb == 0x005397D0 ? " (concourse)" :
+            cb == 0x0053B500 ? " (combat sim)" :
+            cb == 0x005438B0 ? " (skirmish setup)" : "";
+        fprintf(stderr, "[FLYDEMO] active screen cb -> 0x%06X (depth=%u)%s\n", cb, depth, nm);
+        fflush(stderr);
+        last_cb = cb; fip = 0;
+    }
+    fip++;
+
+    /* Default: button released, mouse parked off all hot-spots, so no screen sees a
+     * spurious hover/click. We only deviate from this to issue one concourse click. */
+    MEM32(0x9F6888) = 0;          /* clicks ungated */
+    MEM8(0x9F6884) = 0;           /* button up */
+
+    if (cb == 0x005397D0 && clicked != 0x005397D0) {  /* concourse -> Training door */
+        MEM32(0x9F65ED) = (uint32_t)(550 - 5);        /* hover (550,200), inside the door */
+        MEM32(0x9F65F1) = (uint32_t)(200 - 5);
+        if (fip >= 15) {                               /* hover a few frames, then click once */
+            MEM8(0x9F6884) = 1;                        /* single-frame click */
+            clicked = 0x005397D0;
+            fprintf(stderr, "[FLYDEMO] clicked Training door (550,200) at fip=%d\n", fip);
+            fflush(stderr);
+        }
+    } else {
+        MEM32(0x9F65ED) = (uint32_t)(5 - 5);          /* park mouse top-left, off everything */
+        MEM32(0x9F65F1) = (uint32_t)(5 - 5);
+    }
+}
+
 /* sub_00559B50: Frontend display/input callback.
  * Dead code after ret in sub_00559A90 (missed by code generator).
  * Called frequently via dispatch mechanism (registered by sub_00541890).
@@ -540,15 +596,21 @@ static void manual_sub_00559B50(void) {
         static int _aa_done = 0;
         if (!_aa_start) _aa_start = GetTickCount();
         if (!_aa_done && GetTickCount() - _aa_start > 3000) {
-            const char* nm = "AUTO\r";
+            /* Type an EXISTING pilot's callsign so the game LOADS that .plt (read-only)
+             * instead of creating a fresh pilot every run — faster iteration, no
+             * AUTOn.plt clutter, and real campaign progress. Override with XWA_PILOT.
+             * Falls back to creating "AUTO" if the named pilot doesn't exist. */
+            const char* nm = getenv("XWA_PILOT");
+            if (!nm || !*nm) nm = "Test";  /* throwaway Test0.plt; XWA re-saves on load */
             for (const char* p = nm; *p; p++) {
                 uint32_t w = MEM32(0x9F6F7F);
                 MEM8(0x9F6B7F + w) = (uint8_t)(unsigned char)*p;
                 MEM32(0x9F6F7F) = w + 1;
             }
+            { uint32_t w = MEM32(0x9F6F7F); MEM8(0x9F6B7F + w) = (uint8_t)'\r'; MEM32(0x9F6F7F) = w + 1; }
             _aa_done = 1;
-            fprintf(stderr, "[AUTO] Injected pilot name 'AUTO'+Enter into kbd ring (write_idx=%u)\n",
-                    MEM32(0x9F6F7F)); fflush(stderr);
+            fprintf(stderr, "[AUTO] Injected pilot callsign '%s'+Enter into kbd ring (write_idx=%u)\n",
+                    nm, MEM32(0x9F6F7F)); fflush(stderr);
         }
     }
     if (CMP_NE(g_eax, 0)) goto L_BB6;

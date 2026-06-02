@@ -1816,6 +1816,7 @@ static void bridge_PeekMessageA_005A9278(void) { /* USER32.dll:PeekMessageA (5 a
     uint32_t a4 = MEM32(g_esp + 20);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
     peek_count++;
+    { extern void xwa_ui_driver(void); xwa_ui_driver(); }
     /* Keep D3D11 window alive with periodic presents (~30fps).
      * Upload the latest back buffer content before each present so
      * the display always shows the current game state. */
