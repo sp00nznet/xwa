@@ -569,19 +569,21 @@ void xwa_ui_driver(void) {
     MEM32(0x9F6888) = 0;          /* clicks ungated */
     MEM8(0x9F6884) = 0;           /* button up */
 
-    if (cb == 0x005397D0 && clicked != 0x005397D0) {  /* concourse -> Training door */
+    if (cb == 0x005397D0) {                            /* concourse -> Training door */
         MEM32(0x9F65ED) = (uint32_t)(550 - 5);        /* hover (550,200), inside the door */
         MEM32(0x9F65F1) = (uint32_t)(200 - 5);
-        if (fip >= 15) {                               /* hover a few frames, then click once */
+        /* The click is timing-flaky vs the create-pilot modal, so RETRY: pulse the
+         * button for one frame every ~40 frames until the concourse transitions. */
+        if (fip >= 15 && (fip % 40) == 15) {
             MEM8(0x9F6884) = 1;                        /* single-frame click */
-            clicked = 0x005397D0;
-            fprintf(stderr, "[FLYDEMO] clicked Training door (550,200) at fip=%d\n", fip);
+            fprintf(stderr, "[FLYDEMO] click Training door (550,200) at fip=%d\n", fip);
             fflush(stderr);
         }
     } else {
         MEM32(0x9F65ED) = (uint32_t)(5 - 5);          /* park mouse top-left, off everything */
         MEM32(0x9F65F1) = (uint32_t)(5 - 5);
     }
+    (void)clicked;
 }
 
 /* sub_00559B50: Frontend display/input callback.
