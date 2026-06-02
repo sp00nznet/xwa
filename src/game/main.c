@@ -559,6 +559,19 @@ void xwa_ui_driver(void) {
             cb == 0x0053B500 ? " (combat sim)" :
             cb == 0x005438B0 ? " (skirmish setup)" : "";
         fprintf(stderr, "[FLYDEMO] active screen cb -> 0x%06X (depth=%u)%s\n", cb, depth, nm);
+        /* On the loading/flight transitions, dump the mission-load state: is the
+         * message gate open (dword_A21449), are the mission globals set, and is the
+         * species/craft table (0x80DCBC) populated? This tells us whether the
+         * message-driven mission load delivered anything. */
+        if (cb == 0x005316B0 || cb == 0x005710F0 || cb == 0x0057ECE0) {
+            uint32_t spec0 = MEM32(0x80DCBC), spec1 = MEM32(0x80DCBC + 0xE38);
+            fprintf(stderr, "[MSTATE] A21449(msggate)=%u ABD7B4(mode)=%u AE2A8A(missIdx)=%u "
+                    "9E9708(craftIdx)=%u\n",
+                    MEM32(0xA21449), MEM32(0xABD7B4), MEM32(0xAE2A8A), MEM16(0x9E9708));
+            fprintf(stderr, "[MSTATE] missionName(9EAC40)='%.31s' species[0x80DCBC]=0x%08X entry1=0x%08X\n",
+                    (const char*)ADDR(0x9EAC40), spec0, spec1);
+            fflush(stderr);
+        }
         fflush(stderr);
         last_cb = cb; fip = 0;
     }
