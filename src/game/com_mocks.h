@@ -28,6 +28,7 @@
 #define MOCK_TAG_DIDEVICE       0x44494456  /* 'DIDV' */
 #define MOCK_TAG_DSOUND         0x44534E44  /* 'DSND' */
 #define MOCK_TAG_DSBUFFER       0x44534246  /* 'DSBF' */
+#define MOCK_TAG_DPLAY          0x44504C59  /* 'DPLY' */
 
 /* Mock COM object structure */
 typedef struct mock_com_obj {

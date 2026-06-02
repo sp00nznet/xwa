@@ -149,6 +149,7 @@ static mock_com_obj_t* alloc_mock(uint32_t tag, uint32_t vtable_addr) {
 #define MK_DS       0xBB001140
 #define MK_DSB      0xBB001160
 #define MK_D3DTEX   0xBB001180
+#define MK_DPLAY    0xBB0011A0   /* IDirectPlay4 (64 slots) */
 
 /* ============================================================
  * Forward declarations for all mock objects
@@ -165,6 +166,7 @@ static uint32_t g_didevice_vtable_addr;
 static uint32_t g_dsound_vtable_addr;
 static uint32_t g_dsbuffer_vtable_addr;
 static uint32_t g_d3dtexture_vtable_addr;
+static uint32_t g_dplay_vtable_addr;
 
 /* ============================================================
  * DirectInput State Tracking
@@ -237,6 +239,8 @@ static void com_stub_5arg(void) { g_eax = 0; g_esp += 24; }
 static void com_stub_6arg(void) { g_eax = 0; g_esp += 28; }
 /* COM method: this + 6 real args = pop ret + 7 args */
 static void com_stub_7arg(void) { g_eax = 0; g_esp += 32; }
+/* COM method: this + 9 real args = pop ret + 10 args (IDirectPlay4::SendEx) */
+static void com_stub_10arg(void) { g_eax = 0; g_esp += 44; }
 
 /* ============================================================
  * IDirectDraw Methods
@@ -1884,6 +1888,45 @@ static void dd_GetVerticalBlankStatus(void) {
  * Vtable Construction and Bridge Registration
  * ============================================================ */
 
+/* ============================================================
+ * IDirectPlay4 loopback mock
+ *
+ * XWA routes EVEN SINGLE-PLAYER mission-load + game-state through a DirectPlay
+ * loopback session: sub_52CEE0 only sends the "load mission" message when the
+ * session object (dword_A21449) is non-null, and that object comes from
+ * DirectPlayCreate / CoCreateInstance(CLSID_DirectPlay, IID_IDirectPlay4).
+ * Stubbing DirectPlay to fail (fine for the frontend) silently blocks ALL in-
+ * flight gameplay. The actual message bytes travel through the game's own local
+ * buffers (sub_52CF50 -> unk_A219DA/unk_A21BE6), NOT DirectPlay — so this mock
+ * only needs to (a) exist so the gate opens and (b) succeed at session setup.
+ * Every method returns DP_OK; QueryInterface returns self; Receive reports no
+ * messages so any DP receive loop terminates.
+ * Vtable = IDirectPlay4 layout (IDirectPlay/2/3/4 superset, 53 methods).
+ * ============================================================ */
+static void dplay_QueryInterface(void) {  /* (this, riid, ppv) */
+    uint32_t self = MEM32(g_esp + 4), ppv = MEM32(g_esp + 12);
+    if (ppv) MEM32(ppv) = self;   /* hand back the same object for any DP iface */
+    g_eax = 0;
+    g_esp += 16;
+}
+static void dplay_Receive(void) {  /* (this, lpidFrom, lpidTo, flags, lpData, lpdwSize) */
+    g_eax = 0x88770014u;           /* DPERR_NOMESSAGES */
+    g_esp += 28;
+}
+static void dplay_GetMessageCount(void) {  /* (this, idPlayer, lpdwCount) */
+    uint32_t pCount = MEM32(g_esp + 12);
+    if (pCount) MEM32(pCount) = 0;
+    g_eax = 0;
+    g_esp += 16;
+}
+/* Allocate a mock IDirectPlay4 object; returns its guest address (0 if vtable
+ * not yet built). Used by the DirectPlayCreate bridge + CoCreateInstance. */
+uint32_t com_alloc_dplay_object(void) {
+    if (!g_dplay_vtable_addr) return 0;
+    mock_com_obj_t* dp = alloc_mock(MOCK_TAG_DPLAY, g_dplay_vtable_addr);
+    return (uint32_t)(uintptr_t)dp;
+}
+
 void com_mocks_init(void) {
     COM_LOG("[COM] Initializing COM mock interfaces...\n");
     int bridges_before = g_import_bridge_count;
@@ -2216,6 +2259,74 @@ void com_mocks_init(void) {
 
         g_dsbuffer_vtable_addr = alloc_vtable(markers, 21);
         for (int i = 0; i < 21; i++)
+            register_bridge(markers[i], funcs[i]);
+    }
+
+    /* ---- IDirectPlay4 loopback (53 methods) ----
+     * Arg counts (incl. this) follow dplay.h's IDirectPlay4Vtbl. Everything is a
+     * DP_OK success stub except QueryInterface(self), Receive(no messages) and
+     * GetMessageCount(0). Only session-setup methods the game actually invokes
+     * matter (Release, Close, GetCaps, InitializeConnection, Open, ...). */
+    {
+        uint32_t markers[53];
+        recomp_func_t funcs[53];
+        for (int i = 0; i < 53; i++) { markers[i] = MK_DPLAY + i; funcs[i] = com_stub_3arg; }
+        funcs[0]  = dplay_QueryInterface;   /* QueryInterface (3) */
+        funcs[1]  = dd_AddRef;              /* AddRef (1) */
+        funcs[2]  = dd_Release;             /* Release (1) */
+        funcs[3]  = com_stub_3arg;          /* AddPlayerToGroup (3) */
+        funcs[4]  = com_stub_1arg;          /* Close (1) */
+        funcs[5]  = com_stub_6arg;          /* CreateGroup (6) */
+        funcs[6]  = com_stub_7arg;          /* CreatePlayer (7) */
+        funcs[7]  = com_stub_3arg;          /* DeletePlayerFromGroup (3) */
+        funcs[8]  = com_stub_2arg;          /* DestroyGroup (2) */
+        funcs[9]  = com_stub_2arg;          /* DestroyPlayer (2) */
+        funcs[10] = com_stub_6arg;          /* EnumGroupPlayers (6) */
+        funcs[11] = com_stub_5arg;          /* EnumGroups (5) */
+        funcs[12] = com_stub_5arg;          /* EnumPlayers (5) */
+        funcs[13] = com_stub_6arg;          /* EnumSessions (6) */
+        funcs[14] = com_stub_3arg;          /* GetCaps (3) */
+        funcs[15] = com_stub_5arg;          /* GetGroupData (5) */
+        funcs[16] = com_stub_4arg;          /* GetGroupName (4) */
+        funcs[17] = dplay_GetMessageCount;  /* GetMessageCount (3) */
+        funcs[18] = com_stub_4arg;          /* GetPlayerAddress (4) */
+        funcs[19] = com_stub_4arg;          /* GetPlayerCaps (4) */
+        funcs[20] = com_stub_5arg;          /* GetPlayerData (5) */
+        funcs[21] = com_stub_4arg;          /* GetPlayerName (4) */
+        funcs[22] = com_stub_3arg;          /* GetSessionDesc (3) */
+        funcs[23] = com_stub_2arg;          /* Initialize (2) */
+        funcs[24] = com_stub_3arg;          /* Open (3) */
+        funcs[25] = dplay_Receive;          /* Receive (6) */
+        funcs[26] = com_stub_6arg;          /* Send (6) */
+        funcs[27] = com_stub_5arg;          /* SetGroupData (5) */
+        funcs[28] = com_stub_4arg;          /* SetGroupName (4) */
+        funcs[29] = com_stub_5arg;          /* SetPlayerData (5) */
+        funcs[30] = com_stub_4arg;          /* SetPlayerName (4) */
+        funcs[31] = com_stub_3arg;          /* SetSessionDesc (3) */
+        funcs[32] = com_stub_3arg;          /* AddGroupToGroup (3) */
+        funcs[33] = com_stub_7arg;          /* CreateGroupInGroup (7) */
+        funcs[34] = com_stub_3arg;          /* DeleteGroupFromGroup (3) */
+        funcs[35] = com_stub_5arg;          /* EnumConnections (5) */
+        funcs[36] = com_stub_6arg;          /* EnumGroupsInGroup (6) */
+        funcs[37] = com_stub_5arg;          /* GetGroupConnectionSettings (5) */
+        funcs[38] = com_stub_3arg;          /* InitializeConnection (3) */
+        funcs[39] = com_stub_5arg;          /* SecureOpen (5) */
+        funcs[40] = com_stub_5arg;          /* SendChatMessage (5) */
+        funcs[41] = com_stub_4arg;          /* SetGroupConnectionSettings (4) */
+        funcs[42] = com_stub_3arg;          /* StartSession (3) */
+        funcs[43] = com_stub_3arg;          /* GetGroupFlags (3) */
+        funcs[44] = com_stub_3arg;          /* GetGroupParent (3) */
+        funcs[45] = com_stub_5arg;          /* GetPlayerAccount (5) */
+        funcs[46] = com_stub_3arg;          /* GetPlayerFlags (3) */
+        funcs[47] = com_stub_3arg;          /* GetGroupOwner (3) */
+        funcs[48] = com_stub_3arg;          /* SetGroupOwner (3) */
+        funcs[49] = com_stub_10arg;         /* SendEx (10) */
+        funcs[50] = com_stub_6arg;          /* GetMessageQueue (6) */
+        funcs[51] = com_stub_3arg;          /* CancelMessage (3) */
+        funcs[52] = com_stub_4arg;          /* CancelPriority (4) */
+
+        g_dplay_vtable_addr = alloc_vtable(markers, 53);
+        for (int i = 0; i < 53; i++)
             register_bridge(markers[i], funcs[i]);
     }
 

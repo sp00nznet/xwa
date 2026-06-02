@@ -120,9 +120,20 @@ static void bridge_DirectInputCreateA_005A9020(void) { /* DINPUT.dll:DirectInput
 /* ======== DPLAYX.dll ======== */
 
 static void bridge_ordinal_1_005A9028(void) { /* DPLAYX.dll:ordinal_1 (DirectPlayCreate, 3 args, stdcall) */
+    /* DirectPlayCreate(lpGUID, lplpDP, pUnk). Return a mock IDirectPlay object so
+     * sub_52B3A0 doesn't bail at `if(DirectPlayCreate(...)) break` — XWA needs the
+     * DirectPlay loopback session active to deliver mission-load messages even in
+     * single-player. See the IDirectPlay4 loopback mock in com_mocks.c. */
     BRIDGE_TRACE("DPLAYX.dll:ordinal_1");
-    fprintf(stderr, "[COM] DPLAYX:DirectPlayCreate stub\n");
-    g_eax = 0x80004005u; /* E_FAIL - multiplayer not supported */
+    extern uint32_t com_alloc_dplay_object(void);
+    uint32_t lplpDP = MEM32(g_esp + 8);   /* out: receives the IDirectPlay object */
+    uint32_t obj = com_alloc_dplay_object();
+    if (obj && lplpDP) {
+        MEM32(lplpDP) = obj;
+        g_eax = 0; /* DP_OK */
+    } else {
+        g_eax = 0x80004005u; /* E_FAIL */
+    }
     g_esp += 16; /* pop ret + 3 args */
 }
 
@@ -2103,11 +2114,29 @@ static void bridge_CoCreateInstance_005A92D4(void) { /* ole32.dll:CoCreateInstan
     BRIDGE_TRACE("ole32.dll:CoCreateInstance");
     static STDFN5 fn = NULL;
     if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("ole32.dll"), "CoCreateInstance");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
-    uint32_t a2 = MEM32(g_esp + 12);
-    uint32_t a3 = MEM32(g_esp + 16);
-    uint32_t a4 = MEM32(g_esp + 20);
+    uint32_t a0 = MEM32(g_esp + 4);   /* rclsid */
+    uint32_t a1 = MEM32(g_esp + 8);   /* pUnkOuter */
+    uint32_t a2 = MEM32(g_esp + 12);  /* dwClsContext */
+    uint32_t a3 = MEM32(g_esp + 16);  /* riid */
+    uint32_t a4 = MEM32(g_esp + 20);  /* ppv (out) */
+    /* DirectPlay is deprecated on modern Windows, so the real CoCreateInstance
+     * fails for it — but XWA needs the DirectPlay session for single-player
+     * mission loading. Return our IDirectPlay4 loopback mock for any DirectPlay
+     * CLSID (and log other CLSIDs to catch the address/lobby object too). */
+    uint32_t clsid0 = (a0 && a0 < 0x40000000u) ? MEM32(a0) : 0;
+    uint32_t iid0   = (a3 && a3 < 0x40000000u) ? MEM32(a3) : 0;
+    if (clsid0 == 0xD1EB6D20u || iid0 == 0x0AB1C531u) {  /* CLSID_DirectPlay / IID_IDirectPlay4 */
+        extern uint32_t com_alloc_dplay_object(void);
+        uint32_t obj = com_alloc_dplay_object();
+        if (obj && a4) { MEM32(a4) = obj; g_eax = 0; }
+        else g_eax = 0x80004005u;
+        fprintf(stderr, "[COM] CoCreateInstance(DirectPlay clsid=0x%08X iid=0x%08X) -> mock 0x%08X\n",
+                clsid0, iid0, a4 ? MEM32(a4) : 0);
+        fflush(stderr);
+        g_esp += 24;
+        return;
+    }
+    { static int _n = 0; if (_n < 20) { fprintf(stderr, "[COM] CoCreateInstance clsid0=0x%08X iid0=0x%08X (passthrough)\n", clsid0, iid0); fflush(stderr); _n++; } }
     if (fn) g_eax = fn(a0, a1, a2, a3, a4);
     g_esp += 24;
 }
