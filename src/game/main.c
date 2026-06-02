@@ -173,6 +173,13 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     /* Log ALL exceptions to stderr (even non-fatal ones) for debugging */
     fprintf(stderr, "\n!!! VEH: exception 0x%08lX at 0x%p !!!\n",
         code, (void*)ep->ExceptionRecord->ExceptionAddress);
+    {   /* Map the host fault EIP back to the guest function that contains it:
+         * the dispatch entry whose host func pointer is the greatest <= the EIP
+         * (functions are laid out roughly in order, so this names the crash site). */
+        extern uint32_t guest_func_for_host(uintptr_t host_addr);
+        uint32_t gva = guest_func_for_host((uintptr_t)ep->ExceptionRecord->ExceptionAddress);
+        if (gva) fprintf(stderr, "    -> in guest function sub_%08X\n", gva);
+    }
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
         fprintf(stderr, "    %s addr=0x%p, g_esp=0x%08X, total_calls=%u\n",
             ep->ExceptionRecord->ExceptionInformation[0] ? "WRITE" : "READ",
@@ -295,6 +302,26 @@ recomp_func_t recomp_lookup(uint32_t va) {
         }
     }
     return NULL;
+}
+
+/* Crash-diagnosis helper: given a HOST code address (a fault EIP inside the
+ * compiled recomp), return the GUEST VA of the dispatch-table function whose
+ * host entry pointer is the greatest value <= host_addr. MSVC lays the lifted
+ * functions out roughly in table order, so the nearest entry below the EIP
+ * names the crashing guest function. Linear scan — only runs on a crash. */
+uint32_t guest_func_for_host(uintptr_t host_addr) {
+    uintptr_t best_fn = 0;
+    uint32_t best_va = 0;
+    for (uint32_t i = 0; i < recomp_dispatch_count; i++) {
+        uintptr_t fn = (uintptr_t)recomp_dispatch_table[i].func;
+        if (fn <= host_addr && fn > best_fn) {
+            best_fn = fn;
+            best_va = recomp_dispatch_table[i].address;
+        }
+    }
+    /* Reject matches absurdly far below the EIP (likely not the real function). */
+    if (best_fn && (host_addr - best_fn) < 0x20000) return best_va;
+    return 0;
 }
 
 /* SafeDisc-encrypted function stubs
