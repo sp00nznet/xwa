@@ -563,13 +563,15 @@ void xwa_ui_driver(void) {
          * message gate open (dword_A21449), are the mission globals set, and is the
          * species/craft table (0x80DCBC) populated? This tells us whether the
          * message-driven mission load delivered anything. */
-        if (cb == 0x005316B0 || cb == 0x005710F0 || cb == 0x0057ECE0) {
+        if (cb == 0x005316B0 || cb == 0x005710F0 || cb == 0x0057ECE0 ||
+            cb == 0x005438B0 || cb == 0x0053B500) {
             uint32_t spec0 = MEM32(0x80DCBC), spec1 = MEM32(0x80DCBC + 0xE38);
             fprintf(stderr, "[MSTATE] A21449(msggate)=%u ABD7B4(mode)=%u AE2A8A(missIdx)=%u "
-                    "9E9708(craftIdx)=%u\n",
-                    MEM32(0xA21449), MEM32(0xABD7B4), MEM32(0xAE2A8A), MEM16(0x9E9708));
-            fprintf(stderr, "[MSTATE] missionName(9EAC40)='%.31s' species[0x80DCBC]=0x%08X entry1=0x%08X\n",
-                    (const char*)ADDR(0x9EAC40), spec0, spec1);
+                    "9E9708(craftIdx)=%u flyGates(9F4B4C/9F4B48)=%u/%u\n",
+                    MEM32(0xA21449), MEM32(0xABD7B4), MEM32(0xAE2A8A), MEM16(0x9E9708),
+                    MEM32(0x9F4B4C), MEM32(0x9F4B48));
+            fprintf(stderr, "[MSTATE] species[0x80DCBC]=0x%08X entry1=0x%08X craftSrc(7B33C4)=0x%08X ABC0E5(craftCnt)=%u\n",
+                    spec0, spec1, MEM32(0x7B33C4), MEM32(0xABC0E5));
             fflush(stderr);
         }
         fflush(stderr);
@@ -582,14 +584,36 @@ void xwa_ui_driver(void) {
     MEM32(0x9F6888) = 0;          /* clicks ungated */
     MEM8(0x9F6884) = 0;           /* button up */
 
-    if (cb == 0x005397D0) {                            /* concourse -> Training door */
-        MEM32(0x9F65ED) = (uint32_t)(550 - 5);        /* hover (550,200), inside the door */
+    /* SKIRMISH PATH (default): concourse -> Combat Simulator door -> combat-sim
+     * menu -> skirmish setup (sub_5438B0). The skirmish screen's init loads the
+     * craft/mission data that the training-door shortcut skips. Set XWA_TRAINDOOR
+     * to use the old 1-click Training-door path instead. Clicks are timing-flaky
+     * vs modals, so each retries a one-frame pulse every ~40 frames. */
+    static int train = -1;
+    if (train < 0) train = getenv("XWA_TRAINDOOR") ? 1 : 0;
+
+    if (cb == 0x005397D0 && train) {                   /* concourse -> Training door (536,174) */
+        MEM32(0x9F65ED) = (uint32_t)(550 - 5);
         MEM32(0x9F65F1) = (uint32_t)(200 - 5);
-        /* The click is timing-flaky vs the create-pilot modal, so RETRY: pulse the
-         * button for one frame every ~40 frames until the concourse transitions. */
         if (fip >= 15 && (fip % 40) == 15) {
-            MEM8(0x9F6884) = 1;                        /* single-frame click */
+            MEM8(0x9F6884) = 1;
             fprintf(stderr, "[FLYDEMO] click Training door (550,200) at fip=%d\n", fip);
+            fflush(stderr);
+        }
+    } else if (cb == 0x005397D0) {                      /* concourse -> Combat Simulator door (35,174) */
+        MEM32(0x9F65ED) = (uint32_t)(60 - 5);          /* (60,210) inside the combatdoor sprite */
+        MEM32(0x9F65F1) = (uint32_t)(210 - 5);
+        if (fip >= 15 && (fip % 40) == 15) {
+            MEM8(0x9F6884) = 1;
+            fprintf(stderr, "[FLYDEMO] click Combat door (60,210) at fip=%d\n", fip);
+            fflush(stderr);
+        }
+    } else if (cb == 0x0053B500) {                      /* combat sim -> menu hot-spot -> skirmish */
+        MEM32(0x9F65ED) = (uint32_t)(507 - 5);         /* (507,338) inside rect 384,252..630,424 */
+        MEM32(0x9F65F1) = (uint32_t)(338 - 5);
+        if (fip >= 10 && (fip % 40) == 10) {
+            MEM8(0x9F6884) = 1;
+            fprintf(stderr, "[FLYDEMO] click combat-sim menu (507,338) at fip=%d\n", fip);
             fflush(stderr);
         }
     } else {
