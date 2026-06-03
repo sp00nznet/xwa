@@ -586,8 +586,8 @@ void xwa_ui_driver(void) {
                     "9E9708(craftIdx)=%u flyGates(9F4B4C/9F4B48)=%u/%u\n",
                     MEM32(0xA21449), MEM32(0xABD7B4), MEM32(0xAE2A8A), MEM16(0x9E9708),
                     MEM32(0x9F4B4C), MEM32(0x9F4B48));
-            fprintf(stderr, "[MSTATE] species[0x80DCBC]=0x%08X entry1=0x%08X craftSrc(7B33C4)=0x%08X ABC0E5(craftCnt)=%u\n",
-                    spec0, spec1, MEM32(0x7B33C4), MEM32(0xABC0E5));
+            fprintf(stderr, "[MSTATE] species[0x80DCBC]=0x%08X entry1=0x%08X craftSrc(7B33C4)=0x%08X ABC0E5(craftCnt)=%u crafttbl(9EB8E0)=0x%08X\n",
+                    spec0, spec1, MEM32(0x7B33C4), MEM32(0xABC0E5), MEM32(0x9EB8E0));
             fflush(stderr);
         }
         fflush(stderr);
