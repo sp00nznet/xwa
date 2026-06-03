@@ -178,7 +178,11 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
          * (functions are laid out roughly in order, so this names the crash site). */
         extern uint32_t guest_func_for_host(uintptr_t host_addr);
         uint32_t gva = guest_func_for_host((uintptr_t)ep->ExceptionRecord->ExceptionAddress);
-        if (gva) fprintf(stderr, "    -> in guest function sub_%08X\n", gva);
+        if (gva) {
+            extern uint32_t g_crash_host_offset; extern int g_crash_contained;
+            fprintf(stderr, "    -> in guest function sub_%08X (+0x%X host, %s)\n",
+                    gva, g_crash_host_offset, g_crash_contained ? "CONTAINED" : "uncertain/gap");
+        }
     }
     if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
         fprintf(stderr, "    %s addr=0x%p, g_esp=0x%08X, total_calls=%u\n",
@@ -309,18 +313,23 @@ recomp_func_t recomp_lookup(uint32_t va) {
  * host entry pointer is the greatest value <= host_addr. MSVC lays the lifted
  * functions out roughly in table order, so the nearest entry below the EIP
  * names the crashing guest function. Linear scan — only runs on a crash. */
+uint32_t g_crash_host_offset = 0;   /* EIP - resolved function's host entry */
+int      g_crash_contained = 0;     /* 1 if EIP < next function's host entry (accurate) */
 uint32_t guest_func_for_host(uintptr_t host_addr) {
-    uintptr_t best_fn = 0;
+    uintptr_t best_fn = 0, next_fn = (uintptr_t)-1;
     uint32_t best_va = 0;
     for (uint32_t i = 0; i < recomp_dispatch_count; i++) {
         uintptr_t fn = (uintptr_t)recomp_dispatch_table[i].func;
-        if (fn <= host_addr && fn > best_fn) {
-            best_fn = fn;
-            best_va = recomp_dispatch_table[i].address;
-        }
+        if (fn <= host_addr && fn > best_fn) { best_fn = fn; best_va = recomp_dispatch_table[i].address; }
+        if (fn > host_addr && fn < next_fn) next_fn = fn;
     }
     /* Reject matches absurdly far below the EIP (likely not the real function). */
-    if (best_fn && (host_addr - best_fn) < 0x20000) return best_va;
+    if (best_fn && (host_addr - best_fn) < 0x20000) {
+        g_crash_host_offset = (uint32_t)(host_addr - best_fn);
+        g_crash_contained = (host_addr < next_fn) ? 1 : 0;  /* EIP within [best_fn,next_fn) */
+        return best_va;
+    }
+    g_crash_host_offset = 0; g_crash_contained = 0;
     return 0;
 }
 
@@ -586,8 +595,8 @@ void xwa_ui_driver(void) {
                     "9E9708(craftIdx)=%u flyGates(9F4B4C/9F4B48)=%u/%u\n",
                     MEM32(0xA21449), MEM32(0xABD7B4), MEM32(0xAE2A8A), MEM16(0x9E9708),
                     MEM32(0x9F4B4C), MEM32(0x9F4B48));
-            fprintf(stderr, "[MSTATE] species[0x80DCBC]=0x%08X entry1=0x%08X craftSrc(7B33C4)=0x%08X ABC0E5(craftCnt)=%u crafttbl(9EB8E0)=0x%08X\n",
-                    spec0, spec1, MEM32(0x7B33C4), MEM32(0xABC0E5), MEM32(0x9EB8E0));
+            fprintf(stderr, "[MSTATE] species[0x80DCBC]=0x%08X entry1=0x%08X craftSrc(7B33C4)=0x%08X ABC0E5(craftCnt)=%u crafttbl(9EB8E0)=0x%08X skmbuf(9F4B98)=0x%08X\n",
+                    spec0, spec1, MEM32(0x7B33C4), MEM32(0xABC0E5), MEM32(0x9EB8E0), MEM32(0x9F4B98));
             fflush(stderr);
         }
         fflush(stderr);
