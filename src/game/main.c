@@ -549,6 +549,22 @@ void xwa_ui_driver(void) {
     uint32_t cb = MEM32(0xA1C8D5 + 0x850u * depth);
     static uint32_t last_cb = 0;
     static int fip = 0;            /* frames since the active screen last changed */
+
+    /* EXPERIMENT (XWA_FORCEGATE): single-player never opens the DirectPlay message
+     * gate dword_A21449 (all gate-setters are multiplayer). Force it to a mock
+     * IDirectPlay4 object once we're past the concourse, so sub_52CEE0/sub_52CF50
+     * actually write the loopback mission-load message — to test whether the gate
+     * is what blocks the SP world build. */
+    if (getenv("XWA_FORCEGATE")) {
+        if ((cb == 0x0053B500 || cb == 0x005438B0 || cb == 0x005316B0 ||
+             cb == 0x005710F0 || cb == 0x0057ECE0) && MEM32(0xA21449) == 0) {
+            extern uint32_t com_alloc_dplay_object(void);
+            uint32_t obj = com_alloc_dplay_object();
+            if (obj) { MEM32(0xA21449) = obj;
+                fprintf(stderr, "[FORCEGATE] set dword_A21449=0x%08X at cb=0x%06X\n", obj, cb);
+                fflush(stderr); }
+        }
+    }
     static uint32_t clicked = 0;   /* one-shot: which screen we've already clicked */
     if (cb != last_cb) {
         const char* nm =
