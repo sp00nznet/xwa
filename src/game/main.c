@@ -664,8 +664,10 @@ void xwa_ui_driver(void) {
          * 'single' handler (case 0) runs and our 507,338 click can reach sub_5438B0. */
         if (MEM32(0x782FFC) == 0 && fip >= 8) {
             static int _vp = 0;
-            if (_vp < 2) { fprintf(stderr, "[CSIM] forcing 0x782FFC 0->2 (single-player skirmish view)\n"); fflush(stderr); _vp++; }
-            MEM32(0x782FFC) = 2;          /* case 1 = single-player skirmish ('single' button -> sub_5438B0); 1=multiplayer */
+            int sk = getenv("XWA_SKIRMISH") ? 1 : 0;   /* XWA_SKIRMISH: offline skirmish (case 3) vs historical (case 1) */
+            if (_vp < 2) { fprintf(stderr, "[CSIM] forcing 0x782FFC 0->%d %s\n", sk?4:2, sk?"(OFFLINE SKIRMISH, ABD7B4=2)":"(historical 'single')"); fflush(stderr); _vp++; }
+            if (sk) { MEM32(0x782FFC) = 4; MEM32(0xABD7B4) = 2; }   /* case 3 = offline skirmish; ABD7B4=2 -> L_544BA8 lobby */
+            else      MEM32(0x782FFC) = 2;                          /* case 1 = historical campaign-mission */
         }
         MEM32(0x9F65ED) = (uint32_t)(507 - 5);         /* (507,338) inside rect 384,252..630,424 */
         MEM32(0x9F65F1) = (uint32_t)(338 - 5);
