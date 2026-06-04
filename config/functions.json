@@ -8643,13 +8643,7 @@
   "address": "0x0050BC20",
   "address_int": 5291040,
   "name": "sub_0050BC20",
-  "num_instructions": 196
- },
- {
-  "address": "0x0050BEF5",
-  "address_int": 5291765,
-  "name": "sub_0050BEF5",
-  "num_instructions": 540
+  "num_instructions": 736
  },
  {
   "address": "0x0050C640",
