@@ -658,6 +658,15 @@ void xwa_ui_driver(void) {
             fflush(stderr);
         }
     } else if (cb == 0x0053B500) {                      /* combat sim -> menu hot-spot -> skirmish */
+        /* The combat-sim frame handler switches on 0x782FFC (view sub-state): init=0 (intro),
+         * 1=single-select (where the 'single' button -> skirmish setup lives). The state-0->1
+         * advance needs a click at y~400-440 the door-entry path makes; force it so the
+         * 'single' handler (case 0) runs and our 507,338 click can reach sub_5438B0. */
+        if (MEM32(0x782FFC) == 0 && fip >= 8) {
+            static int _vp = 0;
+            if (_vp < 2) { fprintf(stderr, "[CSIM] forcing 0x782FFC 0->2 (single-player skirmish view)\n"); fflush(stderr); _vp++; }
+            MEM32(0x782FFC) = 2;          /* case 1 = single-player skirmish ('single' button -> sub_5438B0); 1=multiplayer */
+        }
         MEM32(0x9F65ED) = (uint32_t)(507 - 5);         /* (507,338) inside rect 384,252..630,424 */
         MEM32(0x9F65F1) = (uint32_t)(338 - 5);
         if (fip >= 10 && (fip % 40) == 10) {
