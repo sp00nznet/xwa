@@ -686,11 +686,13 @@ void xwa_ui_driver(void) {
             MEM32(0x9F4B48) = 3;          /* transition phase complete -> fire the switch */
             MEM32(0x9F4B4C) = 3;
         }
-    } else if (cb == 0x005438B0) {                       /* skirmish config screen */
-        /* The skirmish (ABD7B4=2) advances via its lobby menu (sub_529330/sub_541890), not the campaign command
-         * dispatch. Forcing ABD7B4=3 reaches that dispatch + auto-confirms dialogs, but pushes the skirmish onto
-         * the campaign path with no mission list loaded -> no flight. Real flight needs the natural lobby drive.
-         * Left as a documented no-op; g_flydemo_confirm available to arm the sub_5593C0 auto-confirm hook. */
+    } else if (cb == 0x005438B0) {                       /* skirmish config / lobby screen (REACHED, mission .tie loaded) */
+        /* The setup is now reached reliably with AE2A8A=3, the 24-entry mission list, and missions\1b0m1fw.tie
+         * loaded. It waits here for the FLY/LAUNCH. With ABD7B4=0 it routes to the campaign cmd-dispatch
+         * (sub_571DE0 @L_5445D9, launch=cmd 0x5B). Forcing ABD7B4=2 (skirmish lobby) does NOT stick -- the setup
+         * overwrites it each frame (e.g. 0x545419). The launch needs the lobby's own command state machine
+         * (sub_571DE0, 1780 lines) to emit 0x5B from the Fly button, or a genuine ready+craft for sub_552160.
+         * This is the final step. Left as a no-op for now. */
         (void)fip;
     } else {
         MEM32(0x9F65ED) = (uint32_t)(5 - 5);          /* park mouse top-left, off everything */
