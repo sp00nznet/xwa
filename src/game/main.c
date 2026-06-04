@@ -567,6 +567,7 @@ static void manual_sub_00539760(void) {
  * Holding the button across frames re-triggers and crashes, so click exactly once. */
 int g_flydemo_launch_cmd = 0;  /* set by the driver, consumed once by the sub_5438B0 dispatch hook */
 int g_flydemo_skip_menu = 0;   /* set by the driver: force past the skirmish config menu (sub_529330) to reach the Fly button */
+int g_flydemo_confirm = 0;     /* set by the driver while the skirmish cb is active: auto-confirm sub_5593C0 dialogs */
 uint32_t g_skdbg_cb = 0, g_skdbg_esp0 = 0;  /* dispatch: capture skirmish cb + esp around the dispatch ICALL (esp-leak workaround) */
 void xwa_ui_driver(void) {
     static int enabled = -1;
@@ -577,6 +578,10 @@ void xwa_ui_driver(void) {
     uint32_t cb = MEM32(0xA1C8D5 + 0x850u * depth);
     static uint32_t last_cb = 0;
     static int fip = 0;            /* frames since the active screen last changed */
+
+    /* Clear the dialog-auto-confirm each frame; it's re-armed below only while the skirmish cb is active,
+     * so boot/concourse dialogs are never auto-confirmed. */
+    { extern int g_flydemo_confirm; if (cb != 0x005438B0) g_flydemo_confirm = 0; }
 
     /* EXPERIMENT (XWA_FORCEGATE): single-player never opens the DirectPlay message
      * gate dword_A21449 (all gate-setters are multiplayer). Force it to a mock
@@ -661,10 +666,10 @@ void xwa_ui_driver(void) {
             fflush(stderr);
         }
     } else if (cb == 0x005438B0) {                       /* skirmish config screen */
-        /* The skirmish config is a multi-step state machine (ABD7B4 2->3->ready, 9F4B4C 0->4->5, 9F4BC8,
-         * 9F6084 mission selection). The Fly trigger (0x46 launch @0x54556F, gated 9F4B48==1) only fires once
-         * the config logic advances those states. External pokes don't stick (the cb resets 9F4B48 each frame),
-         * so reaching Fly requires driving the real config flow (select .SKM -> advance steps). TODO. */
+        /* The skirmish (ABD7B4=2) advances via its lobby menu (sub_529330/sub_541890), not the campaign command
+         * dispatch. Forcing ABD7B4=3 reaches that dispatch + auto-confirms dialogs, but pushes the skirmish onto
+         * the campaign path with no mission list loaded -> no flight. Real flight needs the natural lobby drive.
+         * Left as a documented no-op; g_flydemo_confirm available to arm the sub_5593C0 auto-confirm hook. */
         (void)fip;
     } else {
         MEM32(0x9F65ED) = (uint32_t)(5 - 5);          /* park mouse top-left, off everything */
