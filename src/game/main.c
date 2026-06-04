@@ -665,6 +665,18 @@ void xwa_ui_driver(void) {
             fprintf(stderr, "[FLYDEMO] click combat-sim menu (507,338) at fip=%d\n", fip);
             fflush(stderr);
         }
+    } else if (cb == 0x0055FF30) {                       /* barracks / pilot proving-grounds (post create-pilot) */
+        /* The autopilot lands here after pilot creation, not the concourse. The barracks transitions to the
+         * next screen via the reconstructed jump table at 0x560124 (gated on 78397C-selector + 9F4B48/9F4B4C==3
+         * transition phase). Drive it to the concourse (78397C=1) so the combat-door click logic can run. */
+        if (fip >= 20) {
+            static int _bp = 0;
+            if (_bp < 3) { fprintf(stderr, "[BARRACKS] forcing 78397C=3 (combat sim); was 78397C=%u 9F4B48=%u 9F4B4C=%u\n",
+                MEM32(0x78397C), MEM32(0x9F4B48), MEM32(0x9F4B4C)); fflush(stderr); _bp++; }
+            MEM32(0x78397C) = 3;          /* screen-select: 3 -> combat sim 0x53B500 (switch case 2), skips concourse */
+            MEM32(0x9F4B48) = 3;          /* transition phase complete -> fire the switch */
+            MEM32(0x9F4B4C) = 3;
+        }
     } else if (cb == 0x005438B0) {                       /* skirmish config screen */
         /* The skirmish (ABD7B4=2) advances via its lobby menu (sub_529330/sub_541890), not the campaign command
          * dispatch. Forcing ABD7B4=3 reaches that dispatch + auto-confirms dialogs, but pushes the skirmish onto
