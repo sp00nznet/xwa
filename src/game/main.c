@@ -190,6 +190,22 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
             (void*)ep->ExceptionRecord->ExceptionInformation[1],
             g_esp, g_total_calls);
     }
+    {   /* If the fault is in a system DLL (not our exe), name the module and walk the host
+         * stack to find the guest function(s) that called into it. */
+        uintptr_t fip = (uintptr_t)ep->ExceptionRecord->ExceptionAddress;
+        HMODULE hm = NULL; char modname[MAX_PATH] = "?";
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)fip, &hm) && hm) GetModuleFileNameA(hm, modname, MAX_PATH);
+        fprintf(stderr, "    fault module: %s (base=0x%p)\n", modname, (void*)hm);
+        extern uint32_t guest_func_for_host(uintptr_t host_addr);
+        uintptr_t* sp = (uintptr_t*)(uintptr_t)ep->ContextRecord->Esp;
+        int found = 0;
+        for (int i = 0; i < 64 && found < 5; i++) {
+            uintptr_t v = 0; __try { v = sp[i]; } __except(1) { break; }
+            uint32_t gv = guest_func_for_host(v);
+            if (gv) { extern int g_crash_contained; fprintf(stderr, "    stack[+%02X]=0x%zX -> guest sub_%08X\n", i*4, v, gv); found++; }
+        }
+    }
     if (code == 0xC0000374 /* STATUS_HEAP_CORRUPTION */) {
         extern uint32_t g_last_heapalloc_heap, g_last_heapalloc_size, g_last_heapalloc_ret;
         extern uint32_t g_last_heapfree_ptr, g_heapop_count;
@@ -549,6 +565,9 @@ static void manual_sub_00539760(void) {
  * Mouse pos read by sub_55BA50 = dword_9F65ED+5 / dword_9F65F1+5.
  * Left click read by sub_5581D0 = (dword_9F6888 ? 0 : (uint8)dword_9F6884).
  * Holding the button across frames re-triggers and crashes, so click exactly once. */
+int g_flydemo_launch_cmd = 0;  /* set by the driver, consumed once by the sub_5438B0 dispatch hook */
+int g_flydemo_skip_menu = 0;   /* set by the driver: force past the skirmish config menu (sub_529330) to reach the Fly button */
+uint32_t g_skdbg_cb = 0, g_skdbg_esp0 = 0;  /* dispatch: capture skirmish cb + esp around the dispatch ICALL (esp-leak workaround) */
 void xwa_ui_driver(void) {
     static int enabled = -1;
     if (enabled < 0) enabled = getenv("XWA_FLYDEMO") ? 1 : 0;
@@ -641,6 +660,12 @@ void xwa_ui_driver(void) {
             fprintf(stderr, "[FLYDEMO] click combat-sim menu (507,338) at fip=%d\n", fip);
             fflush(stderr);
         }
+    } else if (cb == 0x005438B0) {                       /* skirmish config screen */
+        /* The skirmish config is a multi-step state machine (ABD7B4 2->3->ready, 9F4B4C 0->4->5, 9F4BC8,
+         * 9F6084 mission selection). The Fly trigger (0x46 launch @0x54556F, gated 9F4B48==1) only fires once
+         * the config logic advances those states. External pokes don't stick (the cb resets 9F4B48 each frame),
+         * so reaching Fly requires driving the real config flow (select .SKM -> advance steps). TODO. */
+        (void)fip;
     } else {
         MEM32(0x9F65ED) = (uint32_t)(5 - 5);          /* park mouse top-left, off everything */
         MEM32(0x9F65F1) = (uint32_t)(5 - 5);
@@ -1247,6 +1272,19 @@ L_done:
     #undef esp
 }
 
+/* =================================================================
+ * FILE* registry: the game sometimes uses an uninitialized / misread
+ * (non-NULL garbage) value as a FILE*, which crashes host ucrtbase when
+ * passed to fread/fseek/fclose/etc. Track the FILE*s our fopen wrappers
+ * actually returned; the CRT wrappers validate against this set and skip
+ * the op (returning an error code) when given a pointer we never handed out.
+ * ================================================================= */
+#define RECOMP_MAX_FP 256
+static FILE* g_recomp_fps[RECOMP_MAX_FP];
+void recomp_fp_register(FILE* fp) { if (!fp) return; for (int i=0;i<RECOMP_MAX_FP;i++) if (!g_recomp_fps[i]) { g_recomp_fps[i]=fp; return; } }
+void recomp_fp_unregister(FILE* fp) { for (int i=0;i<RECOMP_MAX_FP;i++) if (g_recomp_fps[i]==fp) { g_recomp_fps[i]=NULL; return; } }
+int  recomp_fp_valid(FILE* fp) { if (!fp) return 0; for (int i=0;i<RECOMP_MAX_FP;i++) if (g_recomp_fps[i]==fp) return 1; return 0; }
+
 /* Manual override table */
 /* =================================================================
  * Native file I/O replacements.
@@ -1273,11 +1311,8 @@ static void native_fopen_0052AD30(void) {
     g_eax = (uint32_t)(uintptr_t)fp;
     if (fp) {
         MEM16(0x7829C8) = (uint16_t)(MEM16(0x7829C8) + 1);
+        recomp_fp_register(fp);
     }
-    { static int _nfo = 0; if (_nfo < 30) {
-        fprintf(stderr, "[NATIVE_FOPEN] '%s' mode='%s' -> %p\n", filename, mode, fp);
-        fflush(stderr); _nfo++;
-    } }
     esp += 4; /* pop return address */
     #undef esp
 }

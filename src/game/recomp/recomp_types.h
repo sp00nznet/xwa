@@ -20,6 +20,13 @@
 #include <intrin.h>
 #endif
 
+/* FILE* registry (defined in main.c) — native CRT wrappers validate FILE*s
+ * against the set our fopen wrappers handed out, to reject non-NULL garbage
+ * pointers the game sometimes passes (which would crash host ucrtbase). */
+void recomp_fp_register(FILE* fp);
+void recomp_fp_unregister(FILE* fp);
+int  recomp_fp_valid(FILE* fp);
+
 /* ============================================================
  * Global Register Model
  *
