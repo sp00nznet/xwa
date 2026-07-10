@@ -617,8 +617,21 @@ static void draw_surface_quad(void) {
     ID3D11DeviceContext_DrawIndexed(g_context, 6, 0, 0);
 }
 
+unsigned long g_execute_calls = 0;  /* ponytail: count d3d11_execute invocations for diagnosis */
+
 void d3d11_present(void) {
     if (!g_d3d11_initialized) return;
+
+    { static int _sb = -1; extern ptrdiff_t g_mem_base; extern void xwa_drive_render(void);
+      volatile uint32_t *_fg;
+      if (_sb < 0) { char* e = getenv("XWA_DRIVERENDER"); _sb = e ? 1 : 0; }
+      _fg = (volatile uint32_t*)((uintptr_t)0x7B33C4u + g_mem_base);  /* flight-group table */
+      if (_sb && *_fg != 0) xwa_drive_render(); }
+    { static int _ds = -1; extern ptrdiff_t g_mem_base; extern void xwa_drive_spawn(void);
+      volatile uint32_t *_fg2;
+      if (_ds < 0) { char* e = getenv("XWA_DPSPAWN"); _ds = e ? 1 : 0; }
+      _fg2 = (volatile uint32_t*)((uintptr_t)0x7B33C4u + g_mem_base);
+      if (_ds && *_fg2 != 0) xwa_drive_spawn(); }
 
     /* Always redraw the surface quad before presenting */
     draw_surface_quad();
@@ -627,8 +640,23 @@ void d3d11_present(void) {
     g_frame_count++;
 
     if ((g_frame_count % 300) == 0) {
-        fprintf(stderr, "[D3D11] Frame %u: %u draw calls, %u triangles\n",
-                g_frame_count, g_draw_calls, g_total_triangles);
+        fprintf(stderr, "[D3D11] Frame %u: %u draw calls, %u triangles, %lu execute() calls\n",
+                g_frame_count, g_draw_calls, g_total_triangles, g_execute_calls);
+        /* ponytail: object-model ground truth — how many craft slots are populated */
+        {
+          extern ptrdiff_t g_mem_base;
+          #define _M32(a) (*(volatile uint32_t*)((uintptr_t)(uint32_t)(a)+g_mem_base))
+          unsigned valid = 0, s;
+          uint32_t t;
+          for (s = 0; s < 0x40; s++) { t = _M32(s*0xBCFu + 0x8B94E0u); if (t != 0xFFFFu && t != 0) valid++; }
+          fprintf(stderr, "[OBJST] FGcount=%u FGtbl=0x%X objcount=0x%X 8C1CC8=%u validslots=%u | renderEnable(7828D0)=%u renderFn(9109C0)=0x%X viewCnt(8C1CE4)=%u | outQ(76E578)=%u DPsess(77330C)=0x%X msggate(A21449)=0x%X\n",
+                  _M32(0x63185Cu), _M32(0x7B33C4u), _M32(0x5BA994u), _M32(0x8C1CC8u), valid,
+                  _M32(0x7828D0u), _M32(0x9109C0u), _M32(0x8C1CE4u),
+                  _M32(0x76E578u), _M32(0x77330Cu), _M32(0xA21449u));
+          fprintf(stderr, "[OBJST2] 9F702A(DDrawObj)=0x%X 773358=0x%X 7B1CE8(missState)=0x%X 7B1D3C=%u\n",
+                  _M32(0x9F702Au), _M32(0x773358u), _M32(0x7B1CE8u), _M32(0x7B1D3Cu));
+          #undef _M32
+        }
     }
 }
 
@@ -672,6 +700,8 @@ static void apply_depth_state(void) {
 
 void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex_count,
                    uint32_t instruction_offset, uint32_t instruction_size) {
+    g_execute_calls++;
+    if (g_execute_calls <= 5) { fprintf(stderr, "[EXEC] d3d11_execute call #%lu verts=%u\n", g_execute_calls, vertex_count); fflush(stderr); }
     if (!g_d3d11_initialized) return;
     if (!buffer_data) return;
 

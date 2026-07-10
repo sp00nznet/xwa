@@ -199,10 +199,25 @@ static int g_mouse_tracking = 0;
 static LONG g_mouse_dx = 0;
 static LONG g_mouse_dy = 0;
 
-/* Pixel buffer for surfaces (640x480x2 = 614400 bytes) */
+/* Pixel buffer for surfaces (640x480x2 = 614400 bytes).
+ * SURFACE_BUF_SIZE is the *reported* size; the actual allocation adds a generous
+ * guard margin (SURFACE_GUARD) so the game's direct surface writes (it caches the
+ * pixel pointer at 0x6002BC and renders straight into it) can never overrun into
+ * heap metadata if its stride math disagrees with ours. A sentinel at the guard
+ * boundary lets us detect and measure any real overrun. */
 #define SURFACE_BUF_SIZE (640 * 480 * 2)
+#define SURFACE_GUARD    (4 * 1024 * 1024)
+#define SURFACE_SENTINEL 0xA5
 static uint8_t* g_surface_buffer = NULL;
 static uint8_t* g_backbuf_buffer = NULL;
+
+/* Allocate a surface backing store of `size` reported bytes + guard headroom,
+ * stamping a sentinel byte across the guard region so overruns are detectable. */
+static uint8_t* alloc_surface_buf(uint32_t size) {
+    uint8_t* p = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)size + SURFACE_GUARD);
+    if (p) memset(p + size, SURFACE_SENTINEL, SURFACE_GUARD);
+    return p;
+}
 
 /* Global mock objects (for cross-reference) */
 static mock_com_obj_t* g_primary_surface = NULL;
@@ -279,14 +294,23 @@ static void dd_QueryInterface(void) {
     /* Check if asking for IDirect3D (GUID starts with 0xBB140000 or real D3D GUID).
      * Real IID_IDirect3D = {3BBA0080-...}. We check first DWORD. */
     uint32_t guid_dw0 = MEM32(riid_ptr);
+    { static int _c; if (_c < 6) { fprintf(stderr, "[D3DQI] IDirectDraw::QueryInterface guid_dw0=0x%08X\n", guid_dw0); fflush(stderr); _c++; } }
     COM_LOG("[COM] IDirectDraw::QueryInterface(riid_dw0=0x%08X, ppv=0x%08X)\n",
             guid_dw0, ppv);
 
-    /* For any QI, return a mock IDirect3D object.
-     * XWA only QIs for IDirect3D from IDirectDraw. */
-    mock_com_obj_t* d3d = alloc_mock(MOCK_TAG_D3D, g_d3d_vtable_addr);
-    MEM32(ppv) = (uint32_t)(uintptr_t)d3d;
-    COM_LOG("[COM]   -> IDirect3D mock at 0x%08X\n", (uint32_t)(uintptr_t)d3d);
+    /* Return the correct interface per GUID. DirectDraw-family GUIDs (IDirectDraw/2/4/7:
+     * B3A6F3E0, 9C59509A, 6C14DB05...) must return a DirectDraw object, NOT IDirect3D — the
+     * old code returned IDirect3D for ANY QI, handing the game the wrong vtable. */
+    uint32_t pThis = MEM32(g_esp + 4);
+    if (guid_dw0 == 0x3BBA0080u /*IDirect3D*/ || guid_dw0 == 0x6C79BE71u /*IDirect3D2*/ ||
+        guid_dw0 == 0xBB223240u /*IDirect3D3*/ || guid_dw0 == 0xBB223241u) {
+        mock_com_obj_t* d3d = alloc_mock(MOCK_TAG_D3D, g_d3d_vtable_addr);
+        MEM32(ppv) = (uint32_t)(uintptr_t)d3d;
+        COM_LOG("[COM]   -> IDirect3D mock at 0x%08X\n", (uint32_t)(uintptr_t)d3d);
+    } else {
+        /* IDirectDraw2/4/7 (or IUnknown): return the same DirectDraw object. */
+        MEM32(ppv) = pThis;
+    }
 
     g_eax = 0; /* S_OK */
     g_esp += 16; /* pop ret + 3 args */
@@ -334,8 +358,8 @@ static void dd_CreateSurface(void) {
 
     /* Allocate surface pixel buffer if not done yet */
     if (!g_surface_buffer) {
-        g_surface_buffer = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SURFACE_BUF_SIZE);
-        g_backbuf_buffer = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, SURFACE_BUF_SIZE);
+        g_surface_buffer = alloc_surface_buf(SURFACE_BUF_SIZE);
+        g_backbuf_buffer = alloc_surface_buf(SURFACE_BUF_SIZE);
     }
 
     /* Create primary or off-screen surface */
@@ -358,7 +382,7 @@ static void dd_CreateSurface(void) {
         if (!(flags & 0x2) || h == 0) h = g_display_height;
         COM_LOG("[COM]   offscreen: w=%u h=%u\n", w, h);
         uint32_t size = w * h * (bpp / 8);
-        uint8_t* buf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size);
+        uint8_t* buf = alloc_surface_buf(size);
         surf = create_mock_surface(buf);
         surf->extra[1] = w;
         surf->extra[2] = h;
@@ -457,12 +481,19 @@ static void dd_GetCaps(void) {
         if (size > 0) {
             /* DDCAPS_BLT (0x40) | DDCAPS_BLTSTRETCH (0x200) | DDCAPS_COLORKEY (0x400) */
             MEM32(pDrv + 4) = 0x640;
+            /* DDCAPS (DX6): dwVidMemTotal @0x3C, dwVidMemFree @0x40. Report 128MB so the game's
+             * video-memory sufficiency check for 800x600 flight surfaces passes (was 0 -> "Not
+             * Enough Memory"). */
+            MEM32(pDrv + 0x3C) = 0x08000000u;
+            MEM32(pDrv + 0x40) = 0x08000000u;
         }
     }
     if (pHEL) {
         uint32_t size = MEM32(pHEL);
         if (size > 0) {
             MEM32(pHEL + 4) = 0x640;
+            MEM32(pHEL + 0x3C) = 0x08000000u;
+            MEM32(pHEL + 0x40) = 0x08000000u;
         }
     }
 
@@ -544,6 +575,10 @@ static void dd_EnumDisplayModes(void) {
 /* ============================================================
  * IDirectDrawSurface Methods
  *
+ * Surface sanity: surfaces reached via forced/partial flight init can carry
+ * uninitialized dims or stale buffer pointers. surf_buf_ok() returns the buffer
+ * pointer only if it is plausibly valid; the Blt/BltFast paths bail otherwise so
+ * a bad surface can never corrupt the heap (which the CRT detects as a clean abort).
  * [0]  QueryInterface (3) [1] AddRef (1) [2] Release (1)
  * [3]  AddAttachedSurface (2) [4] AddOverlayDirtyRect (2)
  * [5]  Blt (5) [6] BltBatch (3) [7] BltFast (5)
@@ -561,6 +596,17 @@ static void dd_EnumDisplayModes(void) {
  * [31] SetPalette (2) [32] Unlock (2)
  * ============================================================ */
 
+/* Return the surface's pixel buffer iff dims+pitch+pointer are all plausible. */
+static uint8_t* surf_buf_ok(mock_com_obj_t* s) {
+    if (!s) return NULL;
+    uintptr_t buf = (uintptr_t)s->extra[0];
+    uint32_t w = s->extra[1], h = s->extra[2], pitch = s->extra[4];
+    if (buf < 0x10000 || buf > 0x7F000000) return NULL;     /* null/garbage pointer */
+    if (w == 0 || h == 0 || w > 16384 || h > 16384) return NULL;
+    if (pitch == 0 || pitch > 0x100000) return NULL;
+    return (uint8_t*)buf;
+}
+
 static void dds_QueryInterface(void) {
     /* this=esp+4, riid=esp+8, ppvObj=esp+12 */
     uint32_t pThis = MEM32(g_esp + 4);
@@ -572,6 +618,7 @@ static void dds_QueryInterface(void) {
      * IID_IDirect3DTexture2 = {93281502-...} (first DWORD = 0x93281502)
      * We treat any QI from a surface as a texture interface request. */
     uint32_t guid_dw0 = MEM32(riid_ptr);
+    { static int _c; if (_c < 8) { fprintf(stderr, "[SURFQI] IDirectDrawSurface::QueryInterface guid_dw0=0x%08X\n", guid_dw0); fflush(stderr); _c++; } }
     COM_LOG("[COM] IDirectDrawSurface::QueryInterface(riid_dw0=0x%08X)\n", guid_dw0);
 
     /* Create an IDirect3DTexture mock that points back to this surface */
@@ -704,10 +751,26 @@ static void dds_GetSurfaceDesc(void) {
     g_esp += 12;
 }
 
+/* Scan a surface buffer's guard region; report the first/furthest sentinel byte
+ * that was overwritten (i.e. how far past the reported size the game wrote). */
+static void check_sentinel(const char* name, uint8_t* buf, uint32_t reported) {
+    if (!buf) return;
+    uint8_t* g = buf + reported;
+    uint32_t furthest = 0;
+    for (uint32_t i = 0; i < SURFACE_GUARD; i++) if (g[i] != SURFACE_SENTINEL) furthest = i + 1;
+    if (furthest) {
+        static int _warned = 0;
+        if (_warned < 8) { fprintf(stderr, "[GUARD] %s OVERRUN: wrote %u bytes past reported %u (guard=%u)\n",
+            name, furthest, reported, SURFACE_GUARD); fflush(stderr); _warned++; }
+    }
+}
+
 static void dds_Flip(void) {
     /* this=esp+4, pSurf=esp+8, flags=esp+12 */
     static int _flip_count = 0;
     _flip_count++;
+    if (g_surface_buffer) check_sentinel("primary", g_surface_buffer, SURFACE_BUF_SIZE);
+    if (g_backbuf_buffer) check_sentinel("backbuf", g_backbuf_buffer, SURFACE_BUF_SIZE);
     if (d3d11_is_initialized()) {
         /* Upload the back buffer 2D surface before presenting */
         if (g_back_surface && g_back_surface->extra[0]) {
@@ -716,10 +779,10 @@ static void dds_Flip(void) {
                 uint32_t sz = g_back_surface->extra[1] * g_back_surface->extra[2] * 2;
                 uint32_t nz_count = 0;
                 for (uint32_t i = 0; i < sz; i++) { if (buf[i]) nz_count++; }
-                fprintf(stderr, "[COM] dds_Flip #%d: back_buf=0x%X %ux%u nz=%u/%u this=0x%X\n",
+                fprintf(stderr, "[COM] dds_Flip #%d: back_buf=0x%X %ux%u nz=%u/%u this=0x%X | 7B1CE8=0x%X 7B1CE0=0x%X\n",
                     _flip_count, g_back_surface->extra[0], g_back_surface->extra[1],
                     g_back_surface->extra[2], nz_count, sz,
-                    MEM32(g_esp + 4));
+                    MEM32(g_esp + 4), MEM32(0x7B1CE8), MEM32(0x7B1CE0));
                 fflush(stderr);
             }
             d3d11_upload_surface(
@@ -729,12 +792,45 @@ static void dds_Flip(void) {
                 g_back_surface->extra[4],
                 g_back_surface->extra[3]
             );
-            /* Dump frame 150 to BMP for debugging (after screen advance) */
-            { static int _dumped = 0; _dumped++; if (_dumped == 150) {
-                uint32_t w = g_back_surface->extra[1], h = g_back_surface->extra[2];
+            /* Dump frames to BMP for debugging. Fire early (flip 25) and re-dump
+             * every 25 flips (overwrite) so we always have a recent frame even if
+             * the run exits early. Handles both 16bpp (565) and 32bpp (XRGB). */
+            /* Dump the FULLEST frame seen per resolution (track max nonzero) so the dump reflects
+             * actual rendered content, not a black transitional frame. */
+            { static uint32_t _maxnz_640 = 0, _maxnz_800 = 0;
+              uint32_t _w0 = g_back_surface->extra[1], _h0 = g_back_surface->extra[2];
+              uint32_t _bpp0 = g_back_surface->extra[3], _pitch0 = g_back_surface->extra[4];
+              uint8_t* _b0 = (uint8_t*)(uintptr_t)g_back_surface->extra[0];
+              uint32_t _bytes = _pitch0 * _h0, _nz = 0, _i;
+              for (_i = 0; _i < _bytes; _i += 4) { if (_b0[_i] | _b0[_i+1] | _b0[_i+2]) _nz++; }
+              /* XWA_SHOTS: capture one screenshot per game screen (frame_shot_<name>.bmp), keeping the
+               * richest frame seen for each. Reads the active screen callback from game state. */
+              const char* _shot = NULL;
+              if (getenv("XWA_SHOTS")) {
+                  uint32_t _cb = MEM32(0xA1C8D5u + 0x850u * MEM32(0xA1C089u));
+                  static uint32_t _snz[8]; static const uint32_t _scb[8] =
+                      {0x005397D0,0x0055FF30,0x0053B500,0x005438B0,0x005316B0,0x005710F0,0x00559B50,0x0049E600};
+                  static const char* _snm[8] =
+                      {"concourse","barracks","combatsim","skirmish","loading","flightinit","optionsmenu","flight"};
+                  for (int _k=0;_k<8;_k++) if (_scb[_k]==_cb) {
+                      if (_nz > _snz[_k] + 200) { _snz[_k] = _nz; _shot = _snm[_k]; }
+                      break;
+                  }
+                  if (!_shot) goto _skip_dump;
+              } else {
+                  uint32_t* _mx = (_w0 >= 700) ? &_maxnz_800 : &_maxnz_640;
+                  static int _dumped0 = 0; _dumped0++; if (_nz > *_mx + 200) { *_mx = _nz; } else { goto _skip_dump; }
+              }
+              static int _dumped = 0; _dumped++;
+              (void)_bpp0;
+              { uint32_t w = g_back_surface->extra[1], h = g_back_surface->extra[2];
                 uint32_t pitch = g_back_surface->extra[4];
+                uint32_t bpp = g_back_surface->extra[3];
                 uint8_t* px = (uint8_t*)(uintptr_t)g_back_surface->extra[0];
-                FILE* fp = fopen("D:\\recomp\\pc\\xwa\\frame_dump.bmp", "wb");
+                char _dpath[96];
+                if (_shot) snprintf(_dpath, sizeof(_dpath), "D:\\recomp\\pc\\xwa\\frame_shot_%s.bmp", _shot);
+                else snprintf(_dpath, sizeof(_dpath), "D:\\recomp\\pc\\xwa\\frame_%ux%u.bmp", w, h);
+                FILE* fp = fopen(_dpath, "wb");
                 if (fp) {
                     uint32_t row32 = w * 3; if (row32 % 4) row32 += 4 - (row32 % 4);
                     uint32_t img_size = row32 * h;
@@ -751,22 +847,29 @@ static void dds_Flip(void) {
                     fwrite(hdr, 1, 54, fp);
                     uint8_t* row = (uint8_t*)HeapAlloc(GetProcessHeap(), 0, row32);
                     for (uint32_t y = 0; y < h; y++) {
-                        uint16_t* sp = (uint16_t*)(px + y * pitch);
                         memset(row, 0, row32);
-                        for (uint32_t x = 0; x < w; x++) {
-                            uint16_t c = sp[x];
-                            uint8_t r = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
-                            uint8_t g = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
-                            uint8_t b = (uint8_t)((c & 0x1F) * 255 / 31);
-                            row[x*3+0] = b; row[x*3+1] = g; row[x*3+2] = r;
+                        if (bpp == 32) {
+                            uint8_t* sp = px + y * pitch;   /* B,G,R,X per pixel */
+                            for (uint32_t x = 0; x < w; x++) {
+                                row[x*3+0] = sp[x*4+0]; row[x*3+1] = sp[x*4+1]; row[x*3+2] = sp[x*4+2];
+                            }
+                        } else {
+                            uint16_t* sp = (uint16_t*)(px + y * pitch);
+                            for (uint32_t x = 0; x < w; x++) {
+                                uint16_t c = sp[x];
+                                row[x*3+0] = (uint8_t)((c & 0x1F) * 255 / 31);
+                                row[x*3+1] = (uint8_t)(((c >> 5) & 0x3F) * 255 / 63);
+                                row[x*3+2] = (uint8_t)(((c >> 11) & 0x1F) * 255 / 31);
+                            }
                         }
                         fwrite(row, 1, row32, fp);
                     }
                     HeapFree(GetProcessHeap(), 0, row);
                     fclose(fp);
-                    fprintf(stderr, "[DUMP] Wrote frame to D:\\recomp\\pc\\xwa\\frame_dump.bmp (%ux%u)\n", w, h);
+                    fprintf(stderr, "[DUMP] Wrote frame %d to frame_dump.bmp (%ux%u %ubpp)\n", _dumped, w, h, bpp);
                 }
-            } }
+              } }
+              _skip_dump: ;
             /* NOTE: Do NOT clear the back buffer after upload.
              * The game does incremental drawing - it redraws only the parts
              * that changed each frame, relying on the back buffer retaining
@@ -809,11 +912,21 @@ static void dds_Blt(void) {
             y0 = MEM32(pDestRect + 4);
             x1 = MEM32(pDestRect + 8);
             y1 = MEM32(pDestRect + 12);
-            if (x1 > dstW) x1 = dstW;
-            if (y1 > dstH) y1 = dstH;
         }
+        /* Hardening: surfaces reached via forced-flight may carry garbage dims or
+         * a stale buffer pointer. Bail unless dims+pitch+pointer are all sane. */
+        if (!surf_buf_ok(dst)) {
+            { static int _cfx; if (_cfx < 10) { fprintf(stderr, "[COM]   ColorFill SKIP (bad surf W=%u H=%u pitch=%u buf=0x%08X)\n", dstW, dstH, dstPitch, dst->extra[0]); _cfx++; } }
+            g_eax = 0; g_esp += 28; return;
+        }
+        if (x0 > dstW) x0 = dstW;
+        if (y0 > dstH) y0 = dstH;
+        if (x1 > dstW) x1 = dstW;
+        if (y1 > dstH) y1 = dstH;
+        if (x1 < x0) x1 = x0;
+        if (y1 < y0) y1 = y0;
 
-        { static int _cf; if (_cf < 5) { fprintf(stderr, "[COM]   ColorFill: color=0x%04X rect=(%u,%u)-(%u,%u)\n", fillColor, x0, y0, x1, y1); _cf++; } }
+        { static int _cf; if (_cf < 5) { fprintf(stderr, "[COM]   ColorFill: color=0x%04X rect=(%u,%u)-(%u,%u) W=%u H=%u pitch=%u\n", fillColor, x0, y0, x1, y1, dstW, dstH, dstPitch); _cf++; } }
 
         if (bpp == 2) {
             uint16_t fill16 = (uint16_t)fillColor;
@@ -840,6 +953,12 @@ static void dds_Blt(void) {
         uint32_t rowBytes = copyW * bpp;
         uint8_t* srcBuf = (uint8_t*)(uintptr_t)src->extra[0];
         uint8_t* dstBuf = (uint8_t*)(uintptr_t)dst->extra[0];
+        /* Hardening: never copy with garbage dims/pitches (forced-flight surfaces). */
+        if (copyW > 16384 || copyH > 16384 || srcPitch == 0 || dstPitch == 0 ||
+            srcPitch > 0x100000 || dstPitch > 0x100000 || rowBytes > srcPitch || rowBytes > dstPitch) {
+            { static int _cpx; if (_cpx < 10) { fprintf(stderr, "[COM]   Blt-copy SKIP (bad dims cW=%u cH=%u sp=%u dp=%u)\n", copyW, copyH, srcPitch, dstPitch); _cpx++; } }
+            g_eax = 0; g_esp += 28; return;
+        }
         for (uint32_t y = 0; y < copyH; y++) {
             memcpy(dstBuf + y * dstPitch, srcBuf + y * srcPitch, rowBytes);
         }
@@ -890,8 +1009,54 @@ static void dds_BltFast(void) {
             src ? src->extra[1] : 0, src ? src->extra[2] : 0,
             dwTrans, MEM32(0x6002BC)); _bf++;
     } }
+    /* RCTX-BLIT (#150 disambiguation): for any large 3D-scene source blit, log the render context 0x7B1CE8.
+     * If the CONCOURSE (which renders 3D) blits with 0x7B1CE8==0, then sub_0059453F/0x7B1CE8 is a RED HERRING
+     * and the flight-black cause is the empty scene object-list, not the D3D device-init. */
+    if (getenv("XWA_RCTXBLIT") && src && src->extra[1] >= 320) {
+        static int _rcb; if (_rcb < 16) { uint8_t* fb2 = surf_buf_ok(src); uint32_t nz2 = 0;
+            if (fb2) { uint32_t b2 = src->extra[4] * src->extra[2], k2; for (k2 = 0; k2 < b2; k2 += 4) if (fb2[k2]|fb2[k2+1]|fb2[k2+2]) nz2++; }
+            fprintf(stderr, "[RCTX-BLIT] src=%ux%u dst=(%u,%u) nz=%u 7B1CE8=0x%X 7B1CE0=0x%X 7B1CE4=%u\n",
+                src->extra[1], src->extra[2], dstX, dstY, nz2, MEM32(0x7B1CE8), MEM32(0x7B1CE0), MEM32(0x7B1CE4)); fflush(stderr); _rcb++; } }
+    /* Dump the FLIGHT VIEW source buffer (800x600, blitted at cockpit offset 80,60) so we can see
+     * whether the 3D scene renders geometry. Track max-nonzero so we keep the fullest flight frame. */
+    if (src && src->extra[1] == 800 && src->extra[2] == 600 && dstX == 80 && dstY == 60) {
+        uint8_t* fb = surf_buf_ok(src);
+        if (fb) {
+            uint32_t w = 800, h = 600, pitch = src->extra[4], bpp = src->extra[3];
+            uint32_t nz = 0, i, bytes = pitch * h;
+            for (i = 0; i < bytes; i += 2) { if (fb[i] | fb[i+1]) nz++; }
+            { static int _nl; if (_nl < 15) { fprintf(stderr, "[FLTNZ] flight-src blit nz=%u/%u %ubpp pitch=%u\n", nz, w*h, bpp, pitch); fflush(stderr); _nl++; } }
+            static uint32_t _maxnz_flt = 0;
+            if (nz > _maxnz_flt + 50 || (_maxnz_flt == 0 && nz > 0)) {
+                _maxnz_flt = nz;
+                FILE* fp = fopen("D:\\recomp\\pc\\xwa\\frame_flight.bmp", "wb");
+                if (fp) {
+                    uint32_t row32 = w * 3; if (row32 % 4) row32 += 4 - (row32 % 4);
+                    uint32_t img_size = row32 * h; uint8_t hdr[54] = {0};
+                    hdr[0]='B'; hdr[1]='M'; *(uint32_t*)(hdr+2)=54+img_size; *(uint32_t*)(hdr+10)=54;
+                    *(uint32_t*)(hdr+14)=40; *(int32_t*)(hdr+18)=(int32_t)w; *(int32_t*)(hdr+22)=-(int32_t)h;
+                    *(uint16_t*)(hdr+26)=1; *(uint16_t*)(hdr+28)=24; *(uint32_t*)(hdr+34)=img_size;
+                    fwrite(hdr,1,54,fp);
+                    uint8_t* row = (uint8_t*)HeapAlloc(GetProcessHeap(), 0, row32);
+                    for (uint32_t y = 0; y < h; y++) {
+                        memset(row, 0, row32);
+                        if (bpp == 32) { uint8_t* sp = fb + y*pitch;
+                            for (uint32_t x=0;x<w;x++){ row[x*3]=sp[x*4]; row[x*3+1]=sp[x*4+1]; row[x*3+2]=sp[x*4+2]; } }
+                        else { uint16_t* sp = (uint16_t*)(fb + y*pitch);
+                            for (uint32_t x=0;x<w;x++){ uint16_t c=sp[x];
+                                row[x*3]=(uint8_t)((c&0x1F)*255/31); row[x*3+1]=(uint8_t)(((c>>5)&0x3F)*255/63); row[x*3+2]=(uint8_t)(((c>>11)&0x1F)*255/31); } }
+                        fwrite(row,1,row32,fp);
+                    }
+                    HeapFree(GetProcessHeap(),0,row); fclose(fp);
+                    fprintf(stderr, "[FLTDUMP] wrote frame_flight.bmp 800x600 %ubpp nz=%u/%u\n", bpp, nz, w*h); fflush(stderr);
+                }
+            }
+        }
+    }
     /* Copy src rect to dst at (dstX, dstY) with optional source color keying */
-    if (src && dst && src->extra[0] && dst->extra[0]) {
+    uint8_t* srcBuf = surf_buf_ok(src);
+    uint8_t* dstBuf = surf_buf_ok(dst);
+    if (srcBuf && dstBuf) {
         uint32_t srcX = 0, srcY = 0, srcW = src->extra[1], srcH = src->extra[2];
         if (pSrcRect) {
             srcX = MEM32(pSrcRect + 0); /* left */
@@ -903,11 +1068,15 @@ static void dds_BltFast(void) {
         uint32_t srcPitch = src->extra[4], dstPitch = dst->extra[4];
         uint32_t bpp = src->extra[3] / 8;
         if (bpp == 0) bpp = 2;
-        /* Clip to destination bounds */
+        /* Clip to destination bounds. Guard against unsigned underflow when the
+         * blit origin lies outside the destination (dstX>dstW / dstY>dstH). */
+        if (dstX >= dstW || dstY >= dstH) { g_eax = 0; g_esp += 28; return; }
+        if (srcX >= src->extra[1] || srcY >= src->extra[2]) { g_eax = 0; g_esp += 28; return; }
         if (dstX + srcW > dstW) srcW = dstW - dstX;
         if (dstY + srcH > dstH) srcH = dstH - dstY;
-        uint8_t* srcBuf = (uint8_t*)(uintptr_t)src->extra[0];
-        uint8_t* dstBuf = (uint8_t*)(uintptr_t)dst->extra[0];
+        if (srcX + srcW > src->extra[1]) srcW = src->extra[1] - srcX;
+        if (srcY + srcH > src->extra[2]) srcH = src->extra[2] - srcY;
+        if (srcW > 16384 || srcH > 16384) { g_eax = 0; g_esp += 28; return; }
 
         /* DDBLTFAST_SRCCOLORKEY = 0x08 */
         int use_src_ck = (dwTrans & 0x08) && src->extra[6];
@@ -1189,14 +1358,24 @@ static void d3d_EnumDevices(void) {
         /* name string at scratch+64 */
         uint32_t name_va = scratch + 64;
         strcpy((char*)(uintptr_t)name_va, "MockD3D");
-        /* D3DDEVICEDESC for HAL at scratch+128 (size=0xFC, 252 bytes) */
+        /* D3DDEVICEDESC for HAL at scratch+128 (size=0xFC, 252 bytes). The game's enum callback
+         * (sub_005991CC) rejects a device unless desc+8 (dcmColorModel) is non-zero, and it needs a
+         * 16-bit render/z-buffer depth to run flight. Fill the required caps so the device is accepted. */
         uint32_t hal_desc_va = scratch + 128;
-        MEM32(hal_desc_va) = 252; /* dwSize */
-        MEM32(hal_desc_va + 4) = 0x1F; /* dwFlags - all caps */
+        MEM32(hal_desc_va) = 252;          /* dwSize */
+        MEM32(hal_desc_va + 4) = 0x1F;      /* dwFlags */
+        MEM32(hal_desc_va + 8) = 2;         /* dcmColorModel = D3DCOLOR_RGB (the accept gate) */
+        MEM32(hal_desc_va + 0xC) = 0xFFFF;  /* dwDevCaps - broad */
+        MEM32(hal_desc_va + 0x24) = 0x400;  /* dwDeviceRenderBitDepth = DDBD_16 */
+        MEM32(hal_desc_va + 0x28) = 0x400;  /* dwDeviceZBufferBitDepth = DDBD_16 */
         /* D3DDEVICEDESC for HEL at scratch+384 */
         uint32_t hel_desc_va = scratch + 384;
         MEM32(hel_desc_va) = 252;
         MEM32(hel_desc_va + 4) = 0x1F;
+        MEM32(hel_desc_va + 8) = 2;
+        MEM32(hel_desc_va + 0xC) = 0xFFFF;
+        MEM32(hel_desc_va + 0x24) = 0x400;
+        MEM32(hel_desc_va + 0x28) = 0x400;
 
         uint32_t save_esp = g_esp;
         PUSH32(g_esp, ctx);
@@ -1267,6 +1446,7 @@ static void d3ddev_CreateExecuteBuffer(void) {
     uint32_t bufsize = MEM32(pDesc + 8); /* dwBufferSize at offset 8 */
     if (bufsize == 0) bufsize = 65536;
 
+    { static int _c; if (_c < 4) { fprintf(stderr, "[D3DINIT] CreateExecuteBuffer(size=%u) — 3D render pipeline set up\n", bufsize); fflush(stderr); _c++; } }
     mock_com_obj_t* eb = alloc_mock(MOCK_TAG_D3DEXECBUF, g_d3dexecbuf_vtable_addr);
     /* Allocate actual buffer for execute buffer data */
     uint8_t* buf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, bufsize);
@@ -1328,6 +1508,7 @@ static void d3ddev_GetCaps(void) {
 }
 
 static void d3ddev_BeginScene(void) {
+    { static int _c; if (_c < 4) { fprintf(stderr, "[D3DSCENE] BeginScene called\n"); fflush(stderr); _c++; } }
     d3d11_begin_scene();
     g_eax = 0;
     g_esp += 8;
@@ -1339,9 +1520,21 @@ static void d3ddev_EndScene(void) {
     g_esp += 8;
 }
 
+/* Expose a mock IDirect3DDevice object (guest address) for force-launch flight rendering.
+ * The game's device-create (sub_0059453F) is skipped under force-launch, leaving the device
+ * interface global 0x7B15BC null; main.c points it here at flight-init so the 3D execute-buffer
+ * render path (sub_00597F9F -> device->Execute) reaches d3ddev_Execute -> d3d11 instead of crashing. */
+uint32_t com_ensure_d3d_device(void) {
+    static mock_com_obj_t* dev = NULL;
+    if (!dev && g_d3ddevice_vtable_addr) dev = alloc_mock(MOCK_TAG_D3D, g_d3ddevice_vtable_addr);
+    return dev ? (uint32_t)(uintptr_t)dev : 0;
+}
+
 static void d3ddev_Execute(void) {
     /* this=esp+4, pEB=esp+8, pViewport=esp+12, flags=esp+16 */
     uint32_t pEB = MEM32(g_esp + 8);
+    { static int _c; if (_c < 8) { uint32_t vc = 0; if (pEB) { mock_com_obj_t* e=(mock_com_obj_t*)(uintptr_t)pEB; vc=e->extra[3]; }
+        fprintf(stderr, "[D3DEXEC] IDirect3DDevice::Execute called: pEB=0x%X vertexCount=%u\n", pEB, vc); fflush(stderr); _c++; } }
 
     if (pEB && d3d11_is_initialized()) {
         mock_com_obj_t* eb = (mock_com_obj_t*)(uintptr_t)pEB;
@@ -1775,6 +1968,22 @@ static void ds_CreateSoundBuffer(void) {
     g_esp += 20;
 }
 
+/* IDirectSound::DuplicateSoundBuffer(this, pOriginal, ppDuplicate). The prior stub returned S_OK but
+ * left *ppDuplicate NULL, so callers (per-craft engine-sound setup) dereferenced null and crashed.
+ * Return a real mock DSB, mirroring CreateSoundBuffer. */
+static void ds_DuplicateSoundBuffer(void) {
+    /* this=esp+4, pOriginal=esp+8, ppDuplicate=esp+12 */
+    uint32_t ppDup = MEM32(g_esp + 12);
+    mock_com_obj_t* buf = alloc_mock(MOCK_TAG_DSBUFFER, g_dsbuffer_vtable_addr);
+    uint8_t* abuf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 32768);
+    buf->extra[0] = (uint32_t)(uintptr_t)abuf;
+    buf->extra[1] = 32768;
+    if (ppDup) MEM32(ppDup) = (uint32_t)(uintptr_t)buf;
+    COM_LOG("[COM] IDirectSound::DuplicateSoundBuffer -> 0x%08X\n", (uint32_t)(uintptr_t)buf);
+    g_eax = 0;
+    g_esp += 16;
+}
+
 static void ds_SetCooperativeLevel(void) {
     /* this=esp+4, hwnd=esp+8, level=esp+12 */
     g_eax = 0;
@@ -1909,7 +2118,73 @@ static void dplay_QueryInterface(void) {  /* (this, riid, ppv) */
     g_eax = 0;
     g_esp += 16;
 }
+/* ---- DirectPlay single-player LOOPBACK message queue (XWA_DPLOOP) ----
+ * XWA routes SP mission-load + game-state over a loopback DirectPlay session:
+ * the game serializes an outgoing message (sub_52CF50 -> body @0xA21BE5, length
+ * @0xA21DE5) and later polls Receive to get it back. The old stub returned
+ * NOMESSAGES, so the mission-load message was never delivered and no world
+ * objects spawned (objcount=0). This queue captures each send and replays it. */
+#define DP_Q_CAP 64
+static struct { uint8_t data[0x400]; uint32_t len; } g_dp_q[DP_Q_CAP];
+static uint32_t g_dp_q_head, g_dp_q_tail;   /* tail=next write, head=next read */
+static int g_dploop = -1;
+int g_dp_active = 0;   /* set by the UI driver only during mission-load screens, so the
+                        * loopback doesn't replay unrelated startup/frontend messages */
+static void dp_enqueue(uint32_t lpData, uint32_t len);
+void com_dplay_log_send(uint32_t len);
+/* ponytail (XWA_DPLOOP): sub_0052CEE0 serializes an outgoing DP message via sub_0052CF50
+ * into body buffer 0xA219D9 with byte-length at 0xA21BD9. Capture it here (called at the
+ * end of sub_0052CEE0) and queue it so dplay_Receive can loop it back to the game's own
+ * message-dispatch — which is what spawns world objects on the mission-setup command. */
+void com_dplay_capture_send(void) {
+    uint32_t len = MEM32(0xA21BD9u);
+    if (len == 0 || len > 0x400) return;
+    { static int _c; if (_c < 12) { fprintf(stderr, "[DPLOOP] capture@52CEE0: len=%u hdr=0x%02X 0x%02X 0x%02X\n",
+        len, MEM8(0xA219D9u), MEM8(0xA219DAu), MEM8(0xA219DBu)); fflush(stderr); _c++; } }
+    dp_enqueue(0xA219D9u, len);
+}
+/* Enqueue a sent message (lpData/len are guest addresses/size) for loopback. */
+static void dp_enqueue(uint32_t lpData, uint32_t len) {
+    if (g_dploop < 0) g_dploop = getenv("XWA_DPLOOP") ? 1 : 0;
+    if (!g_dploop || !g_dp_active) return;
+    if (!lpData || len == 0 || len > 0x400) return;
+    { static int _c; if (_c < 16) { fprintf(stderr, "[DPLOOP] Send captured: len=%u data=0x%X hdr=0x%02X\n",
+        len, lpData, MEM8(lpData)); fflush(stderr); _c++; } }
+    uint32_t slot = g_dp_q_tail % DP_Q_CAP;
+    for (uint32_t i = 0; i < len; i++) g_dp_q[slot].data[i] = MEM8(lpData + i);
+    g_dp_q[slot].len = len;
+    g_dp_q_tail++;
+    if (g_dp_q_tail - g_dp_q_head > DP_Q_CAP) g_dp_q_head = g_dp_q_tail - DP_Q_CAP;
+}
+/* IDirectPlay4::Send(this, idFrom, idTo, dwFlags, lpData, dwDataSize) — 6 args */
+static void dplay_Send(void) {
+    com_dplay_log_send(MEM32(g_esp + 0x18));
+    dp_enqueue(MEM32(g_esp + 0x14), MEM32(g_esp + 0x18));
+    g_eax = 0; g_esp += 28;
+}
+/* IDirectPlay4::SendEx(this, idFrom, idTo, dwFlags, lpData, dwDataSize, prio, timeout, ctx, msgid) — 10 args */
+static void dplay_SendEx(void) {
+    com_dplay_log_send(MEM32(g_esp + 0x18));
+    dp_enqueue(MEM32(g_esp + 0x14), MEM32(g_esp + 0x18));
+    g_eax = 0; g_esp += 44;
+}
 static void dplay_Receive(void) {  /* (this, lpidFrom, lpidTo, flags, lpData, lpdwSize) */
+    if (g_dploop < 0) g_dploop = getenv("XWA_DPLOOP") ? 1 : 0;
+    if (g_dploop < 0) g_dploop = getenv("XWA_DPLOOP") ? 1 : 0;
+    if (g_dploop && g_dp_active && g_dp_q_head != g_dp_q_tail) {
+        uint32_t lpData = MEM32(g_esp + 0x14);
+        uint32_t lpSize = MEM32(g_esp + 0x18);
+        struct { uint8_t data[0x400]; uint32_t len; } *m = &g_dp_q[g_dp_q_head % DP_Q_CAP];
+        uint32_t n = m->len; if (n > 0x200) n = 0x200;
+        if (lpData) for (uint32_t i = 0; i < n; i++) MEM8(lpData + i) = m->data[i];
+        if (lpSize) MEM32(lpSize) = n;
+        g_dp_q_head++;
+        if (MEM32(g_esp + 8))  MEM32(MEM32(g_esp + 8))  = 1; /* lpidFrom = peer 1 */
+        if (MEM32(g_esp + 0xC)) MEM32(MEM32(g_esp + 0xC)) = 1; /* lpidTo = self 1 */
+        g_eax = 0;                 /* DP_OK — message delivered */
+        g_esp += 28;
+        return;
+    }
     g_eax = 0x88770014u;           /* DPERR_NOMESSAGES */
     g_esp += 28;
 }
@@ -1919,6 +2194,50 @@ static void dplay_GetMessageCount(void) {  /* (this, idPlayer, lpdwCount) */
     g_eax = 0;
     g_esp += 16;
 }
+/* ponytail (#39): IDirectPlay4::CreatePlayer — the stub returned DP_OK but left the OUT player-id
+ * unset, so the game never had a valid local player and never generated per-FG object-create
+ * messages. Assign a real DPID so the game treats itself as a joined player/host. */
+static uint32_t g_dp_next_pid = 1;
+static void dplay_CreatePlayer(void) {  /* (this, lpidPlayer, lpName, hEvent, lpData, dwSize, dwFlags) */
+    uint32_t lpid = MEM32(g_esp + 8);
+    uint32_t pid = g_dp_next_pid++;
+    if (lpid) MEM32(lpid) = pid;
+    { static int _c; if (_c < 8) { fprintf(stderr, "[DP] CreatePlayer -> pid=%u (lpid=0x%X flags=0x%X)\n",
+        pid, lpid, MEM32(g_esp + 0x1C)); fflush(stderr); _c++; } }
+    g_eax = 0; g_esp += 32;
+}
+static void dplay_Open(void) {  /* (this, lpsd, dwFlags) */
+    { static int _c; if (_c < 6) { fprintf(stderr, "[DP] Open(flags=0x%X)\n", MEM32(g_esp + 0xC)); fflush(stderr); _c++; } }
+    g_eax = 0; g_esp += 16;
+}
+/* #60: session-setup method logging to capture the real DirectPlay handshake. */
+static void dplay_EnumConnections(void) { /* (this, lpguidApp, lpEnumCb, lpCtx, dwFlags) — 5 */
+    fprintf(stderr, "[DP] EnumConnections(guidApp=0x%X cb=0x%X ctx=0x%X flags=0x%X)\n",
+        MEM32(g_esp+8), MEM32(g_esp+0xC), MEM32(g_esp+0x10), MEM32(g_esp+0x14)); fflush(stderr);
+    g_eax = 0; g_esp += 24;
+}
+static void dplay_InitializeConnection(void) { /* (this, lpConnection, dwFlags) — 3 */
+    fprintf(stderr, "[DP] InitializeConnection(lpConn=0x%X flags=0x%X)\n", MEM32(g_esp+8), MEM32(g_esp+0xC)); fflush(stderr);
+    g_eax = 0; g_esp += 16;
+}
+static void dplay_EnumSessions(void) { /* (this, lpsd, dwTimeout, lpEnumCb, lpCtx, dwFlags) — 6 */
+    fprintf(stderr, "[DP] EnumSessions(lpsd=0x%X timeout=%u cb=0x%X flags=0x%X)\n",
+        MEM32(g_esp+8), MEM32(g_esp+0xC), MEM32(g_esp+0x10), MEM32(g_esp+0x18)); fflush(stderr);
+    g_eax = 0; g_esp += 28;
+}
+static void dplay_GetCaps_dp(void) { /* (this, lpDPCaps, dwFlags) — 3 */
+    fprintf(stderr, "[DP] GetCaps(lpCaps=0x%X flags=0x%X)\n", MEM32(g_esp+8), MEM32(g_esp+0xC)); fflush(stderr);
+    g_eax = 0; g_esp += 16;
+}
+static void dplay_Close_dp(void) { /* (this) — 1 */
+    fprintf(stderr, "[DP] Close()\n"); fflush(stderr);
+    g_eax = 0; g_esp += 8;
+}
+void com_dplay_log_send(uint32_t len);
+void com_dplay_log_send(uint32_t len) {
+    static int _c; if (_c < 20) { fprintf(stderr, "[DP] Send len=%u g_dp_active=%d\n", len, g_dp_active); fflush(stderr); _c++; }
+}
+
 /* Allocate a mock IDirectPlay4 object; returns its guest address (0 if vtable
  * not yet built). Used by the DirectPlayCreate bridge + CoCreateInstance. */
 uint32_t com_alloc_dplay_object(void) {
@@ -2217,7 +2536,7 @@ void com_mocks_init(void) {
         funcs[2]  = dd_Release;             /* Release */
         funcs[3]  = ds_CreateSoundBuffer;   /* CreateSoundBuffer (4) */
         funcs[4]  = com_stub_2arg;          /* GetCaps */
-        funcs[5]  = com_stub_3arg;          /* DuplicateSoundBuffer */
+        funcs[5]  = ds_DuplicateSoundBuffer; /* DuplicateSoundBuffer */
         funcs[6]  = ds_SetCooperativeLevel; /* SetCooperativeLevel (3) */
         funcs[7]  = com_stub_1arg;          /* Compact */
         funcs[8]  = com_stub_2arg;          /* GetSpeakerConfig */
@@ -2275,17 +2594,17 @@ void com_mocks_init(void) {
         funcs[1]  = dd_AddRef;              /* AddRef (1) */
         funcs[2]  = dd_Release;             /* Release (1) */
         funcs[3]  = com_stub_3arg;          /* AddPlayerToGroup (3) */
-        funcs[4]  = com_stub_1arg;          /* Close (1) */
+        funcs[4]  = dplay_Close_dp;         /* Close (1) */
         funcs[5]  = com_stub_6arg;          /* CreateGroup (6) */
-        funcs[6]  = com_stub_7arg;          /* CreatePlayer (7) */
+        funcs[6]  = dplay_CreatePlayer;     /* CreatePlayer (7) */
         funcs[7]  = com_stub_3arg;          /* DeletePlayerFromGroup (3) */
         funcs[8]  = com_stub_2arg;          /* DestroyGroup (2) */
         funcs[9]  = com_stub_2arg;          /* DestroyPlayer (2) */
         funcs[10] = com_stub_6arg;          /* EnumGroupPlayers (6) */
         funcs[11] = com_stub_5arg;          /* EnumGroups (5) */
         funcs[12] = com_stub_5arg;          /* EnumPlayers (5) */
-        funcs[13] = com_stub_6arg;          /* EnumSessions (6) */
-        funcs[14] = com_stub_3arg;          /* GetCaps (3) */
+        funcs[13] = dplay_EnumSessions;     /* EnumSessions (6) */
+        funcs[14] = dplay_GetCaps_dp;       /* GetCaps (3) */
         funcs[15] = com_stub_5arg;          /* GetGroupData (5) */
         funcs[16] = com_stub_4arg;          /* GetGroupName (4) */
         funcs[17] = dplay_GetMessageCount;  /* GetMessageCount (3) */
@@ -2295,9 +2614,9 @@ void com_mocks_init(void) {
         funcs[21] = com_stub_4arg;          /* GetPlayerName (4) */
         funcs[22] = com_stub_3arg;          /* GetSessionDesc (3) */
         funcs[23] = com_stub_2arg;          /* Initialize (2) */
-        funcs[24] = com_stub_3arg;          /* Open (3) */
+        funcs[24] = dplay_Open;             /* Open (3) */
         funcs[25] = dplay_Receive;          /* Receive (6) */
-        funcs[26] = com_stub_6arg;          /* Send (6) */
+        funcs[26] = dplay_Send;             /* Send (6) — loopback capture */
         funcs[27] = com_stub_5arg;          /* SetGroupData (5) */
         funcs[28] = com_stub_4arg;          /* SetGroupName (4) */
         funcs[29] = com_stub_5arg;          /* SetPlayerData (5) */
@@ -2306,10 +2625,10 @@ void com_mocks_init(void) {
         funcs[32] = com_stub_3arg;          /* AddGroupToGroup (3) */
         funcs[33] = com_stub_7arg;          /* CreateGroupInGroup (7) */
         funcs[34] = com_stub_3arg;          /* DeleteGroupFromGroup (3) */
-        funcs[35] = com_stub_5arg;          /* EnumConnections (5) */
+        funcs[35] = dplay_EnumConnections;  /* EnumConnections (5) */
         funcs[36] = com_stub_6arg;          /* EnumGroupsInGroup (6) */
         funcs[37] = com_stub_5arg;          /* GetGroupConnectionSettings (5) */
-        funcs[38] = com_stub_3arg;          /* InitializeConnection (3) */
+        funcs[38] = dplay_InitializeConnection; /* InitializeConnection (3) */
         funcs[39] = com_stub_5arg;          /* SecureOpen (5) */
         funcs[40] = com_stub_5arg;          /* SendChatMessage (5) */
         funcs[41] = com_stub_4arg;          /* SetGroupConnectionSettings (4) */
@@ -2320,7 +2639,7 @@ void com_mocks_init(void) {
         funcs[46] = com_stub_3arg;          /* GetPlayerFlags (3) */
         funcs[47] = com_stub_3arg;          /* GetGroupOwner (3) */
         funcs[48] = com_stub_3arg;          /* SetGroupOwner (3) */
-        funcs[49] = com_stub_10arg;         /* SendEx (10) */
+        funcs[49] = dplay_SendEx;           /* SendEx (10) — loopback capture */
         funcs[50] = com_stub_6arg;          /* GetMessageQueue (6) */
         funcs[51] = com_stub_3arg;          /* CancelMessage (3) */
         funcs[52] = com_stub_4arg;          /* CancelPriority (4) */

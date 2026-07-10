@@ -16774,5 +16774,11 @@
   "address_int": 5933472,
   "name": "sub_005A89A0",
   "num_instructions": 151
+ },
+ {
+  "address": "0x004D3130",
+  "address_int": 5058864,
+  "name": "sub_004D3130",
+  "num_instructions": 181
  }
 ]

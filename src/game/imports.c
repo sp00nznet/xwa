@@ -381,6 +381,8 @@ static void bridge_GlobalAlloc_005A908C(void) { /* KERNEL32.dll:GlobalAlloc (2 a
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
     if (fn) g_eax = fn(a0, a1);
+    if (getenv("XWA_DRIVERENDER") && g_eax == 0)
+        fprintf(stderr, "[ALLOCFAIL] GlobalAlloc(flags=0x%X, size=%u) -> NULL\n", a0, a1), fflush(stderr);
     g_esp += 12;
 }
 
@@ -591,6 +593,18 @@ static void bridge_GlobalMemoryStatus_005A90D8(void) { /* KERNEL32.dll:GlobalMem
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalMemoryStatus");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
+    /* On >4GB machines GlobalMemoryStatus saturates the 32-bit fields to 0xFFFFFFFF, which the
+     * 1999 game reads as signed (-1) and its `jg` memory-tier checks then fail -> "Not Enough
+     * Memory". Clamp to a healthy ~1GB machine (all positive as signed 32-bit) so the checks pass. */
+    if (a0) {
+        MEM32(a0 + 0x04) = 0;            /* dwMemoryLoad   */
+        MEM32(a0 + 0x08) = 0x40000000u;  /* dwTotalPhys    1GB */
+        MEM32(a0 + 0x0C) = 0x30000000u;  /* dwAvailPhys  768MB */
+        MEM32(a0 + 0x10) = 0x40000000u;  /* dwTotalPageFile    */
+        MEM32(a0 + 0x14) = 0x30000000u;  /* dwAvailPageFile    */
+        MEM32(a0 + 0x18) = 0x7FFF0000u;  /* dwTotalVirtual     */
+        MEM32(a0 + 0x1C) = 0x40000000u;  /* dwAvailVirtual     */
+    }
     g_esp += 8;
 }
 

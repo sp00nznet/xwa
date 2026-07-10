@@ -219,6 +219,7 @@ def linear_disassemble_function(md, code_data, code_start, func_start, func_end)
     raw = code_data[offset:offset + size]
     instructions = []
     leaders = {func_start}  # First instruction is always a leader
+    max_fwd_target = func_start  # furthest forward branch target seen so far
 
     for insn in md.disasm(raw, func_start):
         li = LinearInstruction(insn)
@@ -228,16 +229,23 @@ def linear_disassemble_function(md, code_data, code_start, func_start, func_end)
             target = li.get_branch_target()
             if target and func_start <= target < func_end:
                 leaders.add(target)
+                if target > max_fwd_target:
+                    max_fwd_target = target
             leaders.add(li.end_address)  # fallthrough
         elif li.is_uncond_jump:
             target = li.get_branch_target()
             if target and func_start <= target < func_end:
                 leaders.add(target)
+                if target > max_fwd_target:
+                    max_fwd_target = target
             # Next instruction (if any) is a new leader
             leaders.add(li.end_address)
 
-        # Stop at int3 / padding
-        if li.mnemonic == 'int3':
+        # Stop at int3 ONLY when it's genuine trailing padding, i.e. no forward
+        # branch target lies beyond it. A `je +1` that skips a 0xCC byte mid-function
+        # (and similar) must NOT terminate the sweep, or the blocks it guards (only
+        # reachable via that forward jcc) are lost and their jumps leak as ITAILs.
+        if li.mnemonic == 'int3' and li.address >= max_fwd_target:
             break
 
     # Reconstruct switch jump-tables: materialise their case targets as leaders

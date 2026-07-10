@@ -11,8 +11,43 @@
 #include <winternl.h>  /* NtCurrentTeb() */
 #include <stdio.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <dbghelp.h>
 #include "recomp/recomp_types.h"
+
+/* Real-CRT sprintf bridge. The June relift left the guest _vsnprintf/_output
+ * (sub_0059A680 -> sub_0059E580) broken: they crash walking the format/arg
+ * stream even for a trivial "times%u.abp" format (see sub_00556B20). Rather
+ * than debug 894 lines of relifted printf, delegate to the host CRT. cdecl
+ * layout at entry (RECOMP_CALL already pushed the return address):
+ *   [esp+4]=buffer, [esp+8]=format, [esp+0xC..]=varargs.
+ * Guest memory is identity-mapped (g_mem_base=0), so guest pointers are host
+ * pointers and the guest vararg block is a valid x86 va_list. Caller (cdecl)
+ * cleans the args, so we only pop the return address. */
+void xwa_sprintf_bridge(void) {
+    char* buf = (char*)ADDR(MEM32(g_esp + 4));
+    const char* fmt = (const char*)ADDR(MEM32(g_esp + 8));
+    va_list ap = (va_list)(uintptr_t)ADDR(g_esp + 0xC);
+    int n = vsprintf(buf, fmt, ap);
+    g_eax = (uint32_t)n;
+    g_esp += 4;
+}
+
+/* Real-CRT fprintf bridge for the guest fprintf (sub_0059BEE0). Same relift
+ * breakage as sprintf, but it targets a GUEST FILE* (arg0) — the game's Deus
+ * debug logger — whose guest FILE/_output machinery derefs NULL and crashes
+ * during flight init. The guest FILE* can't be handed to the host CRT, and the
+ * game never reads its own debug log, so format the args (for a correct return
+ * count) and drop the output. cdecl: [esp+4]=FILE*, [esp+8]=format, [esp+0xC..]=varargs. */
+void xwa_fprintf_bridge(void) {
+    const char* fmt = (const char*)ADDR(MEM32(g_esp + 8));
+    va_list ap = (va_list)(uintptr_t)ADDR(g_esp + 0xC);
+    char tmp[1024];
+    int n = _vsnprintf(tmp, sizeof(tmp) - 1, fmt, ap);
+    if (n < 0) n = (int)sizeof(tmp) - 1;
+    g_eax = (uint32_t)n;
+    g_esp += 4;
+}
 
 /* ============================================================
  * Global Register Definitions
@@ -107,6 +142,38 @@ static void dump_trace_ring(void) {
     }
 }
 
+/* Hang watchdog (opt-in via XWA_WATCHDOG): every few seconds, write the call/icall
+ * counters + the tail of the trace ring to a file. If the recomp hangs (e.g. flight-init
+ * spins), the last dump shows which functions are spinning. */
+static DWORD WINAPI watchdog_loop_thread(LPVOID p) {
+    (void)p;
+    uint32_t last_calls = 0; int stall = 0;
+    for (;;) {
+        Sleep(4000);
+        uint32_t calls = g_total_calls, icalls = g_icall_count, tidx = g_trace_ring_idx;
+        uint32_t delta = calls - last_calls;
+        HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_watchdog.log",
+            GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            char buf[256]; DWORD wr;
+            int n = snprintf(buf, sizeof(buf),
+                "=== Watchdog ===\r\ncalls=%u (delta=%u over 4s) icalls=%u trace_idx=%u stall=%d\r\n"
+                "g_esp=0x%08X eax=0x%08X ecx=0x%08X edx=0x%08X\r\n\r\n=== Trace Ring (last 96) ===\r\n",
+                calls, delta, icalls, tidx, stall, g_esp, g_eax, g_ecx, g_edx);
+            WriteFile(h, buf, n, &wr, NULL);
+            uint32_t start = (tidx >= 96) ? (tidx - 96) : 0;
+            for (uint32_t i = start; i < tidx; i++) {
+                uint32_t idx = i & (TRACE_RING_SIZE - 1);
+                if (g_trace_ring[idx][0]) { n = snprintf(buf, sizeof(buf), "  %s", g_trace_ring[idx]); WriteFile(h, buf, n, &wr, NULL); }
+            }
+            CloseHandle(h);
+        }
+        if (delta == 0) stall++; else stall = 0;
+        last_calls = calls;
+    }
+    return 0;
+}
+
 /* Helper: write string to Win32 HANDLE */
 static void wf(HANDLE h, const char* s) {
     DWORD w;
@@ -115,8 +182,33 @@ static void wf(HANDLE h, const char* s) {
 
 static uint32_t g_demand_page_count = 0;
 
+static uint32_t g_div0_skips = 0;
+
 static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    /* Integer divide-by-zero survival: the flight scene render (projection/scale math, incl. MSVC's 64-bit
+     * __aulldiv/__aulldvrm helpers) divides by view/camera params that are 0 under force-launch. Decode the
+     * faulting div/idiv at EIP, set quotient(EAX)/remainder(EDX)=0, and step past it so the render survives
+     * (degenerate frame, not a crash). Only fires under XWA_RUNSCENE. */
+    if ((code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_INT_OVERFLOW) && getenv("XWA_RUNSCENE")) {
+        CONTEXT* ctx = ep->ContextRecord;
+        uint8_t* p = (uint8_t*)ctx->Eip;
+        int len = 0;
+        while (*p==0x66||*p==0x67||*p==0xF0||*p==0xF2||*p==0xF3||(*p>=0x26&&*p<=0x3E&&(*p&7)==6)||*p==0x64||*p==0x65) { p++; len++; }
+        if (*p==0xF6 || *p==0xF7) {           /* div/idiv */
+            p++; len++;
+            uint8_t modrm = *p++; len++;
+            int mod = modrm>>6, rm = modrm&7;
+            if (mod!=3 && rm==4) { len++; }    /* SIB byte */
+            if (mod==1) len+=1; else if (mod==2) len+=4; else if (mod==0 && rm==5) len+=4;
+            ctx->Eax = 0; ctx->Edx = 0; ctx->Eip += len;
+            g_div0_skips++;
+            if (g_div0_skips <= 8 || (g_div0_skips & 0x3FF)==0)
+                fprintf(stderr, "[DIV0] skipped divide-by-zero #%u at EIP=0x%p (len=%d)\n", g_div0_skips, (void*)(uintptr_t)ctx->Eip, len);
+            return EXCEPTION_CONTINUE_EXECUTION;
+        }
+    }
 
     /* Demand-paging: auto-commit pages for accesses in the extended BSS range.
      * The original game's data extends past the PE .data VSize, and we can't
@@ -463,6 +555,70 @@ frame_skip:
     #undef esp
 }
 
+/* ponytail: drive the natural 3D flight render from present().
+ * 0x7828D0 (render buffer) is 0 because sub_00509530's render branch never runs (called once,
+ * takes INIT branch). sub_00511A90 allocates the buffer + registers the view; sub_004340D0(0)
+ * dispatches the per-viewport render (-> sub_00433850 -> ICALL 0x9109C0). Both are the real
+ * game functions, called with correct args (the old d3d11 injection passed a garbage stack arg). */
+void xwa_drive_render(void) {
+    extern void sub_00511A90(void);
+    extern void sub_004340D0(void);
+    static int _in = 0;
+    #define esp g_esp
+    if (_in) return;
+    _in = 1;
+    if (MEM32(0x7828D0) == 0) {
+        RECOMP_CALL(sub_00511A90);           /* alloc render buffer + register view (one-time) */
+        fprintf(stderr, "[DRIVE] after 511A90: 7828D0=0x%X 7828D4=%u\n",
+                MEM32(0x7828D0), MEM32(0x7828D4)); fflush(stderr);
+    }
+    PUSH32(esp, 0);                          /* viewport index 0 (player cockpit view) */
+    RECOMP_CALL(sub_004340D0);               /* -> sub_00433850 -> scene render */
+    esp += 4;
+    _in = 0;
+    #undef esp
+}
+
+/* #45: drive the host-spawn (sub_004F6510 -> sub_004F6B70 create loop) from present, ONCE, when the
+ * mission is fully loaded (FGcount=20) — the POSTSPAWN drive was too early (FG table not populated).
+ * Set the host-spawn entry preconditions (0x7827E4==0 && 0x7D4C4D==1). XWA_DPSPAWN. */
+void xwa_drive_spawn(void) {
+    extern void sub_004F6510(void);
+    static int _done = 0, _in = 0;
+    #define esp g_esp
+    if (_in || _done) return;
+    if (MEM32(0x63185C) < 2) return;         /* wait for FGcount populated */
+    _in = 1; _done = 1;
+    { int v=0,s; for(s=0;s<0x40;s++){ uint32_t t=MEM32(s*0xBCFu+0x8B94E0u); if(t!=0xFFFFu&&t!=0)v++; }
+      fprintf(stderr,"[SPAWN45] driving sub_004F6510 from present: FGcount=%u validslots_before=%d\n", MEM32(0x63185C), v); fflush(stderr); }
+    /* #63: direct spawn — tag each flight-group's object slot ACTIVE (+0x8B94F1=2) and set its FG index
+     * (+0), then drive sub_005064D0 (the spawn scan) which builds (sub_0041EF60) + activates each. */
+    /* Directly tagging slots active + calling sub_005064D0 CRASHES: sub_0041EF60 (build) reads craft-type
+     * data that isn't set on fake-tagged slots. Gated behind XWA_FORCESPAWN so the default run reaches
+     * flight with the real world-build objects (validslots_before) and we can observe the render first. */
+    if (getenv("XWA_FORCESPAWN")) { extern void sub_005064D0(void);
+      uint32_t fgt = MEM32(0x7B33C4u), fgn = MEM32(0x63185Cu), i, tagged = 0;
+      for (i = 0; i < fgn && i < 0x40; i++) {
+          uint32_t slot = MEM8(fgt + i*0x27u + 5);
+          if (slot < 0x40u) {
+              uint32_t base = slot*0xBCFu + 0x8B94E0u;
+              if (MEM32(base) == 0xFFFFu || MEM32(base) == 0) {   /* only fill empty slots */
+                  MEM32(base) = i;                 /* +0  = FG index */
+                  MEM8(base + 0x11) = 2;           /* +0x11 = active */
+              }
+              tagged++;
+          }
+      }
+      MEM32(0x7827E4u) = 0; MEM8(0x7D4C4Du) = 1; MEM8(0x80DB68u) = 0;
+      if (MEM32(0x910DECu) < 0x40u) MEM32(0x910DECu) = 0x40u;   /* scan all slots */
+      fprintf(stderr, "[SPAWN63] tagged %u FG slots; driving sub_005064D0; 910DEC=%u\n", tagged, MEM32(0x910DECu)); fflush(stderr);
+      RECOMP_CALL(sub_005064D0); }
+    { int v=0,s; for(s=0;s<0x40;s++){ uint32_t t=MEM32(s*0xBCFu+0x8B94E0u); if(t!=0xFFFFu&&t!=0)v++; }
+      fprintf(stderr,"[SPAWN45] validslots_after=%d\n", v); fflush(stderr); }
+    _in = 0;
+    #undef esp
+}
+
 /* sub_00584F30: Outer init callback.
  * Calls sound init, game init callback, and display init.
  * Original code: 0x00584F30-0x00584F41 */
@@ -579,6 +735,12 @@ void xwa_ui_driver(void) {
     static uint32_t last_cb = 0;
     static int fip = 0;            /* frames since the active screen last changed */
 
+    /* Activate the DirectPlay loopback (com_mocks) only on the mission-load screens
+     * (skirmish lobby / loading / flight-init), so it doesn't replay unrelated
+     * startup/frontend messages (which cause a clean early exit). */
+    { extern int g_dp_active;
+      g_dp_active = (cb == 0x005438B0 || cb == 0x005316B0 || cb == 0x005710F0) ? 1 : 0; }
+
     /* Clear the dialog-auto-confirm each frame; it's re-armed below only while the skirmish cb is active,
      * so boot/concourse dialogs are never auto-confirmed. */
     { extern int g_flydemo_confirm; if (cb != 0x005438B0) g_flydemo_confirm = 0; }
@@ -597,6 +759,15 @@ void xwa_ui_driver(void) {
                 fprintf(stderr, "[FORCEGATE] set dword_A21449=0x%08X at cb=0x%06X\n", obj, cb);
                 fflush(stderr); }
         }
+        /* #50: the host never QUEUES the per-FG create messages because there's no DP session
+         * (0x77330C=0). Give it a session object on the mission-load screens so the host-side
+         * mission-object spawn queues+sends the type-0x3E creates. XWA_DPSESS. */
+        /* #54: calling the session creator sub_0050C640(1) runs the chain (→ sub_00441EE0 →
+         * sub_0059453F) but it FAILS GRACEFULLY (returns 0, 0x77330C ends up 0) — session init fails at
+         * the DirectPlay CONNECTION level: our DP COM mock doesn't implement real EnumConnections/
+         * InitializeConnection/Open/CreatePlayer session semantics. THE ROOT: implement DirectPlay
+         * session/connection in com_mocks.c so sub_0059453F succeeds → 0x77330C set → host spawns craft.
+         * Left as a no-op. Complete blueprint (DP COM connection → session → creates → render) in #48-54. */
     }
     static uint32_t clicked = 0;   /* one-shot: which screen we've already clicked */
     if (cb != last_cb) {
@@ -608,6 +779,55 @@ void xwa_ui_driver(void) {
             cb == 0x0053B500 ? " (combat sim)" :
             cb == 0x005438B0 ? " (skirmish setup)" : "";
         fprintf(stderr, "[FLYDEMO] active screen cb -> 0x%06X (depth=%u)%s\n", cb, depth, nm);
+        if (getenv("XWA_RCTXPROBE"))
+            fprintf(stderr, "[RCTX] cb=0x%06X 7828D0(rbuf)=0x%X 7828D4=0x%X 7B1CE0(scene)=0x%X 7B1CD4(flags)=0x%X 7B1CE8=0x%X 773358(prim)=0x%X\n",
+                cb, MEM32(0x7828D0), MEM32(0x7828D4), MEM32(0x7B1CE0), MEM32(0x7B1CD4), MEM32(0x7B1CE8), MEM32(0x773358)), fflush(stderr);
+        /* NOTE (#123): 0x7B1CE8 (3D render context) is 0 at EVERY screen (concourse/menus/flight) — the DirectDraw
+         * 3D render-context/texture backend is NEVER built in this recomp. Primary surface 0x773358 exists (2D/HUD
+         * draws), but per-texture 3D surfaces need the render context (sub_00441EE0->sub_0059453F) which never
+         * completes on the incomplete DDraw mocks. Root of no-3D-render, project-wide. Gate behind XWA_RENDERINIT if re-added. */
+        /* XWA_RUNSCENE: on the concourse->flight transition, reset the render-object block list
+         * (head 0x7B1D08 / tail 0x7B1D0C / count 0x7B1D04). Force-launch skips sub_0059453F's
+         * re-init (@0x594936), so the flight render inherits the concourse's stale list and its
+         * first block-free (sub_00597E5F) walks into a freed concourse block -> wild write crash.
+         * Zeroing here makes flight blocks link into a fresh empty list. One-shot per transition. */
+        if (cb == 0x005710F0 && getenv("XWA_RUNSCENE")) {
+            /* NOTE: calling the REAL render-ctx init (sub_00441EE0) crashes deep in sub_00594063 on a COM
+             * mock sentinel (READ 0xDEAD0000) — the DDraw/D3D surface+device establish derefs mock returns
+             * that are still placeholders. So instead we fake just enough render state (below) to let the
+             * software/execute-buffer render path run, guarding the un-initialized pool's garbage derefs. */
+            MEM32(0x7B1D04) = 0; MEM32(0x7B1D08) = 0; MEM32(0x7B1D0C) = 0;
+            MEM32(0x77330C) = 1;   /* session/render-context flag: ungate the per-frame 3D scene render */
+            if (MEM32(0x7B1CE0) == 0) MEM32(0x7B1CE0) = 0x00B0D8A0;
+            /* Wire all three D3D device-interface globals used by the flight render to the mock device:
+             * 0x7B15BC (execute submit), 0x7B1D14 (CreateExecuteBuffer, vtable[6]), 0x7B1D18 (aux). */
+            { extern uint32_t com_ensure_d3d_device(void); uint32_t d = com_ensure_d3d_device();
+              if (d) { if (MEM32(0x7B15BC) == 0) MEM32(0x7B15BC) = d;
+                       if (MEM32(0x7B1D14) == 0) MEM32(0x7B1D14) = d;
+                       if (MEM32(0x7B1D18) == 0) MEM32(0x7B1D18) = d;
+                       if (MEM32(0x7B1180) == 0) MEM32(0x7B1180) = d; } }  /* frame Execute device (sub_005984BA) */
+            fprintf(stderr, "[RUNSCENE] render ctx: 0x77330C=%u pool=0x%08X d3ddev(BC/D14/D18)=0x%08X/0x%08X/0x%08X\n",
+                    MEM32(0x77330C), MEM32(0x7B1CE0), MEM32(0x7B15BC), MEM32(0x7B1D14), MEM32(0x7B1D18)); fflush(stderr);
+            /* PROBE (#117): drive the REAL render-context init sub_00441EE0 (which runs sub_0059453F -> sets the
+             * render-ctx pointer 0x7B1CE8 needed by the OPT geometry loader). main.c note says it crashes deep in
+             * sub_00594063 on a DirectDraw COM-mock sentinel; capture the EXACT crash to fix that one mock. */
+            if (getenv("XWA_RENDERINIT")) { static int _ri=0; if(!_ri){ _ri=1;
+                extern void sub_00441EE0(void);
+                /* sub_00441EE0(arg1=MEM32(0x773358), arg2=MEM32(0x773348)) — the DirectDraw device/surface objects
+                 * (-> 0x7B1D14/0x7B1D18). Pass them exactly as the real caller @0x50C408 does (push eax=0x773348,
+                 * push ecx=0x773358). My earlier no-arg call read stack garbage (0xDEAD0000) — that was the bug. */
+                fprintf(stderr, "[RENDERINIT] ddraw globals 773344=0x%08X 773348=0x%08X 773358=0x%08X 7B1CE4=0x%08X\n",
+                        MEM32(0x773344), MEM32(0x773348), MEM32(0x773358), MEM32(0x7B1CE4)); fflush(stderr);
+                /* 0x773348 (arg2, the secondary/back DDraw surface) is null under force-launch; the real flow sets
+                 * it = MEM32(0x773344) @0x50C226. Populate it (fall back to the valid primary 0x773358) so
+                 * sub_00441EE0 takes the real init path instead of the null-bail. */
+                if (MEM32(0x773348) == 0) { uint32_t s = MEM32(0x773344); if (!s) s = MEM32(0x773358);
+                    MEM32(0x773348) = s; fprintf(stderr, "[RENDERINIT] seeded 773348=0x%08X\n", s); fflush(stderr); }
+                uint32_t _a1 = MEM32(0x773358), _a2 = MEM32(0x773348);
+                PUSH32(g_esp, _a2); PUSH32(g_esp, _a1); PUSH32(g_esp, 0xDEAD0000u); sub_00441EE0(); g_esp += 8;
+                fprintf(stderr, "[RENDERINIT] RETURNED OK -> 0x7B1CE8=0x%08X 0x7B1D14=0x%08X 0x7B1D18=0x%08X\n",
+                        MEM32(0x7B1CE8), MEM32(0x7B1D14), MEM32(0x7B1D18)); fflush(stderr); } }
+        }
         /* On the loading/flight transitions, dump the mission-load state: is the
          * message gate open (dword_A21449), are the mission globals set, and is the
          * species/craft table (0x80DCBC) populated? This tells us whether the
@@ -628,6 +848,94 @@ void xwa_ui_driver(void) {
     }
     fip++;
 
+    /* XWA_TRAINLAUNCH: skip the flaky door-click entirely. Once the concourse is
+     * settled, run the training door's own handler sequence directly (from
+     * 0x0053A244): sub_57E370 (training-mission setup) then sub_541810(0x5316B0,0)
+     * which pushes the loading screen that loads the mission and dispatches the
+     * 3D flight loop (sub_5710F0 init / sub_49E600 frame). Training missions carry
+     * the player craft in the .tie, so this avoids the skirmish craft-config wall.
+     * Callee-saved regs are preserved (the guest game loop that called us via the
+     * PeekMessage bridge relies on ebx/esi/edi across the call). Fire once. */
+    static int tl_env = -1;
+    if (tl_env < 0) tl_env = getenv("XWA_TRAINLAUNCH") ? 1 : 0;
+    {
+        static int tl_done = 0;
+        /* The barracks<->concourse ping-pong resets `fip` (consecutive-frames) every flip, so it
+         * rarely rested 30 frames on concourse — the old cause of the intermittent launch. Count
+         * CUMULATIVE frames on EITHER the concourse (0x5397D0) or the more-stable barracks (0x55FF30)
+         * so we fire reliably regardless of the oscillation. sub_57E370/sub_541810 don't need the
+         * concourse specifically active — they set up the training mission + push the loading screen. */
+        static int conc_frames = 0;
+        if (cb == 0x005397D0 || cb == 0x0055FF30) conc_frames++;
+        if (tl_env && !tl_done && (cb == 0x005397D0 || cb == 0x0055FF30) && conc_frames >= 40) {
+            extern void sub_0057E370(void);
+            extern void sub_00541810(void);
+            extern void sub_0050EC70(void);
+            uint32_t sb = g_ebx, ss = g_esi, sd = g_edi;
+            /* XWA_DPSESSION: set the DP session-active flag (0xB0C7BC, low byte -> 0x77330C) BEFORE the
+             * world-build, so the host's create-broadcast sub_004E7A10 (gated on 0x77330C!=0 in sub_004F6510)
+             * runs and generates the 0x3E creates for the mission craft. This is the documented sole blocker
+             * (#58-59). Set it here (pre loading-screen) so it's active through the whole mission-load. */
+            if (getenv("XWA_DPSESSION")) { MEM32(0xB0C7BCu) = 1;
+                fprintf(stderr, "[DPSESSION] set 0xB0C7BC=1 (0x77330C session flag) before world-build\n"); fflush(stderr); }
+            fprintf(stderr, "[TRAINLAUNCH] invoking sub_50EC70 (craft-def load) + sub_57E370 + sub_541810(0x5316B0,0)\n");
+            fflush(stderr);
+            /* XWA_LOADCRAFT: also run the craft-definition loader (sub_0050EC70) that
+             * the SP force-launch path skips — it fills the static craft table 0x7825F8
+             * and sets _pctype-like 0x7B33C4, which the .tie/world-build derefs. */
+            if (getenv("XWA_LOADCRAFT")) {
+                PUSH32(g_esp, 0xDEAD0000u);
+                sub_0050EC70();
+                fprintf(stderr, "[TRAINLAUNCH] sub_50EC70 done: 0x7B33C4=0x%08X\n", MEM32(0x7B33C4));
+                fflush(stderr);
+            }
+            PUSH32(g_esp, 0xDEAD0000u);            /* ret addr */
+            sub_0057E370();
+            /* sub_57E370 leaves ABD7B4=2 (skirmish/message path) -> the loading screen instantly
+             * transitions to flight-init WITHOUT running sub_549330 (the .tie loader), so FGcount=0.
+             * The loading screen gets only ONE tick, too fast for the driver's cb==0x5316B0 check to
+             * catch it — so force the sub_549330 gate HERE (ABD7B4=1 non-skirmish, 9EAC20 load-pending,
+             * timer base 0 = 2s gate already elapsed). Then the loading screen's first tick loads the
+             * mission's flight groups. Gated on XWA_LOADMISSION. */
+            if (getenv("XWA_LOADMISSION")) {
+                MEM32(0xABD7B4) = 3;   /* 3 (not 1): loading screen needs !=2 for sub_549330, AND flight-init
+                                        * sub_5710F0 requires ABD7B4==3 to proceed to real flight (else it
+                                        * sends a return-to-base msg and aborts to concourse). 3 satisfies both. */
+                MEM32(0x9EAC20) = 1;
+                MEM32(0x782DE4) = 0;
+                fprintf(stderr, "[TRAINLAUNCH] forced sub_549330 gate (ABD7B4=1,9EAC20=1,timer=0)\n"); fflush(stderr);
+            }
+            PUSH32(g_esp, 0);                       /* arg1 */
+            PUSH32(g_esp, 0x005316B0u);             /* arg0 = loading-screen cb */
+            PUSH32(g_esp, 0xDEAD0000u);            /* ret addr */
+            sub_00541810();
+            g_esp += 8;                             /* cdecl: clean 2 args */
+            g_ebx = sb; g_esi = ss; g_edi = sd;
+            tl_done = 1;
+        }
+    }
+
+    /* XWA_LOADMISSION: make the loading screen 0x5316B0 call the real SP mission
+     * loader sub_549330 through its OWN handler (calling it directly from this
+     * message-pump context deadlocks — sub_549330 sends a local mission-load
+     * message and waits for the game loop to process it). The loading screen's
+     * gate (sub_5316B0 @0x005317C6/E4) fires sub_549330(0) when 0x9EAC20 != 0 AND
+     * the ~2s timer sub_0055ECE0() > 0x782DE4 + 0x7D0 elapses. Our fast transition
+     * skips it, so from here (safe memory writes only) force the load flag on and
+     * zero the timer base so the gate passes on the loading screen's next tick. */
+    {
+        static int lm = -1;
+        if (lm < 0) lm = getenv("XWA_LOADMISSION") ? 1 : 0;
+        if (lm && cb == 0x005316B0) {
+            MEM32(0xABD7B4) = 3;      /* 3: non-skirmish loader (!=2) AND flight-init's required mode (==3) */
+            MEM32(0x9EAC20) = 1;      /* mission-load pending */
+            MEM32(0x782DE4) = 0;      /* timer base 0 -> 2s gate already elapsed */
+            { static int _p; if (_p < 1) { fprintf(stderr,
+                "[LOADMISSION] forcing loading-screen sub_549330 gate (ABD7B4=1, 9EAC20=1, timer=0); AE2A8A=%u A21449=0x%X\n",
+                MEM32(0xAE2A8A), MEM32(0xA21449)); fflush(stderr); _p++; } }
+        }
+    }
+
     /* Default: button released, mouse parked off all hot-spots, so no screen sees a
      * spurious hover/click. We only deviate from this to issue one concourse click. */
     MEM32(0x9F6888) = 0;          /* clicks ungated */
@@ -641,12 +949,26 @@ void xwa_ui_driver(void) {
     static int train = -1;
     if (train < 0) train = getenv("XWA_TRAINDOOR") ? 1 : 0;
 
-    if (cb == 0x005397D0 && train) {                   /* concourse -> Training door (536,174) */
-        MEM32(0x9F65ED) = (uint32_t)(550 - 5);
-        MEM32(0x9F65F1) = (uint32_t)(200 - 5);
+    if (cb == 0x005397D0 && tl_env) {                  /* concourse: settle & let the direct-launch hook fire (no click) */
+        MEM32(0x9F4B48) = 0;
+        MEM32(0x9F4B4C) = 0;
+        MEM32(0x78397C) = 1;                           /* KEEP concourse room (was 0=barracks -> caused the
+                                                        * concourse<->barracks ping-pong vs the barracks routing). */
+        MEM32(0x9F65ED) = 0;                           /* park mouse off all hot-spots */
+        MEM32(0x9F65F1) = 0;
+    } else if (cb == 0x005397D0 && train) {            /* concourse -> Training door (sprite origin 536,174) */
+        /* Clear the barracks transition gates so the concourse SETTLES (otherwise 9F4B48/9F4B4C==3
+         * keeps firing a transition back to the barracks, oscillating concourse<->barracks and the
+         * door never gets a stable frame to be clicked). */
+        MEM32(0x9F4B48) = 0;
+        MEM32(0x9F4B4C) = 0;
+        MEM32(0x78397C) = 0;
+        /* Mirror the working combat-door offset (origin 35,174 -> click 60,210 = +25,+36). */
+        MEM32(0x9F65ED) = (uint32_t)(561 - 5);
+        MEM32(0x9F65F1) = (uint32_t)(210 - 5);
         if (fip >= 15 && (fip % 40) == 15) {
             MEM8(0x9F6884) = 1;
-            fprintf(stderr, "[FLYDEMO] click Training door (550,200) at fip=%d\n", fip);
+            fprintf(stderr, "[FLYDEMO] click Training door (561,210) at fip=%d\n", fip);
             fflush(stderr);
         }
     } else if (cb == 0x005397D0) {                      /* concourse -> Combat Simulator door (35,174) */
@@ -682,9 +1004,13 @@ void xwa_ui_driver(void) {
          * transition phase). Drive it to the concourse (78397C=1) so the combat-door click logic can run. */
         if (fip >= 20) {
             static int _bp = 0;
-            if (_bp < 3) { fprintf(stderr, "[BARRACKS] forcing 78397C=3 (combat sim); was 78397C=%u 9F4B48=%u 9F4B4C=%u\n",
-                MEM32(0x78397C), MEM32(0x9F4B48), MEM32(0x9F4B4C)); fflush(stderr); _bp++; }
-            MEM32(0x78397C) = 3;          /* screen-select: 3 -> combat sim 0x53B500 (switch case 2), skips concourse */
+            /* XWA_TRAINDOOR: route barracks -> CONCOURSE (78397C=1) so the Training-door click can fire
+             * (concourse -> sub_57E370 training setup -> sub_5316B0 loading -> sub_549330 REAL mission loader
+             * -> flight). Default: route -> combat sim (78397C=3) for the skirmish path. */
+            uint32_t sel = (train || tl_env) ? 1u : 3u;
+            if (_bp < 3) { fprintf(stderr, "[BARRACKS] forcing 78397C=%u (%s); was 78397C=%u 9F4B48=%u 9F4B4C=%u\n",
+                sel, (train||tl_env)?"concourse":"combat sim", MEM32(0x78397C), MEM32(0x9F4B48), MEM32(0x9F4B4C)); fflush(stderr); _bp++; }
+            MEM32(0x78397C) = sel;        /* 1 -> concourse 0x5397D0; 3 -> combat sim 0x53B500 */
             MEM32(0x9F4B48) = 3;          /* transition phase complete -> fire the switch */
             MEM32(0x9F4B4C) = 3;
         }
@@ -696,11 +1022,96 @@ void xwa_ui_driver(void) {
          * (sub_571DE0, 1780 lines) to emit 0x5B from the Fly button, or a genuine ready+craft for sub_552160.
          * This is the final step. Left as a no-op for now. */
         (void)fip;
+        /* XWA_ADDCRAFT: the launch gate sub_552160 fails because no player craft is
+         * configured (craft0 @0x9F5EE8=0). The add-craft handler sub_0054E4B0 sets
+         * 0x9F5EE8[slot]=selected-craft(0x9F6084) + 0x9F5EE2[slot]=type on a craft-list
+         * click. Populate slot 0 directly with a player craft so the ready-check can
+         * pass. Craft id/type via env (default 1); iterate to find valid values. */
+        if (getenv("XWA_ADDCRAFT")) {
+            /* Fake skirmish craft-slot config (only needed to pass the lobby launch
+             * gate sub_552160; NOT needed when we push the loading screen directly).
+             * Gated separately (XWA_CRAFTSLOT) because for a CAMPAIGN mission
+             * (XWA_SESSMISSION) this fake craft makes 0xB07B5B inconsistent with the
+             * mission's real craft region and crashes sub_004C40B0. */
+            if (getenv("XWA_CRAFTSLOT")) {
+                static int cid = -1, ctype = -1;
+                if (cid < 0) { const char* s = getenv("XWA_CRAFTID"); cid = s ? atoi(s) : 1; }
+                if (ctype < 0) { const char* s = getenv("XWA_CRAFTTYPE"); ctype = s ? atoi(s) : 1; }
+                MEM32(0x9F5EE8) = (uint32_t)cid;
+                MEM16(0x9F5EE0) = (uint16_t)ctype;
+                MEM16(0x9F5EE2) = 1;
+                MEM32(0x9F5EE4) = (uint32_t)cid;
+                MEM32(0x9EAC4E) = (uint32_t)cid;
+                { static int _p; if (_p < 1) { fprintf(stderr, "[ADDCRAFT] set slot0 craft id=%d type=%d\n", cid, ctype); fflush(stderr); _p++; } }
+            }
+
+            /* Once the craft is configured (sub_552160 passes), push the loading
+             * screen directly so sub_549330(0) builds the world (the lobby's own
+             * launch only calls sub_549330(1), which queues rather than builds).
+             * With KEEPCRAFT the craft-def data is wired, so the build shouldn't
+             * fault. Fire once after the lobby settles. Preserve callee-saved regs. */
+            static int pushed = 0;
+            if (!pushed && fip >= 200 && getenv("XWA_PUSHLOAD")) {
+                extern void sub_00541810(void);
+                extern void sub_0057E8D0(void);
+                uint32_t sb = g_ebx, ss = g_esi, sd = g_edi;
+                /* Compute 0xB07B5B (per-mission craft-count/size from the craft table
+                 * 0x9EB8E0) that the training-setup normally sets but the skirmish
+                 * path skips — sub_00415760 divides by it during the .tie parse. */
+                fprintf(stderr, "[ADDCRAFT] sub_57E8D0 (compute 0xB07B5B) + push loading screen; B07B5B was 0x%X\n", MEM32(0xB07B5B));
+                fflush(stderr);
+                PUSH32(g_esp, 0xDEAD0000u);
+                sub_0057E8D0();
+                fprintf(stderr, "[ADDCRAFT] after sub_57E8D0: B07B5B=0x%X\n", MEM32(0xB07B5B));
+                fflush(stderr);
+                PUSH32(g_esp, 0);
+                PUSH32(g_esp, 0x005316B0u);
+                PUSH32(g_esp, 0xDEAD0000u);
+                sub_00541810();
+                g_esp += 8;
+                g_ebx = sb; g_esi = ss; g_edi = sd;
+                pushed = 1;
+            }
+        }
     } else {
         MEM32(0x9F65ED) = (uint32_t)(5 - 5);          /* park mouse top-left, off everything */
         MEM32(0x9F65F1) = (uint32_t)(5 - 5);
     }
     (void)clicked;
+
+    /* XWA_DRIVEREND: drive the real per-viewport 3D scene render each frame while on the flight
+     * screen (flight-init 0x5710F0 or flight-frame 0x49E600). The dispatcher never transitions to
+     * the flight-frame cb, so the scene render never ticks on the LIVE flight surface — but the
+     * render path itself works (builds a real visible list, objcount=2). xwa_drive_render() runs
+     * sub_00511A90 (alloc rbuf/register view) + sub_004340D0(0) (per-viewport render) — the real
+     * game fns with correct args. Test whether ticking it here draws pixels. */
+    /* XWA_CAMSEED: the flight render loop RUNS (sub_0049E600->sub_004F2070) but outputs 0 pixels
+     * because the camera view matrix 0x8D93xx is ZERO -> projection divides by 0 (DIV0 x8) -> vertices
+     * collapse. sub_004949B0 copies the matrix from source 0x693774..0x6937A8 each frame. Seed that
+     * SOURCE non-zero so the copy propagates a non-zero matrix -> no DIV0. DIAGNOSTIC: if ANY pixels
+     * appear (even distorted), the camera matrix is confirmed as the sole blocker + seeding works. */
+    if (getenv("XWA_CAMSEED") && (cb == 0x005710F0 || cb == 0x0049E600)) {
+        static int _cs; if (_cs < 3) { fprintf(stderr, "[CAMSEED] seeding IDENTITY camera matrix source (cb=0x%X)\n", cb); fflush(stderr); _cs++; }
+        /* zero the whole rotation source region, then set the identity diagonal + the 0x8D6BB0 gate.
+         * src->dest map (sub_004949B0): 79C->8D93CC, 77C->8D93E4, 794->8D93C0 (diagonal candidates);
+         * 798->8D6BB0 (gate, must be >0). All others -> off-diagonal = 0. Scale 1.0 = 0x8000 (>>15). */
+        for (uint32_t a = 0x693774u; a <= 0x6937A8u; a += 4) MEM32(a) = 0;
+        MEM32(0x693794u) = 0x8000u;  /* -> 0x8D93C0 (diag) */
+        MEM32(0x69377Cu) = 0x8000u;  /* -> 0x8D93E4 (diag) */
+        MEM32(0x69379Cu) = 0x8000u;  /* -> 0x8D93CC (diag) */
+        MEM32(0x693798u) = 0x8000u;  /* -> 0x8D6BB0 (gate >0) */
+    }
+
+    if (getenv("XWA_DRIVEREND") && (cb == 0x005710F0 || cb == 0x0049E600)) {
+        /* Drive the PROVEN render entry sub_004F2070 (RENDPROBE confirmed it builds a real visible
+         * list: objcount=2, 1 solid queued) directly on the LIVE flight surface each frame — the
+         * real per-frame loop never ticks it (screen never transitions to the 0x49E600 frame cb). */
+        extern void sub_004F2070(void);
+        static int _dr; if (_dr < 3) { fprintf(stderr, "[DRIVEREND] ticking sub_004F2070 on flight screen cb=0x%X\n", cb); fflush(stderr); _dr++; }
+        #define esp g_esp
+        RECOMP_CALL(sub_004F2070);
+        #undef esp
+    }
 }
 
 /* sub_00559B50: Frontend display/input callback.
@@ -2325,6 +2736,12 @@ int main(int argc, char* argv[]) {
     /* Install NtTerminateProcess hook FIRST (catches all exit paths) */
     install_terminate_hook();
 
+    /* Hang watchdog (opt-in): periodically dumps the trace ring so a hang is diagnosable. */
+    if (getenv("XWA_WATCHDOG")) {
+        CreateThread(NULL, 0, watchdog_loop_thread, NULL, 0, NULL);
+        printf("[*] hang watchdog started -> D:\\recomp\\pc\\xwa\\xwa_watchdog.log\n");
+    }
+
     /* Install VEH crash handler */
     AddVectoredExceptionHandler(1, veh_handler);
 
@@ -2417,6 +2834,20 @@ int main(int argc, char* argv[]) {
         printf("[*] Pre-initialized %d CRT locks\n", CRT_MAX_LOCKS);
     }
 
+    /* Initialize the CRT ctype table pointers for the "C" locale.
+     * ROOT-CAUSE FIX: _pctype (0x60ACE8) and its sibling (0x60ACEC) ship in
+     * .data with a STALE baked-in value (0x039A124A) that the real CRT startup
+     * would overwrite. Because we bypass that startup, every ctype lookup
+     * (isspace/isdigit via `MEM8(MEM32(0x60ACE8) + c*2)`) dereferenced that
+     * garbage and crashed — in atol/setlocale, _output (printf), _input
+     * (scanf), etc. The CRT's C-locale path (sub_005A1560 @0x005A1629) points
+     * both at the static ctype table at 0x60ACF2; replicate that here.
+     * 0x60AEF4 (__mb_cur_max) is already 1 (single-byte) in .data. */
+    MEM32(0x60ACE8) = 0x0060ACF2u;
+    MEM32(0x60ACEC) = 0x0060ACF2u;
+    MEM32(0x60AEF4) = 1;
+    printf("[*] Initialized C-locale ctype table (_pctype -> 0x60ACF2)\n");
+
     /* Verify data section loaded correctly */
     printf("[*] Data check: 0x5FFEEC = \"%s\"\n", (char*)ADDR(0x5FFEEC));
     printf("[*] Data check: 0x5FFEE4 = \"%s\"\n", (char*)ADDR(0x5FFEE4));
@@ -2453,15 +2884,35 @@ int main(int argc, char* argv[]) {
      * This handles all CRT initialization: _heap_init, _mtinit, _ioinit,
      * __initterm, then calls WinMain(GetModuleHandle(0), 0, GetCommandLineA(), SW_SHOWDEFAULT).
      * It may call ExitProcess() instead of returning. */
-    fprintf(stderr, "[*] About to call sub_0059CD60 (CRT startup)...\n");
+    /* Default: call WinMain (sub_0050A4A0) directly, bypassing the guest CRT
+     * startup (sub_0059CD60). The full CRT startup crashes in its locale/env
+     * init (atol on a garbage env pointer, sub_005A89A0) before ever reaching
+     * WinMain. The CRT globals the game actually needs (SBH off, heap handle,
+     * CRT lock table) are already initialized manually above, so the direct
+     * path boots to the concourse. Set XWA_FULL_CRT=1 to run the guest CRT
+     * startup instead (for debugging that path).
+     * WinMain(hInstance, hPrevInstance=0, lpCmdLine, nCmdShow=SW_SHOWDEFAULT),
+     * args pushed right-to-left; RECOMP_CALL pushes the return address. */
+    int full_crt = getenv("XWA_FULL_CRT") ? 1 : 0;
+    fprintf(stderr, "[*] Entering game via %s...\n",
+            full_crt ? "sub_0059CD60 (full CRT startup)" : "sub_0050A4A0 (WinMain, direct)");
     fflush(stderr);
-    PUSH32(g_esp, 0xDEAD0000u);        /* dummy return address */
 
     /* Wrap in SEH to catch crashes that VEH might miss */
     {
         DWORD seh_code = 0;
         __try {
-            sub_0059CD60();
+            if (full_crt) {
+                PUSH32(g_esp, 0xDEAD0000u);        /* dummy return address */
+                sub_0059CD60();
+            } else {
+                PUSH32(g_esp, 0xAu);                              /* nCmdShow = SW_SHOWDEFAULT */
+                PUSH32(g_esp, cmdline_va);                        /* lpCmdLine */
+                PUSH32(g_esp, 0u);                                /* hPrevInstance */
+                PUSH32(g_esp, (uint32_t)(uintptr_t)hInst);        /* hInstance */
+                PUSH32(g_esp, 0xDEAD0000u);                       /* return address */
+                sub_0050A4A0();
+            }
         } __except((seh_code = GetExceptionCode()), EXCEPTION_EXECUTE_HANDLER) {
             /* Dump trace ring on any unhandled exception */
             char buf[512];
@@ -2507,7 +2958,7 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    fprintf(stderr, "[*] sub_0059CD60 returned! eax = 0x%08X\n", g_eax);
+    fprintf(stderr, "[*] game entry returned! eax = 0x%08X\n", g_eax);
     fflush(stderr);
     printf("[*] WinMain returned (eax = 0x%08X)\n", g_eax);
 

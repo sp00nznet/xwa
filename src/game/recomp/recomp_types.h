@@ -112,6 +112,10 @@ extern ptrdiff_t g_mem_base;
 #define MEMF(addr)   (*(volatile float    *)ADDR(addr))
 #define MEMD(addr)   (*(volatile double   *)ADDR(addr))
 
+/* Guest-pointer sanity check for defensive list-unlink guards: 4-byte aligned and within the
+ * guest address space [0x400000, 0x40000000). Used to skip writes through garbage link pointers. */
+#define LINK_OK(p)   (((uint32_t)(p) & 3u) == 0u && (uint32_t)(p) >= 0x00400000u && (uint32_t)(p) < 0x40000000u)
+
 /* ============================================================
  * FS Segment Access (Thread Environment Block)
  *

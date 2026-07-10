@@ -52,7 +52,13 @@ def main():
             print(f'0x{addr:08X}: no instructions'); continue
         trimmed = []; seen_ret = False
         for ins in instrs:
-            if ins.mnemonic == 'int3': break
+            # int3 terminates the current run (it's padding, or a 0xCC byte a `je +1`
+            # skips over). Don't break — real blocks may follow that are only reachable
+            # via a forward jcc (their jumps would otherwise leak as ITAILs). Resume at
+            # the next basic-block leader.
+            if ins.mnemonic == 'int3':
+                seen_ret = True
+                continue
             if seen_ret:
                 if ins.address not in leaders: continue
                 seen_ret = False

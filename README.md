@@ -14,21 +14,36 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 5** | **Complete** | Runtime execution — CRT init, import bridging, game startup |
 | **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
 | **Phase 7** | **Complete** | D3D11 rendering backend — device, shaders, execute buffer parser, 2D surface pipeline |
-| **Phase 8** | **In Progress** | Frontend + concourse rendering — pilot creation, the fully-rendered Azzameen concourse room (backdrop, Emkay droid, holo-globe, animated doors), mouse hover/click input working |
-| Phase 9 | Pending | Door-screen navigation, 3D rendering, audio, full game logic |
+| **Phase 8** | **Complete** | Frontend + concourse rendering — pilot creation, the fully-rendered Azzameen concourse room (backdrop, Emkay droid, holo-globe, animated doors), mouse hover/click input |
+| **Phase 9** | **In Progress** | Menu navigation + flight entry — screen-to-screen navigation renders (pilot creation → concourse → Combat Simulator menu → skirmish setup → mission load); the flight loop loads a real 20-flight-group mission and presents frames crash-free; the 3D scene render is traced end-to-end and blocked on one thing — a coherent player-craft state (see *Flight Entry* below) |
+| Phase 10 | Pending | Visible 3D flight (spacecraft + environment), audio, full game logic |
 
-### Current Screenshot
+### Screenshots
 
-![Concourse Room](docs/concourse_new.png)
+The recompiled game boots, creates a pilot, and navigates the full frontend — each screen rendered from the original game's assets via the recompiled 2D pipeline and D3D11 backend.
 
-*The Azzameen family-home concourse, fully rendered after pilot creation: room backdrop, the Emkay (MK-09) droid, the holographic galaxy globe, the animated room doors, and the highlighted "Combat Simulator" door label. Reaching this required fixing a joystick-detection gate, the `.lst` resource-list parser, a `test`-after-reload codegen bug in the recompiler, and an unresolved jump-table in the `.dat` image decoder.*
+**Combat Simulator menu** — reached by navigating from the concourse through the Combat Simulator door. Fully composited backdrop with live menu labels (highlighted *Single Player*, plus *Multiplayer*, *Film Room*, *Back to Family Transport*):
+
+![Combat Simulator menu](docs/shot_combatsim.png)
+
+**Concourse room** — the Azzameen family-home concourse: room backdrop, the Emkay (MK-09) droid, the holographic galaxy globe, the animated doors, and the highlighted "Play Mission" label:
+
+![Concourse Room](docs/shot_barracks.png)
+
+**Pilot creation** — the entry screen: starfield nebula with lens flare, the Empire and Rebel faction crests, and the "Create a new pilot." / "Create Pilot" text and input field drawn from the `fronttxt.txt` string table:
+
+![Pilot creation](docs/shot_pilotcreate.png)
 
 <details>
-<summary>Earlier: pilot creation screen</summary>
+<summary>Earlier concourse captures</summary>
 
-![Concourse Menu](docs/menu.png)
+![Concourse with Combat Simulator door](docs/concourse_new.png)
 
-*Concourse pilot creation screen with text rendering. "Create a new pilot." and "Create Pilot" labels drawn from fronttxt.txt string table. Full background, holographic globe, Empire/Rebel faction symbols via RLE-decoded CBM surfaces.*
+*An earlier concourse capture showing the highlighted "Combat Simulator" door label. Reaching this required fixing a joystick-detection gate, the `.lst` resource-list parser, a `test`-after-reload codegen bug in the recompiler, and an unresolved jump-table in the `.dat` image decoder.*
+
+![Concourse pilot-creation menu](docs/menu.png)
+
+*Earlier pilot-creation capture — full background, holographic globe, Empire/Rebel faction symbols via RLE-decoded CBM surfaces.*
 </details>
 
 ### Runtime Progress
@@ -87,6 +102,15 @@ The recompiled binary boots through full initialization, loads game assets, and 
 | 29 | `_old_` variable scoping fix (lifter + generator) | Block-scoped declarations broke across goto labels; moved to function scope |
 | 30 | Game CRT file I/O native replacements (7 functions) | MSVC 6.0 FILE* layout differs from host CRT — ftell returned -1, crashing string parser |
 | 31 | String table loading (strings.txt + fronttxt.txt) | 184KB game strings + 47KB menu labels parsed and available for text rendering |
+
+## Flight Entry (Phase 9, in progress)
+
+Beyond the frontend, the recompiled game drives the training/skirmish launch path all the way into the flight engine. This is where the current work is:
+
+- **A real mission loads.** From the concourse the game reaches the loading screen and flight-init, parses a `.tie` mission, and builds a **20-flight-group** world — crash-free. The flight loop runs and presents 800×600 frames continuously.
+- **The 3D render pipeline is mapped end-to-end.** The per-frame flight render (`sub_004F2070` → visible-list build `sub_004652F0` → per-object transform/rasterizer) has been traced instruction-by-instruction and *runs* — it builds a real visible-object list from the scene object-manager.
+- **The remaining blocker is a single, well-localized thing: a coherent player-craft state.** The camera view matrix is built from the player craft's position + orientation; under the forced-launch path those fields aren't fully populated, so the camera-update and render-object linkage fault and the projection collapses (perspective-divide by zero). The frame is currently **black** — no spacecraft rendered yet — and this is the honestly-reported state, not a solved step.
+- **Cross-validated against X-Wing vs. TIE Fighter.** XWA's engine is the successor to the 1997 *X-Wing vs. TIE Fighter* engine. Running the **same unmodified toolchain** on `Z_XVT__.EXE` recompiles it cleanly (1,787 functions), and XvT's *local* (non-DirectPlay) single-player craft-spawn routine gives the exact per-craft field recipe (position, orientation, active + render-status flags) needed to populate XWA's craft coherently — the concrete next step toward visible 3D flight.
 
 ## Binary Analysis
 
