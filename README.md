@@ -182,7 +182,13 @@ xwa-recomp/
 │   ├── translator.py           # Full pipeline orchestrator (legacy)
 │   ├── dump_memory.py          # SafeDisc runtime decryption dumper
 │   ├── fix_test_cond.py        # Fix TEST codegen bug (same-register CMP → TEST_NS/G/LE)
-│   └── regen_0000.py           # Targeted regeneration of recomp_0000.c + dispatch/header
+│   ├── fix_test_flags.py       # Fix TEST+JBE/JA codegen bug in generated output
+│   ├── fix_string_ops.py       # Fix repne scasb / repe cmpsb codegen
+│   ├── disasm_jmptbl.py        # Reconstruct unresolved switch/jump tables
+│   ├── insert_func.py          # Lift a single missing function and splice it into the gen files
+│   ├── read_real.py / poll_real.py / dbg_real.py  # Live guest-memory read/poll/debug helpers
+│   ├── regen_0000.py           # Targeted regeneration of recomp_0000.c + dispatch/header
+│   └── relift_func.py          # Re-lift a single function in place (codegen-bug iteration)
 ├── src/
 │   ├── game/
 │   │   ├── main.c              # Entry point, VEH handler, memory setup, manual overrides
