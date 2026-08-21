@@ -360,6 +360,14 @@ python tools/dump_memory.py --pid <PID> "path/to/xwingalliance.exe" config/xwing
 - **Registry**: `SOFTWARE\LucasArts Entertainment Company LLC\X-Wing Alliance\V2.0`
 - **Command line**: `XwingAlliance.exe %d skipintro`
 
+## License
+
+The code in this repository is released under the [MIT License](LICENSE).
+
+That covers **this project's own source** — the recompilation toolchain, the HAL, the COM mocks and
+the native render path. It does **not** cover Star Wars: X-Wing Alliance itself: the game's binary,
+assets and data remain the property of their respective owners and are not distributed here.
+
 ## Legal
 
 This project is for game preservation purposes. You must own a legal copy of Star Wars: X-Wing Alliance to use this tool. No copyrighted game assets are included in this repository.
