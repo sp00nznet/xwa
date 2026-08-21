@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>   /* getenv (heap_check gate) */
 
 extern unsigned int g_total_calls;
 extern unsigned int g_total_icalls;
@@ -20,6 +21,13 @@ extern unsigned int g_total_icalls;
 static int g_heap_check_count = 0;
 static int g_heap_corrupt = 0;
 static void heap_check(const char* where) {
+    /* HeapValidate walks EVERY block of EVERY process heap, and this ran on every single
+     * COM_LOG call. Once the D3D path works the game allocates thousands of texture
+     * surfaces, making this quadratic -- texture upload crawled at ~47 surfaces/sec.
+     * It is a debug instrument for a corruption hunt, so make it opt-in. */
+    static int on = -1;
+    if (on < 0) on = getenv("XWA_HEAPCHECK") ? 1 : 0;
+    if (!on) return;
     g_heap_check_count++;
     if (g_heap_corrupt) return;
 
@@ -63,7 +71,8 @@ extern int recomp_native_call(uint32_t va);
 
 /* Helper: dispatch an indirect call to a recompiled function.
  * The caller must have already pushed args + a dummy return address. */
-static void com_dispatch_callback(uint32_t va) {
+void com_dispatch_callback(uint32_t va);
+void com_dispatch_callback(uint32_t va) {
     recomp_func_t fn = recomp_lookup_manual(va);
     if (!fn) fn = recomp_lookup(va);
     if (!fn) fn = recomp_lookup_import(va);
@@ -149,6 +158,9 @@ static mock_com_obj_t* alloc_mock(uint32_t tag, uint32_t vtable_addr) {
 #define MK_DS       0xBB001140
 #define MK_DSB      0xBB001160
 #define MK_D3DTEX   0xBB001180
+static uint32_t g_eb_data, g_eb_size;
+static int g_eb_count;
+uint32_t g_eb_obj[4];
 #define MK_DPLAY    0xBB0011A0   /* IDirectPlay4 (64 slots) */
 
 /* ============================================================
@@ -214,8 +226,21 @@ static uint8_t* g_backbuf_buffer = NULL;
 /* Allocate a surface backing store of `size` reported bytes + guard headroom,
  * stamping a sentinel byte across the guard region so overruns are detectable. */
 static uint8_t* alloc_surface_buf(uint32_t size) {
-    uint8_t* p = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)size + SURFACE_GUARD);
-    if (p) memset(p + size, SURFACE_SENTINEL, SURFACE_GUARD);
+    /* The 4MB guard exists for the FRAMEBUFFER-class surfaces: the game caches their pixel
+     * pointer (0x6002BC) and renders straight into it, so a stride disagreement must not
+     * reach heap metadata. Texture surfaces are never written that way -- and once the D3D
+     * device actually works the game allocates hundreds of small mipmap surfaces (32x16,
+     * 16x8, 8x64...). At 4MB of guard each that exhausted the heap by surface ~354, after
+     * which HeapAlloc returned NULL and the game wrote through a null pixel pointer.
+     * Scale the guard to the surface instead. */
+    uint32_t guard = (size >= 256 * 1024) ? SURFACE_GUARD : (64 * 1024);
+    uint8_t* p = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)size + guard);
+    if (!p) {
+        fprintf(stderr, "[COM] !! alloc_surface_buf FAILED for %u bytes (+%u guard)\n", size, guard);
+        fflush(stderr);
+        return NULL;
+    }
+    memset(p + size, SURFACE_SENTINEL, guard);
     return p;
 }
 
@@ -230,7 +255,7 @@ static uint32_t g_display_height = 480;
 static uint32_t g_display_bpp = 16;
 
 /* Captured HWND for D3D11 renderer */
-static HWND g_game_hwnd = NULL;
+HWND g_game_hwnd = NULL;   /* exported: the focus bridges need it (see imports.c) */
 
 /* Texture handle counter (D3D5 texture handles are 1-based) */
 static uint32_t g_next_texture_handle = 1;
@@ -336,6 +361,16 @@ static mock_com_obj_t* create_mock_surface(uint8_t* pixbuf) {
     mock_com_obj_t* surf = alloc_mock(MOCK_TAG_DDSURFACE, g_ddsurface_vtable_addr);
     /* extra[0] = pixel buffer pointer */
     surf->extra[0] = (uint32_t)(uintptr_t)pixbuf;
+    /* XWA_SURFSCAN: register every surface so we can ask the only question that matters --
+     * is the engine drawing the ships into ANY buffer in memory? Static tracing keeps
+     * mislabelling functions; this measures pixels directly. */
+    { extern uint32_t g_surfreg[8192][5]; extern unsigned g_surfreg_n;
+      if (g_surfreg_n < 8192) {
+          /* store the ADDRESS of the extra[] array -- width/height are filled in AFTER this
+           * point, so a snapshot here records 0x0 for every surface. */
+          g_surfreg[g_surfreg_n][0] = (uint32_t)(uintptr_t)&surf->extra[0];
+          g_surfreg_n++;
+      } }
     /* extra[1] = width, extra[2] = height, extra[3] = bpp, extra[4] = pitch */
     surf->extra[1] = g_display_width;
     surf->extra[2] = g_display_height;
@@ -386,7 +421,14 @@ static void dd_CreateSurface(void) {
         surf = create_mock_surface(buf);
         surf->extra[1] = w;
         surf->extra[2] = h;
+        /* create_mock_surface() defaults extra[3] to g_display_bpp, which SetDisplayMode can
+         * leave at 32 -- but this buffer is allocated at `bpp`. The mismatch made
+         * GetSurfaceDesc/GetPixelFormat skip writing the RGB masks (they only filled them for
+         * ==16), so the game read a 0 mask and sub_00451A30's `shr eax,1 / test al,1` bit-scan
+         * span forever. Record the real bpp. */
+        surf->extra[3] = bpp;
         surf->extra[4] = w * (bpp / 8);
+        surf->extra[5] = caps;   /* remembered so Lock can report a texture pixel format */
     }
 
     MEM32(ppSurf) = (uint32_t)(uintptr_t)surf;
@@ -406,8 +448,10 @@ static void dd_CreateSurface(void) {
         fprintf(stderr, "[COM] Fixed render buffer at CreateSurface: 0x6002BC 0x%08X -> 0x%08X\n", old_val, pixbuf);
     }
 
-    { static int _cs; fprintf(stderr, "[COM] CreateSurface #%d: surf=0x%08X buf=0x%08X w=%u h=%u caps=0x%X main=%d\n",
-            _cs++, (uint32_t)(uintptr_t)surf, surf->extra[0], surf->extra[1], surf->extra[2], caps,
+    /* Once the D3D path works the game creates thousands of mipmap surfaces; logging every
+     * one drowns the log and slows the load. Log the first 64, then every 512th. */
+    { static int _cs = 0; int _n = _cs++; if (_n < 64 || (_n % 512) == 0) fprintf(stderr, "[COM] CreateSurface #%d: surf=0x%08X buf=0x%08X w=%u h=%u caps=0x%X main=%d\n",
+            _n, (uint32_t)(uintptr_t)surf, surf->extra[0], surf->extra[1], surf->extra[2], caps,
             (surf == g_main_offscreen)); }
 
     g_eax = 0; /* DD_OK */
@@ -464,10 +508,29 @@ static void dd_SetDisplayMode(void) {
     /* Initialize D3D11 renderer now that we have HWND and resolution */
     if (g_game_hwnd && !d3d11_is_initialized()) {
         d3d11_init((void*)g_game_hwnd, w, h);
+    } else if (d3d11_is_initialized()) {
+        /* Mode change (640x480 menus -> 800x600 flight): follow it, or the scene projects
+         * outside the render target. */
+        d3d11_resize(w, h);
     }
 
     g_eax = 0;
     g_esp += 20; /* pop ret + 4 args */
+}
+
+/* IDirectDraw2::GetAvailableVidMem(this, lpDDSCaps, lpdwTotal, lpdwFree) -- vtable [23].
+ * The vtable used to stop at [22], so this call fell off the end and left the out-params
+ * untouched. The game read 0/0 and logged "Texture Ram  Total: 0 bytes  Free: 0 bytes",
+ * then declined to allocate texture surfaces -- leaving e.g. the font table's entries NULL,
+ * which faulted the font remap in sub_00450B20. Report a healthy pool. */
+static void dd_GetAvailableVidMem(void) {
+    uint32_t pTotal = MEM32(g_esp + 12);
+    uint32_t pFree  = MEM32(g_esp + 16);
+    if (pTotal) MEM32(pTotal) = 0x04000000u;   /* 64 MB */
+    if (pFree)  MEM32(pFree)  = 0x04000000u;
+    COM_LOG("[COM] IDirectDraw::GetAvailableVidMem -> 64MB/64MB\n");
+    g_eax = 0;
+    g_esp += 20;   /* pop ret + 4 args */
 }
 
 static void dd_GetCaps(void) {
@@ -533,39 +596,42 @@ static void dd_EnumDisplayModes(void) {
 
     COM_LOG("[COM] IDirectDraw::EnumDisplayModes(cb=0x%08X)\n", cb);
 
-    /* Call callback with 640x480x16 mode if callback is valid */
+    /* #329: the game matches its requested mode against the table this enumeration builds
+     * (sub_00598089 over 0xB0D8A0). Enumerating only 640x480 meant flight's 800x600 never
+     * matched, so the Z/Tex/HW flags came back 0 and the render context was refused with
+     * "Essential Hardware Feature NOT Supported". Enumerate the real mode list. */
     if (cb != 0) {
-        /* Allocate a DDSURFACEDESC on the simulated stack */
+        static const struct { uint32_t w, h, bpp; } modes[] = {
+            { 640, 480, 8 }, { 640, 480, 16 }, { 800, 600, 8 }, { 800, 600, 16 },
+            { 1024, 768, 8 }, { 1024, 768, 16 }, { 1280, 1024, 16 },
+        };
         uint32_t save_esp = g_esp;
-
-        /* Build a temp DDSURFACEDESC (108 bytes) */
-        uint8_t desc[108];
-        memset(desc, 0, sizeof(desc));
-        *(uint32_t*)(desc + 0) = 108;   /* dwSize */
-        *(uint32_t*)(desc + 4) = 0x1006; /* dwFlags */
-        *(uint32_t*)(desc + 8) = 640;    /* dwWidth */
-        *(uint32_t*)(desc + 12) = 480;   /* dwHeight */
-        *(uint32_t*)(desc + 16) = 1280;  /* lPitch */
-        *(uint32_t*)(desc + 72) = 32;    /* DDPIXELFORMAT.dwSize */
-        *(uint32_t*)(desc + 76) = 0x40;  /* DDPF_RGB */
-        *(uint32_t*)(desc + 84) = 16;    /* dwRGBBitCount */
-        *(uint32_t*)(desc + 88) = 0xF800;
-        *(uint32_t*)(desc + 92) = 0x07E0;
-        *(uint32_t*)(desc + 96) = 0x001F;
-
-        /* Put desc somewhere in mapped memory */
         uint32_t desc_va = 0x00B0F000; /* scratch area in BSS */
-        memcpy((void*)(uintptr_t)desc_va, desc, sizeof(desc));
-
-        /* Call: callback(pDesc, ctx) - stdcall, 2 args */
-        PUSH32(g_esp, ctx);
-        PUSH32(g_esp, desc_va);
-        PUSH32(g_esp, 0xDEAD0099u); /* return addr */
-        /* Dispatch to callback */
-        com_dispatch_callback(cb);
-        /* callback is stdcall(2 args), should have cleaned stack */
-
-        g_esp = save_esp; /* restore */
+        for (unsigned m = 0; m < sizeof(modes)/sizeof(modes[0]); m++) {
+            uint32_t w = modes[m].w, h = modes[m].h, bpp = modes[m].bpp;
+            uint8_t desc[108];
+            memset(desc, 0, sizeof(desc));
+            *(uint32_t*)(desc + 0)  = 108;              /* dwSize */
+            *(uint32_t*)(desc + 4)  = 0x1006;           /* CAPS|HEIGHT|WIDTH|PITCH */
+            *(uint32_t*)(desc + 8)  = h;                /* dwHeight */
+            *(uint32_t*)(desc + 12) = w;                /* dwWidth  */
+            *(uint32_t*)(desc + 16) = w * (bpp / 8);    /* lPitch   */
+            *(uint32_t*)(desc + 72) = 32;               /* DDPIXELFORMAT.dwSize */
+            *(uint32_t*)(desc + 76) = (bpp == 8) ? 0x20u : 0x40u; /* PALETTEINDEXED8 : RGB */
+            *(uint32_t*)(desc + 84) = bpp;              /* dwRGBBitCount */
+            if (bpp == 16) {
+                *(uint32_t*)(desc + 88) = 0xF800;
+                *(uint32_t*)(desc + 92) = 0x07E0;
+                *(uint32_t*)(desc + 96) = 0x001F;
+            }
+            memcpy((void*)(uintptr_t)desc_va, desc, sizeof(desc));
+            PUSH32(g_esp, ctx);
+            PUSH32(g_esp, desc_va);
+            PUSH32(g_esp, 0xDEAD0099u);
+            com_dispatch_callback(cb);
+            g_esp = save_esp;
+        }
+        COM_LOG("[COM] EnumDisplayModes: enumerated %u modes\n", (unsigned)(sizeof(modes)/sizeof(modes[0])));
     }
 
     g_eax = 0;
@@ -620,6 +686,28 @@ static void dds_QueryInterface(void) {
     uint32_t guid_dw0 = MEM32(riid_ptr);
     { static int _c; if (_c < 8) { fprintf(stderr, "[SURFQI] IDirectDrawSurface::QueryInterface guid_dw0=0x%08X\n", guid_dw0); fflush(stderr); _c++; } }
     COM_LOG("[COM] IDirectDrawSurface::QueryInterface(riid_dw0=0x%08X)\n", guid_dw0);
+
+    /* XWA_D3DCAPS: DX6 creates the 3D device by QI-ing the back buffer for a DEVICE guid
+     * (IID_IDirect3DHALDevice etc). Returning a TEXTURE vtable for that made every later
+     * device call land on the wrong slot -- the game's own log showed EnumTextureFormats
+     * arriving as "IDirectInput::EnumDevices" and then "Error: no texture formats found",
+     * which failed sub_0059453F and cleared the session flag 0x77330C, disabling the whole
+     * hardware render path. Dispatch on the guid instead. (0 = the all-zero guid our own
+     * EnumDevices used to hand out; treat it as the HAL device.) */
+    int want_device = getenv("XWA_D3DCAPS") && (
+        guid_dw0 == 0x00000000u ||   /* our legacy zero guid */
+        guid_dw0 == 0x84E63DE0u ||   /* IID_IDirect3DHALDevice */
+        guid_dw0 == 0xA4665C60u ||   /* IID_IDirect3DRGBDevice */
+        guid_dw0 == 0xF2086B20u ||   /* IID_IDirect3DRampDevice */
+        guid_dw0 == 0x881949A1u);    /* IID_IDirect3DMMXDevice */
+    if (want_device) {
+        uint32_t dev = com_ensure_d3d_device();
+        MEM32(ppv) = dev;
+        COM_LOG("[COM]   -> IDirect3DDevice mock at 0x%08X (guid_dw0=0x%08X)\n", dev, guid_dw0);
+        g_eax = 0;
+        g_esp += 16;
+        return;
+    }
 
     /* Create an IDirect3DTexture mock that points back to this surface */
     mock_com_obj_t* tex = alloc_mock(MOCK_TAG_D3D, g_d3dtexture_vtable_addr);
@@ -676,6 +764,25 @@ static void dds_Lock(void) {
         MEM32(pDesc + 12) = width;
         MEM32(pDesc + 16) = pitch;
         MEM32(pDesc + 36) = pixbuf;  /* lpSurface at offset 36 (0x24) */
+        /* The flags above advertise DDSD_PIXELFORMAT but ddpfPixelFormat (+0x48) was never
+         * written, so the game read dwRGBAlphaBitMask (+0x64) as 0. sub_00451A30 scans that
+         * mask for its lowest set bit with `shr eax,1 / test al,1 / je` -- a zero mask shifts
+         * to zero and loops FOREVER. That single hang was ~52% of all runtime and starved the
+         * flight frame loop (8 frames in 480s). Texture surfaces report ARGB1555 so the alpha
+         * scan terminates; everything else reports RGB565. */
+        uint32_t pf = pDesc + 0x48;
+        int is_tex = (surf->extra[5] & 0x1000u) != 0;   /* DDSCAPS_TEXTURE */
+        MEM32(pf + 0x00) = 32;                                  /* dwSize */
+        MEM32(pf + 0x04) = is_tex ? (0x40u | 0x01u) : 0x40u;    /* DDPF_RGB [| DDPF_ALPHAPIXELS] */
+        MEM32(pf + 0x08) = 0;                                   /* dwFourCC */
+        MEM32(pf + 0x0C) = bpp ? bpp : 16;                      /* dwRGBBitCount */
+        if (is_tex) {   /* ARGB1555 */
+            MEM32(pf + 0x10) = 0x7C00; MEM32(pf + 0x14) = 0x03E0;
+            MEM32(pf + 0x18) = 0x001F; MEM32(pf + 0x1C) = 0x8000;
+        } else {        /* RGB565 */
+            MEM32(pf + 0x10) = 0xF800; MEM32(pf + 0x14) = 0x07E0;
+            MEM32(pf + 0x18) = 0x001F; MEM32(pf + 0x1C) = 0;
+        }
     }
 
     /* Fix game's cached render buffer: the game stores the surface pointer at
@@ -739,12 +846,10 @@ static void dds_GetSurfaceDesc(void) {
         MEM32(pDesc + 16) = surf->extra[4]; /* pitch */
         MEM32(pDesc + 72) = 32;  /* DDPIXELFORMAT.dwSize */
         MEM32(pDesc + 76) = 0x40;  /* DDPF_RGB */
-        MEM32(pDesc + 84) = surf->extra[3]; /* bpp */
-        if (surf->extra[3] == 16) {
-            MEM32(pDesc + 88) = 0xF800;
-            MEM32(pDesc + 92) = 0x07E0;
-            MEM32(pDesc + 96) = 0x001F;
-        }
+        uint32_t _bpp = surf->extra[3] ? surf->extra[3] : 16;
+        MEM32(pDesc + 84) = _bpp;
+        if (_bpp == 32) { MEM32(pDesc + 88) = 0x00FF0000; MEM32(pDesc + 92) = 0x0000FF00; MEM32(pDesc + 96) = 0x000000FF; }
+        else            { MEM32(pDesc + 88) = 0xF800;     MEM32(pDesc + 92) = 0x07E0;     MEM32(pDesc + 96) = 0x001F; }
     }
 
     g_eax = 0;
@@ -783,7 +888,13 @@ static void dds_Flip(void) {
                     _flip_count, g_back_surface->extra[0], g_back_surface->extra[1],
                     g_back_surface->extra[2], nz_count, sz,
                     MEM32(g_esp + 4), MEM32(0x7B1CE8), MEM32(0x7B1CE0));
-                fflush(stderr);
+
+              { extern volatile unsigned g_csblk; static unsigned _lc;
+                if (getenv("XWA_CSTRACE") && g_csblk != _lc) { _lc = g_csblk;
+                  fprintf(stderr, "[CS] sub_0053B500 block L_%08X\n", g_csblk); fflush(stderr); } }
+              { extern volatile unsigned g_scblk, g_sc[2];
+                static unsigned _last; if (g_scblk != _last) { _last = g_scblk;
+                  fprintf(stderr, "[LIVE] sub_00564D10 calls=%u block=L_%08X\n", g_sc[0], g_scblk); fflush(stderr); } }                fflush(stderr);
             }
             d3d11_upload_surface(
                 (uint8_t*)(uintptr_t)g_back_surface->extra[0],
@@ -816,6 +927,18 @@ static void dds_Flip(void) {
                       if (_nz > _snz[_k] + 200) { _snz[_k] = _nz; _shot = _snm[_k]; }
                       break;
                   }
+                  /* Once the 3D flight frame (sub_004F2070) has rendered at all, force a dump
+                   * of EVERY subsequent flip to frame_shot_flight.bmp. The screen-cb match and
+                   * the richest-frame heuristic both lose to the briefing, which is far denser
+                   * than a single flight frame, so the flight frame never reached disk. */
+    { static int _once; if (!_once && g_eb_obj[1]) { _once = 1;
+        uint32_t tgt = g_eb_obj[1], hits = 0;
+        for (uint32_t a = 0x00600000u; a < 0x00B00000u; a += 4)
+            if (MEM32(a) == tgt) { fprintf(stderr, "[EB2PTR] EB#2 obj 0x%08X stored at guest 0x%06X\n", tgt, a);
+                                   if (++hits >= 8) break; }
+        if (!hits) fprintf(stderr, "[EB2PTR] EB#2 pointer 0x%08X NOT stored in guest globals\n", tgt);
+        fflush(stderr); } }
+                  { extern unsigned g_rcount[8]; if (g_rcount[0] > 0) _shot = "flight"; }
                   if (!_shot) goto _skip_dump;
               } else {
                   uint32_t* _mx = (_w0 >= 700) ? &_maxnz_800 : &_maxnz_640;
@@ -882,6 +1005,7 @@ static void dds_Flip(void) {
 }
 
 static void dds_Blt(void) {
+    if (getenv("XWA_BLTLOG")) { { fprintf(stderr, "[BLT] enter\n"); fflush(stderr); } }
     /* this=esp+4, pDestRect=esp+8, pSrcSurf=esp+12, pSrcRect=esp+16, flags=esp+20, pBltFx=esp+24 */
     uint32_t pThis = MEM32(g_esp + 4);
     uint32_t pDestRect = MEM32(g_esp + 8);
@@ -917,7 +1041,7 @@ static void dds_Blt(void) {
          * a stale buffer pointer. Bail unless dims+pitch+pointer are all sane. */
         if (!surf_buf_ok(dst)) {
             { static int _cfx; if (_cfx < 10) { fprintf(stderr, "[COM]   ColorFill SKIP (bad surf W=%u H=%u pitch=%u buf=0x%08X)\n", dstW, dstH, dstPitch, dst->extra[0]); _cfx++; } }
-            g_eax = 0; g_esp += 28; return;
+            g_eax = 0; { if (getenv("XWA_BLTLOG")) { { fprintf(stderr, "[BLT] exit\n"); fflush(stderr);} } } g_esp += 28; return;
         }
         if (x0 > dstW) x0 = dstW;
         if (y0 > dstH) y0 = dstH;
@@ -957,14 +1081,14 @@ static void dds_Blt(void) {
         if (copyW > 16384 || copyH > 16384 || srcPitch == 0 || dstPitch == 0 ||
             srcPitch > 0x100000 || dstPitch > 0x100000 || rowBytes > srcPitch || rowBytes > dstPitch) {
             { static int _cpx; if (_cpx < 10) { fprintf(stderr, "[COM]   Blt-copy SKIP (bad dims cW=%u cH=%u sp=%u dp=%u)\n", copyW, copyH, srcPitch, dstPitch); _cpx++; } }
-            g_eax = 0; g_esp += 28; return;
+            g_eax = 0; { if (getenv("XWA_BLTLOG")) { { fprintf(stderr, "[BLT] exit\n"); fflush(stderr);} } } g_esp += 28; return;
         }
         for (uint32_t y = 0; y < copyH; y++) {
             memcpy(dstBuf + y * dstPitch, srcBuf + y * srcPitch, rowBytes);
         }
     }
     g_eax = 0;
-    g_esp += 28; /* pop ret + 6 args */
+    { if (getenv("XWA_BLTLOG")) { { fprintf(stderr, "[BLT] exit\n"); fflush(stderr);} } } g_esp += 28; /* pop ret + 6 args */
 }
 
 static void dds_SetColorKey(void) {
@@ -987,7 +1111,7 @@ static void dds_SetColorKey(void) {
         { static int _ck; if (_ck < 20) { fprintf(stderr, "[COM] SetColorKey(surf=0x%08X, flags=0x%X, low=0x%04X, high=0x%04X)\n", pThis, dwFlags, ckLow, ckHigh); _ck++; } }
     }
     g_eax = 0;
-    g_esp += 16; /* pop ret + 3 args */
+    { if (getenv("XWA_BLTLOG")) { { fprintf(stderr, "[BLT] exit\n"); fflush(stderr);} } } g_esp += 16; /* pop ret + 3 args */
 }
 
 static void dds_BltFast(void) {
@@ -1026,6 +1150,20 @@ static void dds_BltFast(void) {
             uint32_t nz = 0, i, bytes = pitch * h;
             for (i = 0; i < bytes; i += 2) { if (fb[i] | fb[i+1]) nz++; }
             { static int _nl; if (_nl < 15) { fprintf(stderr, "[FLTNZ] flight-src blit nz=%u/%u %ubpp pitch=%u\n", nz, w*h, bpp, pitch); fflush(stderr); _nl++; } }
+            { const char* _rc = getenv("XWA_RENDCOUNT");
+              if (_rc) { static int _p; if (_p < 12) { _p++;
+                extern unsigned g_rcount[8]; extern const char* const g_rcount_name[8];
+                fprintf(stderr, "[RENDCOUNT]");
+                for (int _i = 0; _i < 8; _i++) fprintf(stderr, "  %s=%u", g_rcount_name[_i], g_rcount[_i]);
+                fprintf(stderr, "\n"); fflush(stderr); } } }
+            /* XWA_SNAP=N: dump the flight state after the Nth flight-view blit. This is the only
+             * reliable "we are really in flight" hook -- 0x0049E600 is a `xor eax,eax; ret` stub in
+             * the real binary (NOT the frame callback), and sub_005710F0 never returns to the pump
+             * once flight starts, so the ui-driver never gets a chance to fire. */
+            { const char* _sn = getenv("XWA_SNAP");
+              if (_sn) { static int _blits = 0, _done = 0; int _want = atoi(_sn); if (_want <= 0) _want = 5;
+                if (!_done && ++_blits >= _want) { _done = 1;
+                    extern void xwa_snap_flight(uint32_t, uint32_t); xwa_snap_flight(0x005710F0, 0); } } }
             static uint32_t _maxnz_flt = 0;
             if (nz > _maxnz_flt + 50 || (_maxnz_flt == 0 && nz > 0)) {
                 _maxnz_flt = nz;
@@ -1114,12 +1252,10 @@ static void dds_GetPixelFormat(void) {
     if (pFmt) {
         MEM32(pFmt + 0) = 32; /* dwSize */
         MEM32(pFmt + 4) = 0x40; /* DDPF_RGB */
-        MEM32(pFmt + 12) = surf->extra[3]; /* bpp */
-        if (surf->extra[3] == 16) {
-            MEM32(pFmt + 16) = 0xF800;
-            MEM32(pFmt + 20) = 0x07E0;
-            MEM32(pFmt + 24) = 0x001F;
-        }
+        uint32_t _bpp = surf->extra[3] ? surf->extra[3] : 16;
+        MEM32(pFmt + 12) = _bpp;
+        if (_bpp == 32) { MEM32(pFmt + 16) = 0x00FF0000; MEM32(pFmt + 20) = 0x0000FF00; MEM32(pFmt + 24) = 0x000000FF; }
+        else            { MEM32(pFmt + 16) = 0xF800;     MEM32(pFmt + 20) = 0x07E0;     MEM32(pFmt + 24) = 0x001F; }
     }
     g_eax = 0;
     g_esp += 12;
@@ -1354,10 +1490,14 @@ static void d3d_EnumDevices(void) {
         uint32_t guid_va = scratch;
         /* desc string at scratch+16 */
         uint32_t desc_va = scratch + 16;
-        strcpy((char*)(uintptr_t)desc_va, "Mock Direct3D HAL");
+        /* XWA gates its HARDWARE-3D path on a strcmp of the device name against "3dfx" / "voodoo"
+         * (constants at 0x006012A0 / 0x006012A8; a match sets the master switch 0xB0C7BC = 1 at
+         * 0x00520671, which flows into 0x77330C and decides software vs hardware -- #453).
+         * "Mock Direct3D HAL" matched neither, so the engine always chose software. */
+        strcpy((char*)(uintptr_t)desc_va, "3dfx Voodoo Graphics");
         /* name string at scratch+64 */
         uint32_t name_va = scratch + 64;
-        strcpy((char*)(uintptr_t)name_va, "MockD3D");
+        strcpy((char*)(uintptr_t)name_va, "3dfx voodoo");
         /* D3DDEVICEDESC for HAL at scratch+128 (size=0xFC, 252 bytes). The game's enum callback
          * (sub_005991CC) rejects a device unless desc+8 (dcmColorModel) is non-zero, and it needs a
          * 16-bit render/z-buffer depth to run flight. Fill the required caps so the device is accepted. */
@@ -1366,8 +1506,37 @@ static void d3d_EnumDevices(void) {
         MEM32(hal_desc_va + 4) = 0x1F;      /* dwFlags */
         MEM32(hal_desc_va + 8) = 2;         /* dcmColorModel = D3DCOLOR_RGB (the accept gate) */
         MEM32(hal_desc_va + 0xC) = 0xFFFF;  /* dwDevCaps - broad */
-        MEM32(hal_desc_va + 0x24) = 0x400;  /* dwDeviceRenderBitDepth = DDBD_16 */
-        MEM32(hal_desc_va + 0x28) = 0x400;  /* dwDeviceZBufferBitDepth = DDBD_16 */
+        /* D3DDEVICEDESC layout (DX6, 0xFC bytes): dpcLineCaps at +0x2C, dpcTriCaps at +0x64
+         * (D3DPRIMCAPS is 0x38 each), dwDeviceRenderBitDepth at +0x9C, dwDeviceZBufferBitDepth
+         * at +0xA0. The old +0x24/+0x28 landed inside dtcTransformCaps/bClipping, which is why
+         * the game's own enum log read back "|Non-Z|" and "0bpp". */
+        MEM32(hal_desc_va + 0x24) = 0x400;  /* (kept: harmless legacy write) */
+        MEM32(hal_desc_va + 0x28) = 0x400;
+        if (getenv("XWA_D3DCAPS")) {
+            MEM32(hal_desc_va + 0x64) = 0x38;        /* dpcTriCaps.dwSize */
+            MEM32(hal_desc_va + 0x64 + 0x08) = 0x3FF; /* dwRasterCaps */
+            MEM32(hal_desc_va + 0x64 + 0x0C) = 0xFF;  /* dwZCmpCaps */
+            MEM32(hal_desc_va + 0x64 + 0x10) = 0x1FFF;/* dwSrcBlendCaps */
+            MEM32(hal_desc_va + 0x64 + 0x14) = 0x1FFF;/* dwDestBlendCaps */
+            MEM32(hal_desc_va + 0x64 + 0x18) = 0xFF;  /* dwAlphaCmpCaps */
+            MEM32(hal_desc_va + 0x64 + 0x1C) = 0x3FFF;/* dwShadeCaps */
+            MEM32(hal_desc_va + 0x64 + 0x20) = 0x4FFF; /* #328: widen dwTextureCaps (was 0x0F) -- Tex flag still 0 */
+            MEM32(hal_desc_va + 0x64 + 0x24) = 0x3F;  /* dwTextureFilterCaps */
+            MEM32(hal_desc_va + 0x64 + 0x28) = 0xFF;  /* dwTextureBlendCaps */
+            MEM32(hal_desc_va + 0x64 + 0x2C) = 0x1F;  /* dwTextureAddressCaps */
+            MEM32(hal_desc_va + 0x2C) = 0x38;         /* dpcLineCaps.dwSize */
+            MEM32(hal_desc_va + 0x2C + 0x08) = 0x3FF;  /* line dwRasterCaps */
+            MEM32(hal_desc_va + 0x2C + 0x0C) = 0xFF;   /* line dwZCmpCaps */
+            MEM32(hal_desc_va + 0x2C + 0x20) = 0x4FFF; /* line dwTextureCaps */
+            MEM32(hal_desc_va + 0x2C + 0x24) = 0x3F;   /* line dwTextureFilterCaps */
+            MEM32(hal_desc_va + 0x2C + 0x28) = 0xFF;   /* line dwTextureBlendCaps */
+            MEM32(hal_desc_va + 0x9C) = 0x400;        /* dwDeviceRenderBitDepth = DDBD_16 */
+            MEM32(hal_desc_va + 0xA0) = 0x400;        /* dwDeviceZBufferBitDepth = DDBD_16 */
+            MEM32(hal_desc_va + 0xA4) = 0x10000;      /* dwMaxBufferSize */
+            MEM32(hal_desc_va + 0xA8) = 0x400;        /* dwMaxVertexCount */
+            MEM32(hal_desc_va + 0xB4) = 256;          /* dwMaxTextureWidth */
+            MEM32(hal_desc_va + 0xB8) = 256;          /* dwMaxTextureHeight */
+        }
         /* D3DDEVICEDESC for HEL at scratch+384 */
         uint32_t hel_desc_va = scratch + 384;
         MEM32(hel_desc_va) = 252;
@@ -1376,6 +1545,19 @@ static void d3d_EnumDevices(void) {
         MEM32(hel_desc_va + 0xC) = 0xFFFF;
         MEM32(hel_desc_va + 0x24) = 0x400;
         MEM32(hel_desc_va + 0x28) = 0x400;
+        if (getenv("XWA_D3DCAPS")) {
+            for (uint32_t _o = 0; _o < 0x38; _o += 4) MEM32(hel_desc_va + 0x64 + _o) = MEM32(hal_desc_va + 0x64 + _o);
+            MEM32(hel_desc_va + 0x2C) = 0x38;
+            MEM32(hel_desc_va + 0x9C) = 0x400;
+            MEM32(hel_desc_va + 0xA0) = 0x400;
+            MEM32(hel_desc_va + 0xA4) = 0x10000;
+            MEM32(hel_desc_va + 0xA8) = 0x400;
+            MEM32(hel_desc_va + 0xB4) = 256;
+            MEM32(hel_desc_va + 0xB8) = 256;
+            /* Hand out IID_IDirect3DHALDevice so the surface QI below can recognise it. */
+            MEM32(guid_va + 0) = 0x84E63DE0u; MEM32(guid_va + 4) = 0x11CF46AAu;
+            MEM32(guid_va + 8) = 0x0000816Fu; MEM32(guid_va + 12) = 0x6E1520C0u;
+        }
 
         uint32_t save_esp = g_esp;
         PUSH32(g_esp, ctx);
@@ -1446,6 +1628,8 @@ static void d3ddev_CreateExecuteBuffer(void) {
     uint32_t bufsize = MEM32(pDesc + 8); /* dwBufferSize at offset 8 */
     if (bufsize == 0) bufsize = 65536;
 
+    { static int _eb; _eb++; g_eb_count = _eb;
+      fprintf(stderr, "[EBOBJ] CreateExecuteBuffer #%d size=%u\n", _eb, bufsize); fflush(stderr); }
     { static int _c; if (_c < 4) { fprintf(stderr, "[D3DINIT] CreateExecuteBuffer(size=%u) — 3D render pipeline set up\n", bufsize); fflush(stderr); _c++; } }
     mock_com_obj_t* eb = alloc_mock(MOCK_TAG_D3DEXECBUF, g_d3dexecbuf_vtable_addr);
     /* Allocate actual buffer for execute buffer data */
@@ -1453,6 +1637,10 @@ static void d3ddev_CreateExecuteBuffer(void) {
     eb->extra[0] = (uint32_t)(uintptr_t)buf;
     eb->extra[1] = bufsize;
     MEM32(ppEB) = (uint32_t)(uintptr_t)eb;
+    if (g_eb_count >= 1 && g_eb_count <= 4) g_eb_obj[g_eb_count-1] = (uint32_t)(uintptr_t)eb;
+    /* EB#2 is created and then never Locked (#428). The guest must keep its pointer somewhere
+     * in order to use it later -- find that slot so we can grep for the code that reads it.
+     * Scan a moment later (at the next Execute) once the caller has had time to store it. */
 
     COM_LOG("[COM] IDirect3DDevice::CreateExecuteBuffer(size=%u) -> 0x%08X\n",
             bufsize, (uint32_t)(uintptr_t)eb);
@@ -1472,24 +1660,45 @@ static void d3ddev_EnumTextureFormats(void) {
     uint32_t ctx = MEM32(g_esp + 12);
     COM_LOG("[COM] IDirect3DDevice::EnumTextureFormats(cb=0x%08X)\n", cb);
 
-    /* Call callback with 16-bit 565 texture format */
+    /* The callback takes a full DDSURFACEDESC (dwSize 0x6C), whose DDPIXELFORMAT lives at
+     * +0x48 -- NOT a bare DDPIXELFORMAT. Writing the format at +0 meant the game read zeros
+     * at +0x48 and reported "Error: no texture formats found", which failed device creation.
+     * Enumerate what XWA actually looks for: RGB565, ARGB1555 and 8-bit palettized.
+     * (Its own diagnostics mention "16-bit hicolor textures" and "8-bit palettized textures
+     * for textures with no alpha".) Callback returns 0 to continue, non-zero to stop. */
     if (cb != 0) {
-        uint32_t scratch = 0x00B0F600;
-        memset((void*)(uintptr_t)scratch, 0, 64);
-        /* DDSURFACEDESC with pixel format */
-        MEM32(scratch + 0) = 32; /* dwSize of DDPIXELFORMAT */
-        MEM32(scratch + 4) = 0x40; /* DDPF_RGB */
-        MEM32(scratch + 12) = 16; /* bpp */
-        MEM32(scratch + 16) = 0xF800;
-        MEM32(scratch + 20) = 0x07E0;
-        MEM32(scratch + 24) = 0x001F;
-
-        uint32_t save_esp = g_esp;
-        PUSH32(g_esp, ctx);
-        PUSH32(g_esp, scratch);
-        PUSH32(g_esp, 0xDEAD0097u);
-        com_dispatch_callback(cb);
-        g_esp = save_esp;
+        static const uint32_t fmts[][6] = {
+            /* flags,      bpp, R,      G,      B,      A */
+            { 0x40,        16,  0xF800, 0x07E0, 0x001F, 0 },          /* RGB565 */
+            { 0x40 | 0x01, 16,  0x7C00, 0x03E0, 0x001F, 0x8000 },     /* ARGB1555 */
+            { 0x20,         8,  0,      0,      0,      0 },          /* PALETTEINDEXED8 */
+        };
+        for (int fi = 0; fi < 3; fi++) {
+            uint32_t scratch = 0x00B0F600;
+            memset((void*)(uintptr_t)scratch, 0, 0x6C);
+            MEM32(scratch + 0x00) = 0x6C;          /* DDSURFACEDESC.dwSize */
+            MEM32(scratch + 0x04) = 0x1000;        /* DDSD_PIXELFORMAT */
+            uint32_t pf = scratch + 0x48;          /* ddpfPixelFormat */
+            MEM32(pf + 0x00) = 32;                 /* DDPIXELFORMAT.dwSize */
+            MEM32(pf + 0x04) = fmts[fi][0];        /* dwFlags */
+            MEM32(pf + 0x0C) = fmts[fi][1];        /* dwRGBBitCount */
+            MEM32(pf + 0x10) = fmts[fi][2];
+            MEM32(pf + 0x14) = fmts[fi][3];
+            MEM32(pf + 0x18) = fmts[fi][4];
+            MEM32(pf + 0x1C) = fmts[fi][5];
+            if (!getenv("XWA_D3DCAPS")) {          /* legacy shape, kept for the default build */
+                memset((void*)(uintptr_t)scratch, 0, 64);
+                MEM32(scratch + 0) = 32; MEM32(scratch + 4) = 0x40; MEM32(scratch + 12) = 16;
+                MEM32(scratch + 16) = 0xF800; MEM32(scratch + 20) = 0x07E0; MEM32(scratch + 24) = 0x001F;
+            }
+            uint32_t save_esp = g_esp;
+            PUSH32(g_esp, ctx);
+            PUSH32(g_esp, scratch);
+            PUSH32(g_esp, 0xDEAD0097u);
+            com_dispatch_callback(cb);
+            g_esp = save_esp;
+            if (!getenv("XWA_D3DCAPS") || g_eax != 0) break;   /* D3DENUMRET_CANCEL */
+        }
     }
 
     g_eax = 0;
@@ -1531,8 +1740,14 @@ uint32_t com_ensure_d3d_device(void) {
 }
 
 static void d3ddev_Execute(void) {
+    /* XWA_EBWHO2: identify the GUEST function that submits. At bridge entry MEM32(g_esp) is
+     * the return address into guest code, which pins down who fills the execute buffer. */
+    if (getenv("XWA_EBWHO2")) { static int _n; if (_n < 6) { _n++;
+        fprintf(stderr, "[EBWHO2] Execute called from guest ret=0x%08X\n", MEM32(g_esp)); fflush(stderr); } }
+    { extern unsigned g_rcount[8]; g_rcount[7]++; }
     /* this=esp+4, pEB=esp+8, pViewport=esp+12, flags=esp+16 */
     uint32_t pEB = MEM32(g_esp + 8);
+    fprintf(stderr, "[EBOBJ] Execute pEB=0x%08X\n", pEB); fflush(stderr);
     { static int _c; if (_c < 8) { uint32_t vc = 0; if (pEB) { mock_com_obj_t* e=(mock_com_obj_t*)(uintptr_t)pEB; vc=e->extra[3]; }
         fprintf(stderr, "[D3DEXEC] IDirect3DDevice::Execute called: pEB=0x%X vertexCount=%u\n", pEB, vc); fflush(stderr); _c++; } }
 
@@ -1638,6 +1853,10 @@ static void d3dvp_Clear(void) {
  * ============================================================ */
 
 static void d3deb_Lock(void) {
+    /* XWA_EBWHO2: identify the GUEST function that submits. At bridge entry MEM32(g_esp) is
+     * the return address into guest code, which pins down who fills the execute buffer. */
+    if (getenv("XWA_EBWHO2")) { static int _n; if (_n < 6) { _n++;
+        fprintf(stderr, "[EBWHO2] Lock called from guest ret=0x%08X\n", MEM32(g_esp)); fflush(stderr); } }
     /* this=esp+4, pDesc=esp+8 */
     uint32_t pThis = MEM32(g_esp + 4);
     uint32_t pDesc = MEM32(g_esp + 8);
@@ -1647,7 +1866,21 @@ static void d3deb_Lock(void) {
         /* D3DEXECUTEBUFFERDESC: dwSize=+0, dwFlags=+4, dwCaps=+8,
          * dwBufferSize=+12, lpData=+16 */
         MEM32(pDesc + 0) = 24; /* dwSize */
-        MEM32(pDesc + 4) = 0x3; /* D3DDEB_BUFSIZE | D3DDEB_CAPS */
+        /* D3DDEB_BUFSIZE(1) | D3DDEB_CAPS(2) | D3DDEB_LPDATA(4). LPDATA was MISSING: without it
+         * the caller has no reason to treat lpData as valid, which fits the observed symptom
+         * (execute buffer created, never filled: SetExecuteData once with vCount=0). */
+        MEM32(pDesc + 4) = 0x7;
+        g_eb_data = eb->extra[0]; g_eb_size = eb->extra[1];
+        fprintf(stderr, "[EBOBJ] Lock this=0x%08X\n", pThis); fflush(stderr);
+        /* Identify the guest code that locks the buffer: it holds lpData transiently (it is
+         * never stored to any guest global -- scanned 0x600000-0xB00000, not found) and it is
+         * the intended vertex writer, since the 208 instruction bytes DO get written. */
+        { extern volatile unsigned g_lastblk;
+          fprintf(stderr, "[EBWHO] Lock called with last guest block L_%08X\n", g_lastblk);
+          fflush(stderr); }
+        { static unsigned _n; _n++; if (_n <= 6 || (_n % 500) == 0) {
+            fprintf(stderr, "[D3DLOCK] execute-buffer Lock #%u -> lpData=0x%08X size=%u\n",
+                    _n, eb->extra[0], eb->extra[1]); fflush(stderr); } }
         MEM32(pDesc + 12) = eb->extra[1]; /* dwBufferSize */
         MEM32(pDesc + 16) = eb->extra[0]; /* lpData */
     }
@@ -1674,13 +1907,41 @@ static void d3deb_SetExecuteData(void) {
     uint32_t pThis = MEM32(g_esp + 4);
     uint32_t pData = MEM32(g_esp + 8);
     mock_com_obj_t* eb = (mock_com_obj_t*)(uintptr_t)pThis;
+    fprintf(stderr, "[EBOBJ] SetExecuteData this=0x%08X\n", pThis); fflush(stderr);
 
     if (pData) {
         eb->extra[2] = MEM32(pData + 4);  /* dwVertexOffset */
         eb->extra[3] = MEM32(pData + 8);  /* dwVertexCount */
         eb->extra[4] = MEM32(pData + 12); /* dwInstructionOffset */
         eb->extra[5] = MEM32(pData + 16); /* dwInstructionLength */
-    }
+        /* Did the guest actually WRITE anything into the locked buffer? If the region is
+         * untouched beyond the instruction bytes, the vertex emitter never ran; if it holds
+         * data but dwVertexCount is 0, the bug is in whoever fills D3DEXECUTEDATA. */
+        if (g_eb_data && g_eb_size) {
+            const uint8_t* b = (const uint8_t*)(uintptr_t)g_eb_data;
+            uint32_t nz = 0, last = 0;
+            for (uint32_t i = 0; i < g_eb_size; i++) if (b[i]) { nz++; last = i; }
+            /* Find WHICH guest global holds the locked buffer pointer: whoever stores lpData
+             * is the intended vertex writer. Scan the guest data range for the value. */
+            { uint32_t found = 0;
+              for (uint32_t a = 0x00600000u; a < 0x00B00000u; a += 4) {
+                  if (MEM32(a) == g_eb_data) {
+                      fprintf(stderr, "[EBPTR] lpData 0x%08X stored at guest global 0x%06X\n",
+                              g_eb_data, a);
+                      if (++found >= 8) break;
+                  }
+              }
+              if (!found) fprintf(stderr, "[EBPTR] lpData not found in 0x600000-0xB00000\n");
+              fflush(stderr); }
+            fprintf(stderr, "[EBSCAN] buffer non-zero bytes=%u lastOffset=%u (size=%u)\n",
+                    nz, last, g_eb_size); fflush(stderr);
+        }
+        { static unsigned _n; _n++;
+          if (_n <= 10 || (_n % 500) == 0)
+              fprintf(stderr, "[D3DSED] #%u vOff=%u vCount=%u iOff=%u iLen=%u\n",
+                      _n, eb->extra[2], eb->extra[3], eb->extra[4], eb->extra[5]);
+          fflush(stderr); }
+    } else { static int _z; if (_z<3){_z++; fprintf(stderr, "[D3DSED] called with NULL pData\n"); fflush(stderr);} }
 
     g_eax = 0;
     g_esp += 12;
@@ -1878,6 +2139,23 @@ static void didev_GetDeviceState(void) {
                 }
             }
         }
+        /* XWA_SENDKEY also drives the UNBUFFERED path: screens that poll GetDeviceState
+         * (rather than GetDeviceData) see nothing headlessly, since GetKeyboardState
+         * reports a real, idle keyboard. Hold the synthetic key down for a few polls at
+         * the same cadence so either input style can be answered. */
+        { const char* _k = getenv("XWA_SENDKEY");
+          if (_k) {
+            static uint32_t _n; _n++;
+            const char* _a = getenv("XWA_KEYAFTER"); const char* _e = getenv("XWA_KEYEVERY");
+            uint32_t _after = _a ? (uint32_t)strtoul(_a,NULL,0) : 400u;
+            uint32_t _every = _e ? (uint32_t)strtoul(_e,NULL,0) : 120u;
+            uint32_t _sc = (uint32_t)strtoul(_k, NULL, 0) & 0xFFu;
+            if (_n > _after && _sc && ((_n - _after) % _every) < 4u) {
+                ((uint8_t*)(uintptr_t)lpvData)[_sc] = 0x80;
+                { static int _p; if (_p < 4) { _p++;
+                    fprintf(stderr, "[KEY] state-array hold 0x%02X (poll %u)\n", _sc, _n); fflush(stderr); } }
+            }
+          } }
     } else if (dev_type == DIDEV_TYPE_MOUSE && cbData >= 16) {
         /* DIMOUSESTATE: lX(4), lY(4), lZ(4), rgbButtons[4] */
         POINT cur;
@@ -1910,9 +2188,44 @@ static void didev_GetDeviceState(void) {
 static void didev_GetDeviceData(void) {
     /* this=esp+4, cbObjData=esp+8, rgdod=esp+12, pdwItems=esp+16, flags=esp+20 */
     uint32_t pdwItems = MEM32(g_esp + 16);
-    /* No data available */
+    /* No data available.
+     * Returning DI_OK(0) with 0 items HANGS the game: sub_0042B740 (the input poll reached
+     * from the render driver sub_00433850 and from the flight loop at 0x00510CB7) does
+     *     GetDeviceData;  if (hr < 0) exit;  if (*pdwItems == 0) goto poll_again;
+     * at 0x0042B7AD/0x0042B7B5 -- so it busy-waits until at least one item arrives and never
+     * returns. The loop only terminates on a NEGATIVE HRESULT or a non-zero item count.
+     * DIERR_NOTACQUIRED is both negative and truthful for a mock device that is never
+     * really acquired, and it is NOT DIERR_INPUTLOST (0x8007001E), which the caller handles
+     * by re-acquiring and looping again. */
+    /* XWA_SENDKEY=<scancode>: deliver a synthetic key so screens that block on a menu
+     * ("Use CURSOR KEYS and ENTER to navigate the menu" on the mission briefing) can be
+     * answered headlessly. DIDEVICEOBJECTDATA = {dwOfs, dwData, dwTimeStamp, dwSequence}.
+     * dwData 0x80 = pressed, 0x00 = released. Emits a press/release pair every
+     * XWA_KEYEVERY polls after XWA_KEYAFTER polls. DIK_RETURN = 0x1C. */
+    { const char* _k = getenv("XWA_SENDKEY");
+      if (_k) {
+        static uint32_t _n, _seq; _n++;
+        const char* _a = getenv("XWA_KEYAFTER"); const char* _e = getenv("XWA_KEYEVERY");
+        uint32_t _after = _a ? (uint32_t)strtoul(_a,NULL,0) : 400u;
+        uint32_t _every = _e ? (uint32_t)strtoul(_e,NULL,0) : 120u;
+        uint32_t _sc = (uint32_t)strtoul(_k, NULL, 0);
+        uint32_t _rgdod = MEM32(g_esp + 12), _cb = MEM32(g_esp + 8);
+        if (_n > _after && _rgdod && _cb >= 16 && pdwItems && MEM32(pdwItems) >= 1) {
+            uint32_t _ph = (_n - _after) % _every;
+            if (_ph == 0 || _ph == 1) {
+                MEM32(_rgdod + 0) = _sc;
+                MEM32(_rgdod + 4) = (_ph == 0) ? 0x80u : 0x00u;
+                MEM32(_rgdod + 8) = 0;
+                MEM32(_rgdod + 12) = ++_seq;
+                MEM32(pdwItems) = 1;
+                if (_seq <= 6) { fprintf(stderr, "[KEY] scancode 0x%02X %s (poll %u)\n",
+                                 _sc, (_ph==0)?"DOWN":"UP", _n); fflush(stderr); }
+                g_eax = 0; g_esp += 24; return;
+            }
+        }
+      } }
     if (pdwItems) MEM32(pdwItems) = 0;
-    g_eax = 0;
+    g_eax = 0x8007001Cu;   /* DIERR_NOTACQUIRED */
     g_esp += 24;
 }
 
@@ -1974,6 +2287,20 @@ static void ds_CreateSoundBuffer(void) {
 static void ds_DuplicateSoundBuffer(void) {
     /* this=esp+4, pOriginal=esp+8, ppDuplicate=esp+12 */
     uint32_t ppDup = MEM32(g_esp + 12);
+    /* Real DirectSound has a finite voice pool, and XWA's per-craft sound setup duplicates
+     * buffers until the device refuses. An always-succeeding mock therefore never terminates:
+     * measured 9930 unique duplicates in one cockpit-setup run and still climbing, which is
+     * what stalls flight entry. Refuse past a hardware-plausible limit with DSERR_ALLOCATED.
+     * ponytail: flat global cap, make it per-original if a real pool ever matters. */
+    { static uint32_t _dups; const char* _e = getenv("XWA_DSVOICES");
+      uint32_t _cap = _e ? (uint32_t)strtoul(_e, NULL, 0) : 64u;
+      if (++_dups > _cap) {
+          if (ppDup) MEM32(ppDup) = 0;
+          if (_dups == _cap + 1) { fprintf(stderr, "[COM] DuplicateSoundBuffer: voice cap %u reached -> DSERR_ALLOCATED\n", _cap); fflush(stderr); }
+          g_eax = 0x8878000Au;   /* DSERR_ALLOCATED */
+          g_esp += 16;
+          return;
+      } }
     mock_com_obj_t* buf = alloc_mock(MOCK_TAG_DSBUFFER, g_dsbuffer_vtable_addr);
     uint8_t* abuf = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, 32768);
     buf->extra[0] = (uint32_t)(uintptr_t)abuf;
@@ -2234,6 +2561,38 @@ static void dplay_Close_dp(void) { /* (this) — 1 */
     g_eax = 0; g_esp += 8;
 }
 void com_dplay_log_send(uint32_t len);
+/* Dump the current BACK surface to a BMP on demand. The flight frame renders but the
+ * process exits before any Flip, so the flip-time capture never sees it. */
+void com_dump_back(const char* name);
+void com_dump_back(const char* name) {
+    if (!g_back_surface) return;
+    uint32_t w = g_back_surface->extra[1], h = g_back_surface->extra[2];
+    uint32_t bpp = g_back_surface->extra[3], pitch = g_back_surface->extra[4];
+    uint8_t* px = (uint8_t*)(uintptr_t)g_back_surface->extra[0];
+    if (!px || !w || !h) return;
+    char path[128]; snprintf(path, sizeof(path), "D:\\recomp\\pc\\xwa\\frame_%s.bmp", name);
+    FILE* fp = fopen(path, "wb"); if (!fp) return;
+    uint32_t rowsz = w * 3, pad = (4 - (rowsz & 3)) & 3, imgsz = (rowsz + pad) * h;
+    uint8_t hdr[54]; memset(hdr, 0, 54);
+    hdr[0]=66; hdr[1]=77; *(uint32_t*)(hdr+2)=54+imgsz; *(uint32_t*)(hdr+10)=54;
+    *(uint32_t*)(hdr+14)=40; *(int32_t*)(hdr+18)=(int32_t)w; *(int32_t*)(hdr+22)=-(int32_t)h;
+    *(uint16_t*)(hdr+26)=1; *(uint16_t*)(hdr+28)=24; *(uint32_t*)(hdr+34)=imgsz;
+    fwrite(hdr,1,54,fp);
+    uint8_t* row = (uint8_t*)malloc(rowsz + pad); memset(row, 0, rowsz + pad);
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t* src = px + (size_t)y * pitch;
+        for (uint32_t x = 0; x < w; x++) {
+            uint8_t r,g,b;
+            if (bpp == 16) { uint16_t v = ((uint16_t*)src)[x];
+                r = (uint8_t)(((v >> 11) & 0x1F) << 3); g = (uint8_t)(((v >> 5) & 0x3F) << 2); b = (uint8_t)((v & 0x1F) << 3); }
+            else { b = src[x*4+0]; g = src[x*4+1]; r = src[x*4+2]; }
+            row[x*3+0]=b; row[x*3+1]=g; row[x*3+2]=r;
+        }
+        fwrite(row,1,rowsz+pad,fp);
+    }
+    free(row); fclose(fp);
+    fprintf(stderr, "[DUMP] wrote %s (%ux%u bpp=%u)\n", path, w, h, bpp); fflush(stderr);
+}
 void com_dplay_log_send(uint32_t len) {
     static int _c; if (_c < 20) { fprintf(stderr, "[DP] Send len=%u g_dp_active=%d\n", len, g_dp_active); fflush(stderr); _c++; }
 }
@@ -2252,9 +2611,9 @@ void com_mocks_init(void) {
 
     /* ---- IDirectDraw (23 methods) ---- */
     {
-        uint32_t markers[23];
-        recomp_func_t funcs[23];
-        for (int i = 0; i < 23; i++) markers[i] = MK_DD + i;
+        uint32_t markers[24];
+        recomp_func_t funcs[24];
+        for (int i = 0; i < 24; i++) markers[i] = MK_DD + i;
 
         funcs[0]  = dd_QueryInterface;     /* [0]  QueryInterface (3) */
         funcs[1]  = dd_AddRef;             /* [1]  AddRef (1) */
@@ -2279,9 +2638,10 @@ void com_mocks_init(void) {
         funcs[20] = dd_SetCooperativeLevel;/* [20] SetCooperativeLevel (3) */
         funcs[21] = dd_SetDisplayMode;     /* [21] SetDisplayMode (4) */
         funcs[22] = com_stub_3arg;         /* [22] WaitForVerticalBlank (3) */
+        funcs[23] = dd_GetAvailableVidMem; /* [23] GetAvailableVidMem (5) -- IDirectDraw2+ */
 
-        g_ddraw_vtable_addr = alloc_vtable(markers, 23);
-        for (int i = 0; i < 23; i++)
+        g_ddraw_vtable_addr = alloc_vtable(markers, 24);
+        for (int i = 0; i < 24; i++)
             register_bridge(markers[i], funcs[i]);
     }
 
@@ -2409,7 +2769,7 @@ void com_mocks_init(void) {
     {
         uint32_t markers[16];
         recomp_func_t funcs[16];
-        for (int i = 0; i < 16; i++) markers[i] = MK_D3DVP + i;
+        for (int i = 0; i < 21; i++) markers[i] = MK_D3DVP + i;
 
         funcs[0]  = com_stub_3arg;    /* QueryInterface */
         funcs[1]  = dd_AddRef;        /* AddRef */
@@ -2427,9 +2787,17 @@ void com_mocks_init(void) {
         funcs[13] = com_stub_2arg;    /* AddLight */
         funcs[14] = com_stub_2arg;    /* DeleteLight */
         funcs[15] = com_stub_4arg;    /* NextLight */
+        /* IDirect3DViewport2/3 methods. The vtable stopped at 16 entries, but the game calls
+         * index 20 (Clear2) at 0x00598024 -- reading past the end of a 16-entry vtable. */
+        funcs[16] = com_stub_2arg;      /* GetViewport2 */
+        funcs[17] = d3dvp_SetViewport;  /* SetViewport2 -- D3DVIEWPORT2 shares the leading
+                                         * dwSize/dwX/dwY/dwWidth/dwHeight layout */
+        funcs[18] = com_stub_2arg;      /* SetBackgroundDepth2 */
+        funcs[19] = com_stub_2arg;      /* GetBackgroundDepth2 */
+        funcs[20] = com_stub_7arg;      /* Clear2 (this + 6 args) */
 
-        g_d3dviewport_vtable_addr = alloc_vtable(markers, 16);
-        for (int i = 0; i < 16; i++)
+        g_d3dviewport_vtable_addr = alloc_vtable(markers, 21);
+        for (int i = 0; i < 21; i++)
             register_bridge(markers[i], funcs[i]);
     }
 

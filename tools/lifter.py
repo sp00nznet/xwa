@@ -18,7 +18,19 @@ from capstone.x86 import (
     X86_REG_SP, X86_REG_BP, X86_REG_SI, X86_REG_DI,
     X86_REG_AL, X86_REG_CL, X86_REG_DL, X86_REG_BL,
     X86_REG_AH, X86_REG_CH, X86_REG_DH, X86_REG_BH,
+    X86_REG_ST0, X86_REG_ST7,
 )
+
+# CRT __ftol at 0x0059A650: round-toward-zero float->int64, result in edx:eax. Must be inlined
+# because the FPU stack is modelled per-function; see the call/jmp handling below.
+FTOL_VA = 0x0059A650
+# CRT floating-point epilogue at 0x005A30AB: restore control word, `pop edx`, `ret`, result left
+# in st(0). Must be inlined -- as an unresolved tail target it skipped the pop and leaked guest
+# stack on every call.
+FPEPI_VA = 0x005A30AB
+FPEPI_INLINE = '{ edx = POP32_VAL(esp); }'
+FTOL_INLINE = ('{ int64_t _ft = (int64_t)_st[0]; fp_pop(); '
+               'eax = (uint32_t)_ft; edx = (uint32_t)((uint64_t)_ft >> 32); }')
 
 
 # Register name mappings (Capstone ID -> C name)
@@ -82,9 +94,12 @@ def reg_name(reg_id: int) -> str:
         return REG_NAMES_8L[reg_id]
     if reg_id in REG_NAMES_8H:
         return REG_NAMES_8H[reg_id]
-    # FPU ST(i) registers: Capstone uses IDs 224-231 for st(0)-st(7)
-    if 224 <= reg_id <= 231:
-        return f"_st[{reg_id - 224}]"
+    # FPU ST(i) registers. NB: capstone 5 numbers st(0)..st(7) as 114..121 (capstone 4
+    # used 224..231). Hardcoding 224 made every `fmul st(1)` / `fxch st(1)` / `fstp st(i)`
+    # lift to a NEGATIVE index into the 8-element _st array, reading out of bounds --
+    # which is where the inf/NaN in the vertex projection came from. Use the symbol.
+    if X86_REG_ST0 <= reg_id <= X86_REG_ST7:
+        return f"_st[{reg_id - X86_REG_ST0}]"
     # Segment registers (flat mode - effectively no-ops)
     # CS=11, DS=17, ES=28, FS=32, GS=33, SS=49
     seg_names = {11: '_seg_cs', 17: '_seg_ds', 28: '_seg_es', 32: '_seg_fs', 33: '_seg_gs', 49: '_seg_ss'}
@@ -160,8 +175,8 @@ class Lifter:
             if r in REG_NAMES_8H:
                 return f"SET_HI8({REG_NAMES_8H[r]}, {value})"
             # Segment registers and FPU ST(i) - use as comment
-            if 224 <= r <= 231:
-                return f"_st[{r - 224}] = {value}"
+            if X86_REG_ST0 <= r <= X86_REG_ST7:
+                return f"_st[{r - X86_REG_ST0}] = {value}"
             # Segment registers - no-op in flat mode
             if r in (11, 17, 28, 32, 33, 49):
                 return f"(void)({value}) /* seg reg write */"
@@ -725,6 +740,15 @@ class Lifter:
                     lines.append(f"RECOMP_ICALL(0x{target:08X}u); {comment}")
                 elif target in self.func_names:
                     lines.append(f"RECOMP_CALL(recomp_{self.func_names[target]}); {comment}")
+                elif target == FPEPI_VA:
+                    lines.append(f"{FPEPI_INLINE} {comment}")
+                elif target == FTOL_VA:
+                    # __ftol. Each generated function owns a LOCAL `double _st[8]`, so a real
+                    # call could never see the caller's FPU stack -- the callee read its own
+                    # zeroed _st[0] and every float->int conversion in the game returned 0.
+                    # Inline it. The helper ORs 0x0C into the control word (round toward zero),
+                    # which is exactly what a C cast to an integer does.
+                    lines.append(f"{FTOL_INLINE} {comment}")
                 elif self.code_start <= target < self.code_end:
                     lines.append(f"RECOMP_CALL(sub_{target:08X}); {comment}")
                 else:
@@ -753,7 +777,11 @@ class Lifter:
 
         elif m == 'jmp':
             target = insn.get_branch_target()
-            if target:
+            if target == FTOL_VA:
+                lines.append(f"{FTOL_INLINE} esp += 4; return; {comment}")
+            elif target == FPEPI_VA:
+                lines.append(f"{FPEPI_INLINE} esp += 4; return; {comment}")
+            elif target:
                 lines.append(f"goto L_{target:08X}; {comment}")
             else:
                 # Indirect jump (switch table or vtable)
@@ -793,7 +821,7 @@ class Lifter:
                     else:
                         lines.append(f"fp_push(0.0); /* fld size={ops[0].size} */ {comment}")
                 else:
-                    lines.append(f"fp_push(_st[{ops[0].reg - 224}]); {comment}")  # ST(i) hack
+                    lines.append(f"fp_push(_st[{ops[0].reg - X86_REG_ST0}]); {comment}")  # ST(i) hack
 
         elif m == 'fild':
             if ops and ops[0].type == X86_OP_MEM:
@@ -819,7 +847,15 @@ class Lifter:
                     else:
                         lines.append(f"fp_pop(); /* fstp size={ops[0].size} */ {comment}")
                 else:
-                    lines.append(f"_st[{ops[0].reg - 224}] = fp_pop(); {comment}")
+                    # `fstp st(i)` copies st(0) into st(i) and THEN pops, so the slot that was
+                    # st(i) is st(i-1) once the pop has shifted the stack. Writing _st[i] after
+                    # the pop stored one slot too high; for i==0 (the common "discard" form) it
+                    # wrote the popped value straight back into st(0), undoing the pop.
+                    _i = ops[0].reg - X86_REG_ST0
+                    if _i == 0:
+                        lines.append(f"fp_pop(); /* fstp st(0): discard */ {comment}")
+                    else:
+                        lines.append(f"{{ double _v = fp_pop(); _st[{_i - 1}] = _v; }} {comment}")
 
         elif m == 'fst':
             if ops and ops[0].type == X86_OP_MEM:
@@ -900,10 +936,13 @@ class Lifter:
             lines.append(f"_st[0] = sqrt(_st[0]); {comment}")
 
         elif m == 'fxch':
-            if ops:
-                lines.append(f"{{ double _t = _st[0]; _st[0] = _st[{ops[0].reg - 224}]; _st[{ops[0].reg - 224}] = _t; }} {comment}")
-            else:
-                lines.append(f"{{ double _t = _st[0]; _st[0] = _st[1]; _st[1] = _t; }} {comment}")
+            # Capstone exposes FXCH's operands as (st(0), st(i)): ops[0] is the IMPLICIT st(0),
+            # so reading it emitted `_st[0] <-> _st[0]` -- a no-op -- for every fxch in the
+            # binary. Take the last operand, and treat a bare `fxch` as `fxch st(1)`.
+            _i = (ops[-1].reg - X86_REG_ST0) if ops else 1
+            if _i == 0:
+                _i = 1
+            lines.append(f"{{ double _t = _st[0]; _st[0] = _st[{_i}]; _st[{_i}] = _t; }} {comment}")
 
         elif m in ('fcomip', 'fucomip', 'fcompp'):
             lines.append(f"_fpu_cmp = (_st[0] < _st[1]) ? -1 : (_st[0] > _st[1]) ? 1 : 0; {comment}")
@@ -1146,7 +1185,7 @@ class Lifter:
             return f"(double)MEM32({addr})"
         elif op.type == X86_OP_REG:
             # ST(i) register
-            return f"_st[{op.reg - 224}]"
+            return f"_st[{op.reg - X86_REG_ST0}]"
         return "_st[1]"
 
     def lift_basic_block(self, block) -> list:

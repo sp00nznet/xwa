@@ -10,10 +10,15 @@
 #include <mmsystem.h>   /* timeBeginPeriod */
 #include <winternl.h>  /* NtCurrentTeb() */
 #include <stdio.h>
+#include <float.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <dbghelp.h>
+#include <math.h>
+#include <string.h>
+#include <stdlib.h>
 #include "recomp/recomp_types.h"
+#include "../hal/d3d11_renderer.h"
 
 /* Real-CRT sprintf bridge. The June relift left the guest _vsnprintf/_output
  * (sub_0059A680 -> sub_0059E580) broken: they crash walking the format/arg
@@ -54,12 +59,871 @@ void xwa_fprintf_bridge(void) {
  * ============================================================ */
 
 uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
+uint32_t g_ebp = 0;
+int g_ret_probe = 0;
+volatile unsigned g_lastblk = 0;
+volatile unsigned g_fgbase = 0, g_fgtblptr = 0, g_fgrec = 0, g_fgro = 0;
+volatile unsigned g_obj = 0, g_objro = 0, g_objtag = 0;
+volatile unsigned g_cw[3] = {0,0,0};
+volatile unsigned g_edxcap = 0xDEADBEEF, g_edxval = 0;
+volatile unsigned g_s1 = 0, g_s2 = 0, g_s3 = 0, g_smark = 0;
+volatile unsigned g_w1 = 0, g_w2 = 0;
+volatile unsigned g_ldrblk = 0;
+volatile unsigned g_after1=0, g_after2=0, g_aftermark=0;
+volatile unsigned g_strblk=0;
+volatile unsigned g_al1=0,g_al2=0,g_al3=0,g_almark=0;
+volatile unsigned g_g1=0,g_g2=0,g_g3=0,g_g4=0,g_gmark=0;
+volatile unsigned g_scmark=0;
+volatile unsigned g_p1=0,g_p2=0,g_p3=0,g_pmark=0;
+volatile unsigned g_r1=0,g_r2=0,g_rmark=0;
+volatile unsigned g_rw[4]={0,0,0,0}, g_rwidx[4]={0,0,0,0};
+volatile unsigned g_setup[4]={0,0,0,0};
+volatile unsigned g_dd[2]={0,0};
+volatile unsigned g_ctxblk=0;
+volatile unsigned g_t1=0,g_t2=0,g_t3=0,g_t4=0,g_tmark=0;
+volatile unsigned g_dv1=0,g_dv2=0,g_dv3=0,g_dvmark=0;
+volatile unsigned g_sd[4]={0,0,0,0};
+volatile unsigned g_scn=0; volatile int g_scn_n=0;
+volatile unsigned g_dr=0; volatile int g_dr_n=0;
+volatile unsigned g_em=0; volatile int g_em_n=0;
+volatile unsigned g_ebf[4]={0,0,0,0};
+volatile unsigned g_up[4]={0,0,0,0};
+volatile uint32_t g_ebp_pass = 0;
+volatile uint32_t g_std3d_a1 = 0, g_std3d_a2 = 0;
+volatile uint32_t g_open_a1 = 0, g_open_a2 = 0;
+volatile unsigned g_ty[10];
+volatile unsigned g_hw[4]={0,0,0,0};
+volatile unsigned g_dev[8];
+volatile unsigned g_ld[4];
+volatile uint32_t g_lastidx = 0;
+volatile unsigned g_t7[2];
+volatile unsigned g_up2[2];
+volatile unsigned g_fr=0; volatile int g_fr_n=0;
+volatile unsigned g_b80=0; volatile int g_b80n=0;
+volatile unsigned g_wi=0; volatile int g_wi_n=0;
+volatile unsigned g_st=0; volatile int g_st_n=0;
+volatile unsigned g_dc=0; volatile int g_dc_n=0;
+volatile unsigned g_ab=0; volatile int g_ab_n=0;
+volatile unsigned g_ol=0; volatile int g_ol_n=0;
+volatile unsigned g_fl[2]={0,0}, g_flmark=0;
+volatile unsigned g_sc[2]={0,0};
+volatile unsigned g_scblk=0;
+volatile unsigned g_csblk=0;
+volatile unsigned g_fltblk=0;
+volatile unsigned g_wb1=0,g_wb2=0,g_wbmark=0;
+volatile unsigned g_wbblk=0;
+volatile unsigned g_sel=0,g_selmark=0;
+volatile unsigned g_af1=0;
+volatile unsigned g_afblk=0;
+volatile unsigned g_witlast=0; volatile int g_witn=0; int g_wit_on=-1;
+/* Set only while xwa_drive_render is inside sub_004340D0, so render-path probes are not
+ * drowned out by the concourse/2D traffic that also runs sub_00433850. */
+int g_drv_active = 0;
+double _st[8] = {0};   /* shared x87 stack -- see recomp_types.h */
+int    _fp_top = 0;
 uint32_t g_ebx = 0, g_esi = 0, g_edi = 0;
 uint16_t g_seg_cs = 0, g_seg_ds = 0, g_seg_es = 0;
 uint16_t g_seg_fs = 0, g_seg_gs = 0, g_seg_ss = 0;
 
 /* Memory base offset (0 for fixed-base mapping) */
 ptrdiff_t g_mem_base = 0;
+
+/* XWA_RENDCOUNT: per-stage hit counters for the flight render pipeline, printed from the
+ * flight-view blit in com_mocks. Tells us at a glance WHICH stage stops feeding the next. */
+/* A zeroed scratch "scene object" for render objects whose ro+0xDD is missing. Guest pointers
+ * are host pointers here (g_mem_base == 0), so a normal heap block is directly usable as a
+ * guest address -- and unlike a hard-coded guest address it cannot collide with real game data
+ * (0x00B0FA00 did, and corrupted the heap). */
+/* Per-object stand-in scene records. One shared scratch was wrong: every render object we
+ * fixed up pointed at the SAME block, so they scribbled over each other (its position came
+ * back as 2.59e36 garbage) and the transform read a nonsense object. Give each index its own
+ * record, seeded with a position in front of the camera so the perspective divide gets a
+ * non-zero depth instead of 640/0. */
+#define XWA_SCENE_STRIDE 0x100u
+#define XWA_SCENE_COUNT  1200u
+uint32_t xwa_scene_slot(uint32_t idx) {
+    static uint8_t* base = NULL;
+    if (!base) {
+        base = (uint8_t*)calloc(XWA_SCENE_COUNT, XWA_SCENE_STRIDE);
+        if (base) {
+            for (uint32_t i = 0; i < XWA_SCENE_COUNT; i++) {
+                float* f = (float*)(base + (size_t)i * XWA_SCENE_STRIDE);
+                f[2] = (float)(((int)(i % 5) - 2) * 700);
+                f[3] = (float)(((int)((i / 5) % 5) - 2) * 700);
+                f[4] = 3000.0f + (float)(i % 9) * 400.0f;
+            }
+        }
+    }
+    if (!base || idx >= XWA_SCENE_COUNT) idx = 0;
+    return base ? (uint32_t)(uintptr_t)(base + (size_t)idx * XWA_SCENE_STRIDE) : 0;
+}
+
+/* Is this pointer one of OUR fabricated stand-in scene records (rather than a real one the
+ * engine built)? Objects backed by a stand-in have no genuine position, so they transform to
+ * depth 0 and rasterise as screen-filling inf/NaN garbage -- they should not be drawn at all. */
+int xwa_is_stand_in(uint32_t addr) {
+    extern uint32_t xwa_scene_slot(uint32_t);
+    uint32_t base = xwa_scene_slot(0);
+    if (!base || !addr) return 0;
+    return addr >= base && addr < base + XWA_SCENE_COUNT * XWA_SCENE_STRIDE;
+}
+
+uint32_t xwa_scene_scratch(void) {
+    /* Hand out a DISTINCT record per call, rotating through the per-object array. A single
+     * shared block meant every guard that fell back here aliased the same memory: consumers
+     * scribbled over each other (its position field read back as 2.59e36) and the vertex
+     * transform then read an object sitting at the camera, giving depth 0 and 640/0.
+     * Each slot is pre-seeded with a position in front of the camera. */
+    if (!getenv("XWA_SHAREDSCRATCH")) {
+        static uint32_t next = 1;
+        uint32_t slot = xwa_scene_slot(next);
+        next = (next + 1) % XWA_SCENE_COUNT;
+        if (!next) next = 1;
+        if (slot) return slot;
+    }
+    static void* p = NULL;
+    if (!p) {
+        p = calloc(1, 0x400);
+        if (p) {
+            /* This block also ends up standing in for a real scene object in the vertex
+             * transform (sub_00442820 reads a position at +0x8/+0xC/+0x10 as floats, and the
+             * perspective divide is 640 / view-depth). All-zero meant depth 0 -> 640/0 -> inf
+             * vertices, so place it well in front of the camera instead of at it. */
+            float* f = (float*)p;
+            f[2] = 0.0f;      /* +0x8  x */
+            f[3] = 0.0f;      /* +0xC  y */
+            f[4] = 4096.0f;   /* +0x10 z */
+        }
+    }
+    return (uint32_t)(uintptr_t)p;
+}
+
+/* XWA_FPTRAP: unmask FP divide-by-zero/invalid so the very first degenerate divide raises
+ * an exception the VEH can locate. The engine transforms vertices itself and is emitting
+ * inf/NaN screen coordinates; a float divide does not trap by default, so the damage only
+ * surfaces much later as garbage geometry. This turns it into a precise source line. */
+void xwa_fptrap_enable(void) {
+    static int done = 0;
+    if (done || !getenv("XWA_FPTRAP")) return;
+    done = 1;
+    unsigned cur = 0;
+    _controlfp_s(&cur, 0, _EM_ZERODIVIDE | _EM_INVALID);
+    fprintf(stderr, "[FPTRAP] float divide-by-zero / invalid now raise\n");
+    fflush(stderr);
+}
+
+unsigned g_ccount[4];   /* camera chain: sub_00478490 build, sub_004949B0 copy, sub_004EE820 per-craft */
+uint32_t g_hostmod_lo = 0, g_hostmod_hi = 0;
+unsigned g_texpath[3];
+unsigned g_bindfn[8];
+unsigned g_objtype[40];
+unsigned g_node1;
+unsigned g_anyct;
+unsigned g_walk[4];
+unsigned g_exits[4];
+unsigned g_link_n;
+unsigned g_subload_n;
+unsigned g_bld[4];
+unsigned g_cal[8];
+unsigned g_bpath;
+int g_np[8];
+
+/* ============================================================================
+ * xwa_native_mesh -- draw the game's own loaded OPT geometry (XWA_NATIVEDRAW).
+ *
+ * The lifted model renderer (sub_00442F70) is unreachable in this port (#574-#580), so the meshes
+ * the engine has already loaded are drawn here instead. OPT runtime blocks are byte-packed and
+ * self-describing (#552 + the MESHSCAN probe):
+ *     +0x00 = 0    +0x04 = type    +0x10 = count    +0x14 = block+0x18 (inline data)
+ *   type 3 = vertex list  (count xyz float triples)
+ *   type 1 = face data    (data[0] = face count, then 4 int32 vertex indices per face, -1 = triangle)
+ * A mesh's faces are the type-1 blocks between its vertex block and the next type-3 block (one per
+ * LOD; the first is the most detailed).
+ *
+ * The recogniser hands over one mesh at a time and only on a few frames, so meshes are CACHED with
+ * the object transform they arrived with and the whole scene is re-emitted on every update.
+ * ============================================================================ */
+int g_nrot[4];              /* object orientation: yaw, pitch, roll (XwaObject +0x13/+0x15/+0x17) */
+int g_camrot[4];            /* player craft orientation = camera orientation (cockpit view) */
+
+#define NMESH_MAX 96
+static struct { uint32_t vnode; int p[3]; int rot[3]; } g_nmesh[NMESH_MAX];
+static int g_nmesh_n;
+
+static int xwa_blk(uint32_t a) {
+    return xwa_readable(a, 0x20) && MEM32(a) == 0u && MEM32(a + 0x14) == a + 0x18u;
+}
+
+static float xwa_f32(uint32_t a) { uint32_t v = MEM32(a); float f; memcpy(&f, &v, 4); return f; }
+
+/* Shared view basis (right / forward / up) -- one camera for the whole scene. */
+static double vbx, vby, vbz, vfx, vfy, vfz, vux, vuy, vuz;
+
+static void nview_build(void)
+{
+    double fx, fy, fz, rxv, ryv, l;
+    if (getenv("XWA_NLOOKAT") && g_nmesh_n > 0) {
+        /* Spectator view: aim at the centroid of everything cached, so the whole formation is in
+         * one frame. The cockpit camera (below) is the game's real view; here the force-built
+         * world puts the wingmen 40-80 degrees off it, which shows an empty sky. */
+        int q, best = 0; double bd = 1e30;
+        for (q = 0; q < g_nmesh_n; q++) {          /* nearest craft, not the centroid: one stray
+                                                    * object drags a centroid off into empty sky */
+            double dx = g_nmesh[q].p[0] - (double)g_np[3];
+            double dy = g_nmesh[q].p[1] - (double)g_np[4];
+            double dz = g_nmesh[q].p[2] - (double)g_np[5];
+            double d2 = dx*dx + dy*dy + dz*dz;
+            if (d2 > 100.0 && d2 < bd) { bd = d2; best = q; }
+        }
+        fx = g_nmesh[best].p[0] - (double)g_np[3];
+        fy = g_nmesh[best].p[1] - (double)g_np[4];
+        fz = g_nmesh[best].p[2] - (double)g_np[5];
+    } else {
+        double poff = getenv("XWA_NPITCHOFF") ? atof(getenv("XWA_NPITCHOFF")) : 16384.0;
+        double cu = g_camrot[0] * 9.5873799e-5, cp = (g_camrot[1] - poff) * 9.5873799e-5;
+        fx = -sin(cu) * cos(cp); fy = cos(cu) * cos(cp); fz = sin(cp);
+    }
+    l = sqrt(fx*fx + fy*fy + fz*fz); if (l < 1e-9) { fx = 0; fy = 1; fz = 0; l = 1; }
+    fx /= l; fy /= l; fz /= l;
+    rxv = fy; ryv = -fx;                                /* right = forward x world-up(0,0,1) */
+    l = sqrt(rxv*rxv + ryv*ryv); if (l < 1e-9) { rxv = 1; ryv = 0; l = 1; }
+    rxv /= l; ryv /= l;
+    vbx = rxv; vby = ryv; vbz = 0.0;
+    vfx = fx;  vfy = fy;  vfz = fz;
+    vux = ryv*fz - 0.0*fy; vuy = 0.0*fx - rxv*fz; vuz = rxv*fy - ryv*fx;
+}
+
+/* Starfield: without it a correct scene still reads as an empty blue void. Fixed directions from
+ * a deterministic LCG, so the sky is stable frame to frame and rotates with the camera. */
+static int nstars_emit(D3DTLVERTEX* vb, int n, int cap)
+{
+    unsigned seed = 0x5EEDu, i, count = 320;
+    int start = n;
+    if (getenv("XWA_NOSTARS")) return n;
+    for (i = 0; i < count && n + 6 <= cap; i++) {
+        double dx, dy, dz, l, f, sxc, syc, sz; int q, sh;
+        uint32_t col;
+        seed = seed * 1103515245u + 12345u; dx = (double)(int)(seed >> 9) / 4194304.0 - 1.0;
+        seed = seed * 1103515245u + 12345u; dy = (double)(int)(seed >> 9) / 4194304.0 - 1.0;
+        seed = seed * 1103515245u + 12345u; dz = (double)(int)(seed >> 9) / 4194304.0 - 1.0;
+        seed = seed * 1103515245u + 12345u; sh = 140 + (int)((seed >> 16) % 116u);
+        l = sqrt(dx*dx + dy*dy + dz*dz); if (l < 0.2) continue;
+        dx /= l; dy /= l; dz /= l;
+        f = dx*vfx + dy*vfy + dz*vfz;
+        if (f < 0.25) continue;                          /* behind or far off-axis */
+        sxc = 400.0 + 640.0 * (dx*vbx + dy*vby + dz*vbz) / f;
+        syc = 300.0 - 640.0 * (dx*vux + dy*vuy + dz*vuz) / f;
+        if (sxc < 0.0 || sxc > 800.0 || syc < 0.0 || syc > 600.0) continue;
+        sz = 0.99999;                                    /* behind everything else */
+        col = 0xFF000000u | ((uint32_t)sh << 16) | ((uint32_t)sh << 8) | (uint32_t)sh;
+        {   static const float ox[6] = { -1.0f, 1.0f, -1.0f,  1.0f, 1.0f, -1.0f };
+            static const float oy[6] = { -1.0f, -1.0f, 1.0f, -1.0f, 1.0f,  1.0f };
+            for (q = 0; q < 6; q++) {
+                vb[n].sx = (float)sxc + ox[q]; vb[n].sy = (float)syc + oy[q];
+                vb[n].sz = (float)sz; vb[n].rhw = 1.0f;
+                vb[n].diffuse = col; vb[n].specular = 0; vb[n].tu = 0.0f; vb[n].tv = 0.0f;
+                n++;
+            }
+        }
+    }
+    if (n > start) d3d11_draw_native(&vb[start], n - start, -1);
+    return n;
+}
+
+/* Emit one cached mesh into vb; returns the new vertex count. */
+/* Textures. The OPT's own 8-bit pixels plus palette are a dead end here -- the palette pointer in
+ * the loaded record does not survive the load. But the engine has ALREADY converted every texture
+ * into a 16-bit DirectDraw surface through our own mock, so read it from there instead:
+ *   texture node (type 27) +0x14 -> descriptor
+ *   descriptor +0x23       -> { count, surfaceA, surfaceB }
+ *   surface (tag 'DDSF')   +0x0C = pixels, +0x10 = w, +0x14 = h, +0x18 = bpp, +0x1C = pitch
+ * The surface is in the pixel format our mock advertises (ARGB1555; XWA_TEX565 if that flips). */
+#define MOCK_TAG_DDSF 0x44445346u
+
+static uint32_t ntex_surface(uint32_t node)
+{
+    uint32_t dp, rec, k;
+    if (!xwa_readable(node, 0x18)) return 0;
+    dp = MEM32(node + 0x14);
+    if (!dp || !xwa_readable(dp, 0x30)) return 0;
+    rec = MEM32(dp + 0x23);
+    if (rec && xwa_readable(rec, 16))
+        for (k = 0; k < 3u; k++) {
+            uint32_t cand = MEM32(rec + 4u + k * 4u);
+            if (cand && xwa_readable(cand, 0x24) && MEM32(cand + 8) == MOCK_TAG_DDSF) return cand;
+        }
+    for (k = 0; k < 0x30u; k++) {          /* fall back to any surface pointer in the descriptor */
+        uint32_t cand = MEM32(dp + k);
+        if (cand && xwa_readable(cand, 0x24) && MEM32(cand + 8) == MOCK_TAG_DDSF) return cand;
+    }
+    return 0;
+}
+
+static int ntex_get(uint32_t node)
+{
+    static uint32_t px[512 * 512];
+    uint32_t surf, pix, w, h, bpp, pitch, x, y;
+    /* Our DirectDraw mock advertises ARGB1555 for texture surfaces (#176), but what the engine
+     * actually writes into them decodes as 565 -- reading 1555 tints every hull purple. */
+    int fmt565 = getenv("XWA_TEX555") ? 0 : 1;
+    if (getenv("XWA_NOTEX")) return -1;
+    surf = ntex_surface(node);
+    if (!surf) return -1;
+    pix   = MEM32(surf + 0x0C);
+    w     = MEM32(surf + 0x10);
+    h     = MEM32(surf + 0x14);
+    bpp   = MEM32(surf + 0x18);
+    pitch = MEM32(surf + 0x1C);
+    if (w < 1u || h < 1u || w > 512u || h > 512u || bpp != 16u) return -1;
+    if (!pitch) pitch = w * 2u;
+    if (!pix || !xwa_readable(pix, pitch * h)) return -1;
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++) {
+            uint32_t c = MEM16(pix + y * pitch + x * 2u), r, g, b;
+            if (fmt565) { r = (c >> 11) & 0x1Fu; g = (c >> 5) & 0x3Fu; b = c & 0x1Fu;
+                          r = (r * 255u) / 31u; g = (g * 255u) / 63u; b = (b * 255u) / 31u; }
+            else        { r = (c >> 10) & 0x1Fu; g = (c >> 5) & 0x1Fu; b = c & 0x1Fu;
+                          r = (r * 255u) / 31u; g = (g * 255u) / 31u; b = (b * 255u) / 31u; }
+            px[y * w + x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+        }
+    if (getenv("XWA_TEXDUMP")) {   /* write the decoded texture out so it can actually be looked at */
+        static int dn;
+        if (dn < 12) { char path[64]; FILE* f;
+            sprintf(path, "tex_%02d_%ux%u.bmp", dn++, w, h);
+            f = fopen(path, "wb");
+            if (f) {
+                uint32_t rowb = (w * 3u + 3u) & ~3u, isz = rowb * h, y2, x2;
+                uint8_t hdr[54] = {0};
+                hdr[0]='B'; hdr[1]='M'; *(uint32_t*)&hdr[2] = 54u + isz; *(uint32_t*)&hdr[10] = 54u;
+                *(uint32_t*)&hdr[14] = 40u; *(int32_t*)&hdr[18] = (int32_t)w;
+                *(int32_t*)&hdr[22] = -(int32_t)h; *(uint16_t*)&hdr[26] = 1; *(uint16_t*)&hdr[28] = 24;
+                *(uint32_t*)&hdr[34] = isz;
+                fwrite(hdr, 1, 54, f);
+                for (y2 = 0; y2 < h; y2++) {
+                    uint8_t row[512*3+4]; memset(row, 0, rowb);
+                    for (x2 = 0; x2 < w; x2++) { uint32_t c = px[y2*w + x2];
+                        row[x2*3+0] = (uint8_t)(c & 0xFF); row[x2*3+1] = (uint8_t)((c >> 8) & 0xFF);
+                        row[x2*3+2] = (uint8_t)((c >> 16) & 0xFF); }
+                    fwrite(row, 1, rowb, f);
+                }
+                fclose(f);
+            }
+        }
+    }
+    {   int id = d3d11_native_texture(node, px, (int)w, (int)h);
+        static int lg;
+        if (lg < 8 && getenv("XWA_NMESHLOG")) { lg++;
+            fprintf(stderr, "[NTEX] node=0x%08X surf=0x%08X %ux%u bpp=%u pitch=%u -> id=%d px0=%08X\n",
+                    node, surf, w, h, bpp, pitch, id, px[0]); fflush(stderr); }
+        return id; }
+}
+
+/* Per-mesh context shared with nfaces_emit (rendering is single-threaded). */
+static uint32_t nc_vdata, nc_vcnt, nc_tc, nc_tccnt;
+static int nc_tex = -1;
+static double nc_relx, nc_rely, nc_relz, nc_k, nc_m[9];
+
+static int nfaces_emit(uint32_t a, D3DTLVERTEX* vb, int n, int cap);
+void xwa_native_flush(void);
+
+static int nmesh_emit(int mi, D3DTLVERTEX* vb, int n, int cap)
+{
+    uint32_t vnode = g_nmesh[mi].vnode, vcnt, vdata, a, fgrp = 0;
+    double relx, rely, relz, k, ca, sa, cb, sb, cc, sc, m[9];
+
+    if (!xwa_blk(vnode) || MEM32(vnode + 4) != 3u) return n;
+    vcnt = MEM32(vnode + 0x10);
+    if (vcnt < 3u || vcnt > 4096u || !xwa_readable(vnode + 0x18, vcnt * 12u)) return n;
+    vdata = vnode + 0x18;
+
+    {   /* XWA angles are 16-bit (65536 = 360 deg). Pitch is measured from a different zero than
+         * yaw/roll: craft sitting level at mission start all read 16384, so that is the offset. */
+        double poff = getenv("XWA_NPITCHOFF") ? atof(getenv("XWA_NPITCHOFF")) : 16384.0;
+        double u = g_nmesh[mi].rot[0] * 9.5873799e-5;
+        double v = (g_nmesh[mi].rot[1] - poff) * 9.5873799e-5;
+        double w = g_nmesh[mi].rot[2] * 9.5873799e-5;
+        if (getenv("XWA_NOROT")) { u = v = w = 0.0; }
+        ca = cos(u); sa = sin(u); cb = cos(v); sb = sin(v); cc = cos(w); sc = sin(w);
+    }
+    /* yaw about Z, pitch about X, roll about Y */
+    m[0] =  ca*cc + sa*sb*sc;  m[1] = -sa*cb;  m[2] =  ca*sc - sa*sb*cc;
+    m[3] =  sa*cc - ca*sb*sc;  m[4] =  ca*cb;  m[5] =  sa*sc + ca*sb*cc;
+    m[6] = -cb*sc;             m[7] = -sb;     m[8] =  cb*cc;
+
+    relx = (double)(g_nmesh[mi].p[0] - g_np[3]);
+    rely = (double)(g_nmesh[mi].p[1] - g_np[4]);
+    relz = (double)(g_nmesh[mi].p[2] - g_np[5]);
+
+    /* OPT units -> world units. No measurement has pinned this constant, so it stays a knob:
+     * raise it if ships are specks, lower it if one hull fills the screen. */
+    k = getenv("XWA_NSCALE") ? atof(getenv("XWA_NSCALE")) : 0.12;
+
+    nc_vdata = vdata; nc_vcnt = vcnt;
+    nc_tc = 0; nc_tccnt = 0;
+    for (a = vdata + vcnt * 12u; a < vdata + 0x8000u; a++) {   /* texture coords: type 13, (u,v) */
+        if (!xwa_blk(a)) continue;
+        if (MEM32(a + 4) == 3u) break;
+        if (MEM32(a + 4) == 13u) { nc_tccnt = MEM32(a + 0x10); nc_tc = a + 0x18; break; }
+    }
+    nc_relx = relx; nc_rely = rely; nc_relz = relz; nc_k = k;
+    for (a = 0; a < 9; a++) nc_m[a] = m[a];
+
+    /* Find this mesh's FaceGrouping (type 21). Its children are LODs, and each LOD's children are
+     * texture(20)/face(1) pairs. Drawing every type-1 block in the region -- what the flat scan
+     * did -- stacks LOD1/LOD2 on top of LOD0 and buries the hull under coarse geometry. */
+    for (a = vdata + vcnt * 12u; a < vdata + 0x8000u; a++) {
+        if (!xwa_readable(a, 0x18) || MEM32(a) != 0u || MEM32(a + 4) != 21u) continue;
+        {   uint32_t nch = MEM32(a + 8), arr = MEM32(a + 0xC);
+            if (nch < 1u || nch > 32u || !xwa_readable(arr, nch * 4u)) continue;
+            fgrp = a; break; }
+    }
+    if (getenv("XWA_NMESHLOG")) {
+        static int ml;
+        if (ml < 12) { uint32_t q; double x0=1e30,x1=-1e30,y0=1e30,y1=-1e30,z0=1e30,z1=-1e30; ml++;
+            for (q = 0; q < vcnt; q++) {
+                double X = xwa_f32(vdata+q*12), Y = xwa_f32(vdata+q*12+4), Z = xwa_f32(vdata+q*12+8);
+                if (X<x0)x0=X; if (X>x1)x1=X; if (Y<y0)y0=Y; if (Y>y1)y1=Y; if (Z<z0)z0=Z; if (Z>z1)z1=Z;
+            }
+            fprintf(stderr, "[NMESH] vnode=0x%08X verts=%u %s lods=%u  extent x[%.0f,%.0f] y[%.0f,%.0f] z[%.0f,%.0f]\n",
+                    vnode, vcnt, fgrp ? "HIER" : "flat-scan", fgrp ? MEM32(fgrp + 8) : 0u,
+                    x0, x1, y0, y1, z0, z1);
+            fflush(stderr);
+        }
+    }
+    if (fgrp) {
+        uint32_t arr  = MEM32(fgrp + 0xC);
+        uint32_t nlod = MEM32(fgrp + 8);
+        uint32_t want = getenv("XWA_NLOD") ? (uint32_t)atoi(getenv("XWA_NLOD")) : 0u;
+        uint32_t lodn, nch, carr, c;
+        if (want >= nlod) want = 0u;
+        lodn = MEM32(arr + want * 4u);                 /* one LOD -- the most detailed by default */
+        if (xwa_readable(lodn, 0x18)) {
+            nch = MEM32(lodn + 8); carr = MEM32(lodn + 0xC);
+            if (nch >= 1u && nch <= 128u && xwa_readable(carr, nch * 4u)) {
+                nc_tex = -1;
+                if (getenv("XWA_NMESHLOG")) { static int lg3; uint32_t q, t20 = 0, t1 = 0;
+                    if (lg3 < 6) { lg3++;
+                        for (q = 0; q < nch; q++) { uint32_t ch = MEM32(carr + q*4u);
+                            if (!xwa_readable(ch, 0x18)) continue;
+                            if (MEM32(ch + 4) == 20u) t20++;
+                            if (MEM32(ch + 4) == 1u) t1++; }
+                        fprintf(stderr, "[NLOD] children=%u textures=%u faceblocks=%u types:", nch, t20, t1);
+                        for (q = 0; q < nch && q < 20u; q++) { uint32_t ch = MEM32(carr + q*4u);
+                            fprintf(stderr, " %u", xwa_readable(ch, 0x18) ? MEM32(ch + 4) : 999u); }
+                        fprintf(stderr, "\n");
+                        for (q = 0; q < nch && q < 3u; q++) { uint32_t ch = MEM32(carr + q*4u), r;
+                            if (!xwa_readable(ch, 0x40) || MEM32(ch + 4) != 27u) continue;
+                            fprintf(stderr, "  [T27] node=0x%08X:", ch);
+                            for (r = 0; r < 12u; r++) fprintf(stderr, " %08X", MEM32(ch + r*4));
+                            { uint32_t dp = MEM32(ch + 0x14);
+                              if (xwa_readable(dp, 0x40)) {
+                                  fprintf(stderr, "  bytes@dp:");
+                                  for (r = 0; r < 40u; r++) fprintf(stderr, " %02X", MEM8(dp + r));
+                                  fprintf(stderr, "  fields: size=%u mip=%u w=%u h=%u palcand=%08X,%08X,%08X",
+                                          MEM32(dp+0x0E), MEM32(dp+0x12), MEM32(dp+0x16), MEM32(dp+0x1A),
+                                          MEM32(dp+0x02), MEM32(dp+0x06), MEM32(dp+0x0A));
+                              } }
+                            fprintf(stderr, "\n"); }
+                        fflush(stderr); } }
+                for (c = 0; c < nch; c++) {
+                    uint32_t child = MEM32(carr + c * 4u);
+                    if (!xwa_readable(child, 0x18)) continue;
+                    /* Inside a LOD the children alternate texture(20) / faces(1): each face block
+                     * is skinned with the texture node that precedes it. */
+                    if (MEM32(child + 4) == 27u) { nc_tex = ntex_get(child); continue; }
+                    if (MEM32(child + 4) == 24u) {   /* NodeReference: the texture lives behind it */
+                        uint32_t rn = MEM32(child + 8), ra = MEM32(child + 0xC), rk;
+                        if (rn >= 1u && rn <= 16u && xwa_readable(ra, rn * 4u))
+                            for (rk = 0; rk < rn; rk++) {
+                                uint32_t rc = MEM32(ra + rk * 4u);
+                                if (xwa_readable(rc, 0x18) && MEM32(rc + 4) == 27u) {
+                                    int id = ntex_get(rc); if (id >= 0) { nc_tex = id; break; }
+                                }
+                            }
+                        continue;
+                    }
+                    if (MEM32(child) == 0u && MEM32(child + 4) == 1u)
+                        n = nfaces_emit(child, vb, n, cap);
+                }
+                return n;
+            }
+        }
+    }
+    /* No usable FaceGrouping: fall back to the flat scan (every face block up to the next mesh). */
+    for (a = vdata + vcnt * 12u; a < vdata + 0x8000u; a++) {
+        if (!xwa_blk(a)) continue;
+        if (MEM32(a + 4) == 3u) break;
+        if (MEM32(a + 4) == 1u) n = nfaces_emit(a, vb, n, cap);
+    }
+    return n;
+}
+
+/* Emit one FaceData block. Layout, confirmed against the OPT file itself (FLIGHTMODELS/*.OPT):
+ *   +0x10      = face count            +0x18 = edge count
+ *   +0x1C      = 16 int32 PER FACE: vertex[4], edge[4], texcoord[4], normal[4]  (-1 = triangle)
+ *   +0x1C+n*64 = 3 floats per face: the face normal
+ *   +0x1C+n*76 = 6 more floats per face (100 bytes per face in total)
+ * The index records are 64 bytes apart, not 16 -- reading them at 16 fed edge and texture indices
+ * to the rasteriser as if they were vertices, which is what mangled the hulls. */
+static int nfaces_emit(uint32_t a, D3DTLVERTEX* vb, int n, int cap)
+{
+    uint32_t fcnt = MEM32(a + 0x10), fp = a + 0x1C, fnorm, i;
+    int start = n;
+    if (fcnt < 1u || fcnt > 4096u || !xwa_readable(fp, fcnt * 100u)) return n;
+    fnorm = fp + fcnt * 64u;
+    if (getenv("XWA_UVLOG")) { static int uv;
+        if (uv < 6 && fcnt > 0u) { uint32_t q; uv++;
+            fprintf(stderr, "[UV] block=0x%08X faces=%u tex=%d tcblock=0x%08X tccnt=%u\n",
+                    a, fcnt, nc_tex, nc_tc, nc_tccnt);
+            for (q = 0; q < 2u && q < fcnt; q++) {
+                int t0 = (int32_t)MEM32(fp + q*64 + 32), t1 = (int32_t)MEM32(fp + q*64 + 36);
+                int t2 = (int32_t)MEM32(fp + q*64 + 40), t3 = (int32_t)MEM32(fp + q*64 + 44);
+                fprintf(stderr, "   face%u tcidx=%d,%d,%d,%d", q, t0, t1, t2, t3);
+                if (nc_tc && t0 >= 0 && (uint32_t)t0 < nc_tccnt)
+                    fprintf(stderr, "  uv0=(%.3f,%.3f) uv1=(%.3f,%.3f)",
+                            xwa_f32(nc_tc + (uint32_t)t0*8u), xwa_f32(nc_tc + (uint32_t)t0*8u + 4u),
+                            (t1 >= 0 && (uint32_t)t1 < nc_tccnt) ? xwa_f32(nc_tc + (uint32_t)t1*8u) : -99.0,
+                            (t1 >= 0 && (uint32_t)t1 < nc_tccnt) ? xwa_f32(nc_tc + (uint32_t)t1*8u + 4u) : -99.0);
+                fprintf(stderr, "\n");
+            }
+            fflush(stderr); } }
+
+    for (i = 0; i < fcnt && n + 6 <= cap; i++) {
+        int idx[4], j, nv, bad = 0;
+        double px[4], py[4], pz[4], sx[4], sy[4], sz[4];
+        idx[0] = (int32_t)MEM32(fp + i*64 + 0);  idx[1] = (int32_t)MEM32(fp + i*64 + 4);
+        idx[2] = (int32_t)MEM32(fp + i*64 + 8);  idx[3] = (int32_t)MEM32(fp + i*64 + 12);
+        nv = (idx[3] >= 0) ? 4 : 3;
+        for (j = 0; j < nv; j++) if (idx[j] < 0 || (uint32_t)idx[j] >= nc_vcnt) bad = 1;
+        if (bad) continue;
+        for (j = 0; j < nv; j++) {
+            double vx = xwa_f32(nc_vdata + (uint32_t)idx[j]*12 + 0);
+            double vy = xwa_f32(nc_vdata + (uint32_t)idx[j]*12 + 4);
+            double vz = xwa_f32(nc_vdata + (uint32_t)idx[j]*12 + 8);
+            double wx = nc_relx + nc_k * (nc_m[0]*vx + nc_m[1]*vy + nc_m[2]*vz);
+            double wy = nc_rely + nc_k * (nc_m[3]*vx + nc_m[4]*vy + nc_m[5]*vz);
+            double wz = nc_relz + nc_k * (nc_m[6]*vx + nc_m[7]*vy + nc_m[8]*vz);
+            px[j] = wx*vbx + wy*vby + wz*vbz;       /* world -> view */
+            py[j] = wx*vfx + wy*vfy + wz*vfz;
+            pz[j] = wx*vux + wy*vuy + wz*vuz;
+            if (py[j] < 0.05) { bad = 1; break; }   /* behind the camera */
+            sx[j] = 400.0 + 640.0 * px[j] / py[j];
+            sy[j] = 300.0 - 640.0 * pz[j] / py[j];
+            sz[j] = 1.0 - 1.0 / (1.0 + py[j]);      /* 0..1 depth, nearer = smaller */
+        }
+        if (bad) continue;
+        {   /* The model stores a real normal per face: use it to cull backfaces and to shade,
+             * instead of guessing from the winding. */
+            double nx = xwa_f32(fnorm + i*12 + 0), ny = xwa_f32(fnorm + i*12 + 4);
+            double nz = xwa_f32(fnorm + i*12 + 8);
+            double wnx = nc_m[0]*nx + nc_m[1]*ny + nc_m[2]*nz;    /* model -> world */
+            double wny = nc_m[3]*nx + nc_m[4]*ny + nc_m[5]*nz;
+            double wnz = nc_m[6]*nx + nc_m[7]*ny + nc_m[8]*nz;
+            double len = sqrt(wnx*wnx + wny*wny + wnz*wnz), d;
+            double ex, ey, ez;
+            uint32_t col; int sh;
+            if (len < 1e-12) continue;
+            wnx /= len; wny /= len; wnz /= len;
+            ex = px[0]*vbx + py[0]*vfx + pz[0]*vux;               /* view -> world eye vector */
+            ey = px[0]*vby + py[0]*vfy + pz[0]*vuy;
+            ez = px[0]*vbz + py[0]*vfz + pz[0]*vuz;
+            if (!getenv("XWA_NOCULL") && (wnx*ex + wny*ey + wnz*ez) > 0.0) continue;
+            d = 0.40*wnx - 0.80*wny + 0.45*wnz;
+            if (d < 0.0) d = 0.0;
+            sh = (nc_tex >= 0) ? (int)(150.0 + 105.0 * d)   /* modulated onto the texture */
+                               : (int)(50.0 + 170.0 * d);
+            if (sh > 255) sh = 255;
+            col = 0xFF000000u | ((uint32_t)sh << 16) | ((uint32_t)sh << 8) | (uint32_t)(sh + 20);
+            if (getenv("XWA_TEXONLY")) col = 0xFFFFFFFFu;   /* raw texture, no shading */
+            for (j = 0; j < nv - 2; j++) {          /* fan: (0,1,2) then (0,2,3) */
+                int t[3], q; t[0] = 0; t[1] = j + 1; t[2] = j + 2;
+                for (q = 0; q < 3; q++) {
+                    int sidx = t[q];
+                    vb[n].sx = (float)sx[sidx]; vb[n].sy = (float)sy[sidx]; vb[n].sz = (float)sz[sidx];
+                    vb[n].rhw = 1.0f; vb[n].diffuse = col; vb[n].specular = 0;
+                    vb[n].tu = 0.0f; vb[n].tv = 0.0f;
+                    if (nc_tc && nc_tex >= 0) {          /* face's texcoord indices, 3rd index group */
+                        int ti = (int32_t)MEM32(fp + i*64 + 32 + sidx*4);
+                        if (ti >= 0 && (uint32_t)ti < nc_tccnt) {
+                            vb[n].tu = xwa_f32(nc_tc + (uint32_t)ti * 8u);
+                            vb[n].tv = xwa_f32(nc_tc + (uint32_t)ti * 8u + 4u);
+                        }
+                    }
+                    n++;
+                }
+            }
+        }
+    }
+    if (n > start) d3d11_draw_native(&vb[start], n - start, nc_tex);
+    return n;
+}
+
+/* Add one mesh (a type-3 vertex node) to the scene cache with the transform of the object it
+ * belongs to. Returns 1 if it was new. */
+static int nmesh_add(uint32_t vnode, const int* pos, const int* rot)
+{
+    int i;
+    if (!xwa_blk(vnode) || MEM32(vnode + 4) != 3u) return 0;
+    for (i = 0; i < g_nmesh_n; i++)
+        if (g_nmesh[i].vnode == vnode && g_nmesh[i].p[0] == pos[0]
+            && g_nmesh[i].p[1] == pos[1] && g_nmesh[i].p[2] == pos[2]) return 0;
+    if (g_nmesh_n >= NMESH_MAX) return 0;
+    g_nmesh[g_nmesh_n].vnode  = vnode;
+    g_nmesh[g_nmesh_n].p[0]   = pos[0]; g_nmesh[g_nmesh_n].p[1] = pos[1]; g_nmesh[g_nmesh_n].p[2] = pos[2];
+    g_nmesh[g_nmesh_n].rot[0] = rot[0]; g_nmesh[g_nmesh_n].rot[1] = rot[1]; g_nmesh[g_nmesh_n].rot[2] = rot[2];
+    g_nmesh_n++;
+    return 1;
+}
+
+/* Walk an OPT node tree and cache every mesh in it. Container nodes carry a child count at +8 and
+ * an array of child pointers at +0xC; leaf data blocks have count/inline-data at +0x10/+0x14. */
+static int nwalk(uint32_t node, const int* pos, const int* rot, int depth)
+{
+    uint32_t nch, arr, i;
+    int added = 0;
+    if (depth > 8 || !xwa_readable(node, 0x18) || MEM32(node) != 0u) return 0;
+    if (MEM32(node + 4) == 3u) return nmesh_add(node, pos, rot);
+    nch = MEM32(node + 8);
+    arr = MEM32(node + 0xC);
+    if (nch < 1u || nch > 128u || !xwa_readable(arr, nch * 4u)) return 0;
+    for (i = 0; i < nch; i++) added += nwalk(MEM32(arr + i * 4u), pos, rot, depth + 1);
+    return added;
+}
+
+/* Resolve a craft type to its loaded OPT image, the same way the engine does it:
+ *   resource id  = WORD[0x7CA6E0 + type*2]
+ *   image        = DWORD[((id & DWORD[0x5AA020]) & 0xFFFF) - 1)*4 + 0x77D030]      (sub_0050E2F0)
+ * The engine's resolver is a plain table lookup, so there is no need to call into guest code. */
+static uint32_t xwa_model_for_type(unsigned type)
+{
+    uint32_t rid, idx;
+    if (type == 0u || type > 0x400u || !xwa_readable(0x7CA6E0u + type * 2u, 2)) return 0;
+    rid = MEM16(0x7CA6E0u + type * 2u);
+    if (!xwa_readable(0x5AA020u, 4)) return 0;
+    idx = (rid & MEM32(0x5AA020u)) & 0xFFFFu;
+    if (idx < 1u || idx > 5000u) return 0;
+    if (!xwa_readable((idx - 1u) * 4u + 0x77D030u, 4)) return 0;
+    return MEM32((idx - 1u) * 4u + 0x77D030u);
+}
+
+/* Find the root node inside a loaded OPT image. The image is the .OPT file with its offsets patched
+ * to real addresses; the header is followed by the root NodeGroup. Earlier sessions read this image
+ * as if it were a node and saw "type = 720915" -- that was the file SIZE field at +4. */
+static uint32_t xwa_opt_root(uint32_t img)
+{
+    uint32_t p;
+    /* The loaded image begins at FILE OFFSET 8 -- the loader overwrites the file's global-pointer
+     * field with the load address, so the -5 magic is not present in memory. The root NodeGroup
+     * follows a variable-length pointer array, and OPT structures are 2-byte packed, so scan. */
+    if (!xwa_readable(img, 0x40)) return 0;
+    for (p = img; p < img + 0x400u; p += 2u) {
+        uint32_t ty, nch, arr, c0;
+        if (!xwa_readable(p, 0x18) || MEM32(p) != 0u) continue;
+        ty  = MEM32(p + 4);
+        nch = MEM32(p + 8);
+        arr = MEM32(p + 0xC);
+        if (ty > 32u || nch < 1u || nch > 64u) continue;
+        if (arr < img || arr > img + 0x2000000u || !xwa_readable(arr, nch * 4u)) continue;
+        c0 = MEM32(arr);                       /* the first child must itself look like a node */
+        if (!xwa_readable(c0, 0x18) || MEM32(c0) != 0u || MEM32(c0 + 4) > 32u) continue;
+        return p;
+    }
+    return 0;
+}
+
+/* Called per object from the render walk. Draws THAT object's own model: the mesh recogniser only
+ * ever hands over whichever model it happens to be resolving, so every craft came out with the
+ * same hull. */
+void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch, int roll)
+{
+    int pos[3], rot[3], added;
+    uint32_t img, root;
+    if (!getenv("XWA_NATIVEDRAW")) return;
+    img = xwa_model_for_type(type);
+    root = img ? xwa_opt_root(img) : 0u;
+    /* An OPT holds SEVERAL mesh roots (an X-wing is 5: fuselage plus wings). The count sits at
+     * img+6 and the pointer array at img+0x0E -- file offsets 0x0E/0x16, less the 8 bytes the
+     * loader strips. Walking only the first root drew one wedge instead of the whole craft. */
+    if (img && xwa_readable(img, 0x40)) {
+        uint32_t nroot = MEM16(img + 6), ri, hits = 0;
+        if (nroot >= 1u && nroot <= 64u && xwa_readable(img + 0x0Eu, nroot * 4u)) {
+            pos[0] = px; pos[1] = py; pos[2] = pz;
+            rot[0] = yaw; rot[1] = pitch; rot[2] = roll;
+            {   double dx = (double)(px - g_np[3]), dy = (double)(py - g_np[4]), dz = (double)(pz - g_np[5]);
+                if (dx*dx + dy*dy + dz*dz > 4.0e10) return;   /* junk flight-group coordinates */
+            }
+            for (ri = 0; ri < nroot; ri++) {
+                uint32_t r = MEM32(img + 0x0Eu + ri * 4u);
+                if (!xwa_readable(r, 0x18) || MEM32(r) != 0u || MEM32(r + 4) > 32u) continue;
+                hits += (uint32_t)nwalk(r, pos, rot, 0);
+            }
+            if (getenv("XWA_NMESHLOG")) { static int lg2;
+                if (lg2 < 10) { lg2++;
+                    fprintf(stderr, "[NOBJ] type=0x%X img=0x%08X roots=%u meshes+%u total=%d at (%d,%d,%d)\n",
+                            type, img, nroot, hits, g_nmesh_n, px, py, pz); fflush(stderr); } }
+            if (hits) xwa_native_flush();
+            return;
+        }
+    }
+    if (getenv("XWA_NMESHLOG")) { static int lg;
+        if (lg < 10) { lg++;
+            fprintf(stderr, "[NOBJ] type=0x%X img=0x%08X root=0x%08X rtype=%u kids=%u at (%d,%d,%d)\n",
+                    type, img, root, root ? MEM32(root+4) : 0u, root ? MEM32(root+8) : 0u, px, py, pz);
+            fflush(stderr); } }
+    if (!root) return;
+    pos[0] = px; pos[1] = py; pos[2] = pz;
+    rot[0] = yaw; rot[1] = pitch; rot[2] = roll;
+    {   /* some flight groups carry junk coordinates; a craft 500 million units away is not real */
+        double dx = (double)(px - g_np[3]), dy = (double)(py - g_np[4]), dz = (double)(pz - g_np[5]);
+        if (dx*dx + dy*dy + dz*dz > 4.0e10) return;
+    }
+    added = nwalk(root, pos, rot, 0);
+    if (added) xwa_native_flush();
+}
+
+/* Re-emit the whole cached scene. */
+void xwa_native_flush(void)
+{
+    static D3DTLVERTEX vb[32768];
+    int i, n = 0;
+
+    d3d11_native_reset();
+    nview_build();
+    n = nstars_emit(vb, n, (int)(sizeof vb / sizeof vb[0]));
+    for (i = 0; i < g_nmesh_n; i++)
+        n = nmesh_emit(i, vb, n, (int)(sizeof vb / sizeof vb[0]));
+    /* batches are submitted per face block inside nfaces_emit / nstars_emit */
+
+    {   static int dumped;
+        if (dumped < 8 && n > 0) { int q; float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f; dumped++;
+            for (q = 0; q < n; q++) { if (vb[q].sx<x0)x0=vb[q].sx; if (vb[q].sx>x1)x1=vb[q].sx;
+                                      if (vb[q].sy<y0)y0=vb[q].sy; if (vb[q].sy>y1)y1=vb[q].sy; }
+            fprintf(stderr, "[NATIVEDRAW] meshes=%d verts=%d box=[%.0f..%.0f,%.0f..%.0f] "
+                            "obj=(%d,%d,%d) cam=(%d,%d,%d) rot=(%d,%d,%d) camrot=(%d,%d,%d)\n",
+                    g_nmesh_n, n, x0, x1, y0, y1, g_np[0], g_np[1], g_np[2], g_np[3], g_np[4], g_np[5],
+                    g_nrot[0], g_nrot[1], g_nrot[2], g_camrot[0], g_camrot[1], g_camrot[2]);
+            if (dumped == 1 && getenv("XWA_CAMPROBE")) {
+                /* the camera position lives at playerslot*0xBCF + 0x8BA028; its orientation should
+                 * be a few fields away -- print the neighbourhood as int16 angle candidates */
+                uint32_t base = MEM32(0x8C1CC8) * 0xBCFu + 0x8BA028u;
+                int q;
+                fprintf(stderr, "[CAMPROBE] base=0x%08X", base);
+                for (q = -16; q < 32; q++) {
+                    if ((q % 8) == 0) fprintf(stderr, "\n  %+04d:", q*2);
+                    fprintf(stderr, " %6d", (int)(int16_t)MEM16(base + (uint32_t)(int32_t)(q*2)));
+                }
+                fprintf(stderr, "\n");
+            }
+            fflush(stderr);
+        }
+    }
+}
+
+/* Fallback entry: the mesh recogniser hands over one vertex block at a time with no model context.
+ * Only useful when the per-object walk finds nothing, so it is opt-in (XWA_NRECOG). */
+void xwa_native_mesh(uint32_t vnode)
+{
+    int pos[3], rot[3];
+    if (!getenv("XWA_NRECOG") || !g_np[6]) return;
+    {   double dx = (double)(g_np[0]-g_np[3]), dy = (double)(g_np[1]-g_np[4]), dz = (double)(g_np[2]-g_np[5]);
+        if (dx*dx + dy*dy + dz*dz > 4.0e10) return;    /* junk flight-group coordinates */
+    }
+    pos[0] = g_np[0]; pos[1] = g_np[1]; pos[2] = g_np[2];
+    rot[0] = g_nrot[0]; rot[1] = g_nrot[1]; rot[2] = g_nrot[2];
+    if (nmesh_add(vnode, pos, rot)) xwa_native_flush();
+}
+
+unsigned g_gt[4];
+uint32_t g_surfreg[8192][5]; unsigned g_surfreg_n;
+unsigned g_fgtype[16]; unsigned g_fgtype_n;
+unsigned g_a5type[24];
+uint32_t g_texnodes[512]; unsigned g_texnode_n;
+unsigned g_rcount[8];
+/* XWA_DRAWTRACE: call counts down the model-draw subtree, to find where submission stops. */
+unsigned g_dcount[8];
+const char* const g_dcount_name[8] = {"sub_004A2FB0 draw","sub_00440140","sub_0043FFB0","sub_00440E40","sub_004EA7C0","sub_004EA5D0","sub_004D5AE0 meshemit","sub_004D3520"};
+const char* const g_rcount_name[8] = {
+    "sub_004F2070 frame-render", "sub_004652F0 visible-list", "sub_004D3520 scene-render",
+    "sub_004340D0 viewport-render", "sub_004A2FB0 MODELDRAW", "sub_00466750 obj-walk",
+    "sub_004D3130 per-obj", "d3d Execute"
+};
+
+/* getenv() scans the entire environment block on every call, and the generated code calls it
+ * from inside hot loops (every env-gated probe/guard does `if (getenv("XWA_..."))`). With the
+ * ~25 XWA_* vars a flight run sets, that pinned the guest at ~6k calls/sec -- the flight loop
+ * managed 8 frames in 480 seconds. Environment variables never change during a run, so cache
+ * the result keyed on the string-literal POINTER (literals are pooled per translation unit; a
+ * duplicate pointer for the same name just gets its own entry, which is still correct). */
+#undef getenv
+#define XWA_ENVCACHE_SLOTS 512
+static struct { const char* key; char* val; } g_envcache[XWA_ENVCACHE_SLOTS];
+char* xwa_getenv_cached(const char* name) {
+    uintptr_t h = ((uintptr_t)name >> 4) & (XWA_ENVCACHE_SLOTS - 1);
+    for (int i = 0; i < XWA_ENVCACHE_SLOTS; i++) {
+        uintptr_t k = (h + i) & (XWA_ENVCACHE_SLOTS - 1);
+        if (g_envcache[k].key == name) return g_envcache[k].val;
+        if (g_envcache[k].key == NULL) {
+            g_envcache[k].key = name;
+            g_envcache[k].val = getenv(name);
+            return g_envcache[k].val;
+        }
+    }
+    return getenv(name);   /* table full: fall back (never expected) */
+}
+
+/* Real guest-pointer validity check for the recomp's garbage-pointer guards.
+ * LINK_OK() is only a range test, so leftover-register garbage (e.g. 0x316A9FC0)
+ * passes it and the deref still faults. VirtualQuery actually asks the OS.
+ * ponytail: VirtualQuery per call is slow -- only use it inside env-gated guards. */
+int xwa_readable(uint32_t addr, uint32_t len) {
+    MEMORY_BASIC_INFORMATION mbi;
+    uintptr_t a = (uintptr_t)ADDR(addr);
+    if (!addr) return 0;
+    if (!VirtualQuery((void*)a, &mbi, sizeof(mbi))) return 0;
+    if (mbi.State != MEM_COMMIT) return 0;
+    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    return a + len <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+}
+
+
+/* XWA_GAMELOG: sub_0050A490 is the game's own printf-style diagnostic logger. It was
+ * compiled out for retail (the body is a bare `ret`), but every call site still passes a
+ * real format string -- "Essential Hardware Feature NOT Supported: Z:%d Tex:%d HW:%d",
+ * "NULL craft pointer in InitHUDMask()", and so on. Re-implementing it turns the engine's
+ * own failure diagnostics back on, which beats guessing which branch bailed.
+ * Args are cdecl on the guest stack: format at [esp+4], varargs after. */
+void xwa_gamelog(uint32_t gesp) {
+    static int on = -1;
+    if (on < 0) on = getenv("XWA_GAMELOG") ? 1 : 0;
+    if (!on) return;
+    uint32_t fva = MEM32(gesp + 4);
+    uint32_t _caller = MEM32(gesp);   /* #287: guest return address = which engine site logged this */
+    if (!xwa_readable(fva, 1)) return;
+    const char* f = (const char*)ADDR(fva);
+    uint32_t argp = gesp + 8;
+    char out[1024]; int o = 0;
+    for (const char* c = f; *c && o < (int)sizeof(out) - 32; c++) {
+        if (*c != '%') { out[o++] = *c; continue; }
+        c++;
+        while (*c && strchr("-+ #0123456789.lh", *c)) c++;   /* skip flags/width/length */
+        uint32_t a = MEM32(argp); argp += 4;
+        switch (*c) {
+            case 'd': case 'i': o += sprintf(out + o, "%d", (int32_t)a); break;
+            case 'u':           o += sprintf(out + o, "%u", a); break;
+            case 'x':           o += sprintf(out + o, "%x", a); break;
+            case 'X':           o += sprintf(out + o, "%X", a); break;
+            case 'c':           out[o++] = (char)a; break;
+            case 'f': case 'g': o += sprintf(out + o, "<float>"); argp += 4; break;
+            case 's':           o += sprintf(out + o, "%.200s", xwa_readable(a, 1) ? (const char*)ADDR(a) : "<bad>"); break;
+            case '%':           out[o++] = '%'; argp -= 4; break;
+            default:            o += sprintf(out + o, "%%%c", *c ? *c : '?'); argp -= 4; break;
+        }
+        if (!*c) break;
+    }
+    out[o] = 0;
+    fprintf(stderr, "[GAMELOG fmt=%06X] %s%s", fva, out, (o && out[o-1] == '\n') ? "" : "\n");
+    fflush(stderr);
+}
 
 /* Simulated FS segment (Thread Environment Block) */
 uint32_t g_fs_seg[256] = {0};
@@ -184,8 +1048,63 @@ static uint32_t g_demand_page_count = 0;
 
 static uint32_t g_div0_skips = 0;
 
+/* XWA_WATCH=0xADDR -- hardware write-watchpoint on a guest global.
+ * "Who wrote this global?" comes up constantly here, and grepping the generated C only
+ * finds direct stores: bulk memcpy/memset/rep-stosd writes, and writes through a computed
+ * pointer, are invisible to grep. A debug register catches all of them and the existing
+ * guest_func_for_host() names the writer.
+ * Armed by raising a private exception so the VEH can set DR0/DR7 in the thread context
+ * (SetThreadContext on the running thread itself is not reliable). */
+#define XWA_WATCH_ARM_CODE 0xE0574348u   /* private: 'WCH' */
+static uint32_t g_watch_addr = 0;
+static uint32_t g_watch_hits = 0;
+
+/* Re-arm the watchpoint on a different address at runtime (heap addresses are not known
+ * until the game allocates them, so a startup-only XWA_WATCH cannot reach them). */
+void xwa_watch_set(uint32_t addr) {
+    g_watch_addr = addr;
+    g_watch_hits = 0;
+    fprintf(stderr, "[WATCH] re-arming on 0x%08X\n", addr);
+    fflush(stderr);
+    RaiseException(XWA_WATCH_ARM_CODE, 0, 0, NULL);
+}
+
+static void xwa_arm_watch(void) {
+    const char* w = getenv("XWA_WATCH");
+    if (!w) return;
+    g_watch_addr = (uint32_t)strtoul(w, NULL, 0);
+    if (!g_watch_addr) return;
+    fprintf(stderr, "[WATCH] arming hardware write-watch on 0x%08X\n", g_watch_addr);
+    fflush(stderr);
+    RaiseException(XWA_WATCH_ARM_CODE, 0, 0, NULL);
+}
+
 static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     DWORD code = ep->ExceptionRecord->ExceptionCode;
+
+    /* XWA_WATCH: arm the debug register (the OS applies our edits to ContextRecord). */
+    if (code == XWA_WATCH_ARM_CODE) {
+        CONTEXT* c = ep->ContextRecord;
+        c->Dr0 = (DWORD)ADDR(g_watch_addr);
+        c->Dr7 = 0x000D0001u;   /* L0 enable | RW0=write | LEN0=4 bytes */
+        c->Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    /* XWA_WATCH: a watched write just executed -- EIP is the instruction AFTER it. */
+    if (code == EXCEPTION_SINGLE_STEP && g_watch_addr && (ep->ContextRecord->Dr6 & 1)) {
+        CONTEXT* c = ep->ContextRecord;
+        extern uint32_t guest_func_for_host(uintptr_t host_addr);
+        extern uint32_t g_crash_host_offset;
+        uint32_t gva = guest_func_for_host((uintptr_t)c->Eip);
+        g_watch_hits++;
+        if (g_watch_hits <= 24) {
+            fprintf(stderr, "[WATCH] #%u 0x%08X = 0x%08X   writer: sub_%08X (+0x%X host) eip=0x%08X\n",
+                    g_watch_hits, g_watch_addr, MEM32(g_watch_addr), gva, g_crash_host_offset, (uint32_t)c->Eip);
+            fflush(stderr);
+        }
+        c->Dr6 = 0;
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
 
     /* Integer divide-by-zero survival: the flight scene render (projection/scale math, incl. MSVC's 64-bit
      * __aulldiv/__aulldvrm helpers) divides by view/camera params that are 0 under force-launch. Decode the
@@ -265,6 +1184,27 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     /* Log ALL exceptions to stderr (even non-fatal ones) for debugging */
     fprintf(stderr, "\n!!! VEH: exception 0x%08lX at 0x%p !!!\n",
         code, (void*)ep->ExceptionRecord->ExceptionAddress);
+    {   /* Name the generated-C line for the faulting address. Every line of the generated
+         * code ends in a comment holding the original guest instruction, so this turns a raw
+         * host address straight into the guest opcode that faulted. */
+        static int sym_ready = -1;
+        if (sym_ready < 0) {
+            SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME);
+            sym_ready = SymInitialize(GetCurrentProcess(), NULL, TRUE) ? 1 : 0;
+        }
+        if (sym_ready > 0) {
+            DWORD disp = 0;
+            IMAGEHLP_LINE64 li; li.SizeOfStruct = sizeof(li);
+            if (SymGetLineFromAddr64(GetCurrentProcess(),
+                                     (DWORD64)(uintptr_t)ep->ExceptionRecord->ExceptionAddress,
+                                     &disp, &li)) {
+                const char* base = li.FileName ? strrchr(li.FileName, '\\') : NULL;
+                fprintf(stderr, "    -> %s:%lu (+%lu)\n",
+                        base ? base + 1 : (li.FileName ? li.FileName : "?"),
+                        (unsigned long)li.LineNumber, (unsigned long)disp);
+            }
+        }
+    }
     {   /* Map the host fault EIP back to the guest function that contains it:
          * the dispatch entry whose host func pointer is the greatest <= the EIP
          * (functions are laid out roughly in order, so this names the crash site). */
@@ -572,8 +1512,13 @@ void xwa_drive_render(void) {
         fprintf(stderr, "[DRIVE] after 511A90: 7828D0=0x%X 7828D4=%u\n",
                 MEM32(0x7828D0), MEM32(0x7828D4)); fflush(stderr);
     }
+    { static int _v; if (_v<3) { _v++;
+        fprintf(stderr, "[DRIVE] gate 0x7CA1EC=0x%08X  viewport[0] @0x91B240=0x%08X  viewport[1]=0x%08X\n",
+            MEM32(0x7CA1EC), MEM32(0x91B240), MEM32(0x91B244)); fflush(stderr); } }
     PUSH32(esp, 0);                          /* viewport index 0 (player cockpit view) */
+    { extern int g_drv_active; g_drv_active = 1; }
     RECOMP_CALL(sub_004340D0);               /* -> sub_00433850 -> scene render */
+    { extern int g_drv_active; g_drv_active = 0; }
     esp += 4;
     _in = 0;
     #undef esp
@@ -725,6 +1670,107 @@ int g_flydemo_launch_cmd = 0;  /* set by the driver, consumed once by the sub_54
 int g_flydemo_skip_menu = 0;   /* set by the driver: force past the skirmish config menu (sub_529330) to reach the Fly button */
 int g_flydemo_confirm = 0;     /* set by the driver while the skirmish cb is active: auto-confirm sub_5593C0 dialogs */
 uint32_t g_skdbg_cb = 0, g_skdbg_esp0 = 0;  /* dispatch: capture skirmish cb + esp around the dispatch ICALL (esp-leak workaround) */
+/* Mirror of tools/snap_flight.py for the recomp side -- same addresses, same layout,
+ * so `diff` on the two dumps points straight at what the forced launch failed to build. */
+static void snap_hex(const char* tag, uint32_t base, uint32_t len) {
+    fprintf(stderr, "  %s @0x%08X:\n", tag, base);
+    for (uint32_t off = 0; off < len; off += 16) {
+        char hex[64], txt[20]; int hp = 0;
+        for (uint32_t i = 0; i < 16 && off + i < len; i++) {
+            uint8_t c = xwa_readable(base + off + i, 1) ? MEM8(base + off + i) : 0;
+            hp += sprintf(hex + hp, "%02X ", c);
+            txt[i] = (c >= 32 && c < 127) ? (char)c : '.';
+            txt[i + 1] = 0;
+        }
+        fprintf(stderr, "    %08X  %-48s %s\n", base + off, hex, txt);
+    }
+}
+
+static const struct { const char* name; uint32_t addr; } g_snap_globals[] = {
+    {"A1C089  screen depth", 0xA1C089}, {"ABD7B4  game mode", 0xABD7B4},
+    {"77330C  session flag", 0x77330C}, {"773310", 0x773310},
+    {"A21449  DP object", 0xA21449},    {"9AFEE4  DP saved obj", 0x9AFEE4},
+    {"7B33C4  FG table", 0x7B33C4},     {"63185C  FG count (u16)", 0x63185C},
+    {"8C1CC8  player slot", 0x8C1CC8},  {"7CA3B8  craft loop end", 0x7CA3B8},
+    {"8BF378  craft loop start", 0x8BF378}, {"7B4C00  obj count (u16)", 0x7B4C00},
+    {"8052A0  obj pool", 0x8052A0},     {"8C1CE4  view count", 0x8C1CE4},
+    {"80B610  obj stride div", 0x80B610}, {"8B94C8  obj count2", 0x8B94C8},
+    {"7D5240  FG total", 0x7D5240},     {"7828D0  ALERTBOXBUFFER ptr", 0x7828D0},
+    {"9109C0  render fn ptr", 0x9109C0}, {"7B1CE0  scene ptr", 0x7B1CE0},
+    {"7B1CE8  render ctx", 0x7B1CE8},   {"7B1CD4  render flags", 0x7B1CD4},
+    {"68C898  HUD mask A", 0x68C898},   {"68C89C  HUD mask B", 0x68C89C},
+    {"693594  rasterizer mode", 0x693594}, {"7CA3A8  screen h", 0x7CA3A8},
+    {"7D4B6C  screen w", 0x7D4B6C},     {"8D6BB0  render gate", 0x8D6BB0},
+    {"8BA034  camera ref craft", 0x8BA034}, {"8BA028  camera X", 0x8BA028},
+    {"8BA02C  camera Y", 0x8BA02C},     {"8BA030  camera Z", 0x8BA030},
+    {"80DC80  species tbl", 0x80DC80},  {"80DCBC  species entry", 0x80DCBC},
+    {"9F4B98  skirmish buf", 0x9F4B98}, {"9EB8E0  craft tbl", 0x9EB8E0},
+    {"AE2A8A  mission index", 0xAE2A8A}, {"7B1D04  block list cnt", 0x7B1D04},
+};
+
+void xwa_snap_flight(uint32_t cb, uint32_t depth) {
+    const uint32_t FG_STRIDE = 0x27, OBJ_STRIDE = 0xBCF;
+    fprintf(stderr, "\n=== XWA RECOMP flight snapshot (mirrors tools/snap_flight.py) ===\n");
+    fprintf(stderr, "active screen cb = 0x%08X (depth=%u)\n\n", cb, depth);
+
+    fprintf(stderr, "=== globals ===\n");
+    for (size_t i = 0; i < sizeof(g_snap_globals) / sizeof(g_snap_globals[0]); i++) {
+        uint32_t a = g_snap_globals[i].addr;
+        uint32_t v = xwa_readable(a, 4) ? MEM32(a) : 0;
+        fprintf(stderr, "  %-26s @0x%06X = 0x%08X (%u)\n", g_snap_globals[i].name, a, v, v);
+    }
+    fprintf(stderr, "\n=== camera view matrix 0x8D93C0..0x8D9400 ===\n");
+    snap_hex("cam", 0x8D93C0, 0x40);
+    fprintf(stderr, "=== camera matrix SOURCE 0x693774..0x6937B0 ===\n");
+    snap_hex("camsrc", 0x693774, 0x3C);
+
+    uint32_t fgt = MEM32(0x7B33C4), fgn = MEM16(0x63185C);
+    fprintf(stderr, "\n=== flight groups: table=0x%08X count=%u (stride 0x27) ===\n", fgt, fgn);
+    for (uint32_t i = 0; i < fgn && i < 24; i++) {
+        uint32_t base = fgt + i * FG_STRIDE;
+        if (!xwa_readable(base, FG_STRIDE)) { fprintf(stderr, "  FG[%2u] @0x%08X <unreadable>\n", i, base); continue; }
+        fprintf(stderr, "  FG[%2u] @0x%08X type=%-5u slot=%-3u pos=(%d,%d,%d) ro=0x%08X\n", i, base,
+                MEM16(base + 2), MEM8(base + 5), (int32_t)MEM32(base + 7), (int32_t)MEM32(base + 0xB),
+                (int32_t)MEM32(base + 0xF), MEM32(base + 0x23));
+        snap_hex("fg", base, FG_STRIDE);
+    }
+
+    uint32_t pslot = MEM32(0x8C1CC8);
+    fprintf(stderr, "\n=== player craft: slot 0x8C1CC8 = %u ===\n", pslot);
+    if (pslot < 0x400) {
+        uint32_t rec = 0x8B94E0 + pslot * OBJ_STRIDE, fgidx = MEM32(rec);
+        fprintf(stderr, "  record @0x%08X  FGidx(+0)=0x%X\n", rec, fgidx);
+        fprintf(stderr, "    +0x004 f4=0x%02X  +0x010 craftType=0x%02X  +0x011 tag=0x%02X  +0x015 built=0x%02X\n",
+                MEM8(rec + 4), MEM8(rec + 0x10), MEM8(rec + 0x11), MEM8(rec + 0x15));
+        fprintf(stderr, "    +0x0EE craftID=0x%02X  +0x0F0 type=0x%02X  +0x0F1 active=0x%02X  +0x0F5 f5=0x%02X\n",
+                MEM8(rec + 0xEE), MEM8(rec + 0xF0), MEM8(rec + 0xF1), MEM8(rec + 0xF5));
+        snap_hex("playerobj", rec, 0x100);
+        if (fgidx != 0xFFFF && fgt) {
+            uint32_t fgb = fgt + fgidx * FG_STRIDE, ro = xwa_readable(fgb + 0x23, 4) ? MEM32(fgb + 0x23) : 0;
+            fprintf(stderr, "  player FG[%u] @0x%08X  ro(+0x23)=0x%08X\n", fgidx, fgb, ro);
+            if (ro && xwa_readable(ro, 0x120)) {
+                snap_hex("ro", ro, 0x120);
+                uint32_t scene = MEM32(ro + 0xDD);
+                fprintf(stderr, "  ro+0xDD=0x%08X  ro+0xD9=0x%08X  ro+0x8D=0x%08X  ro+0=0x%08X\n",
+                        scene, MEM32(ro + 0xD9), MEM32(ro + 0x8D), MEM32(ro));
+                if (scene && xwa_readable(scene, 0x100)) snap_hex("ro+0xDD target", scene, 0x100);
+            }
+        }
+    }
+
+    fprintf(stderr, "\n=== object slots 0..39 (0x8B94E0, stride 0xBCF) ===\n");
+    for (uint32_t s = 0; s < 40; s++) {
+        uint32_t rec = 0x8B94E0 + s * OBJ_STRIDE;
+        if (!xwa_readable(rec, 0x100)) continue;
+        uint32_t fgidx = MEM32(rec);
+        if (fgidx == 0xFFFF) continue;
+        fprintf(stderr, "  slot[%2u] FGidx=0x%X type(+0x10)=0x%02X tag(+0x11)=0x%02X active(+0xF1)=0x%02X\n",
+                s, fgidx, MEM8(rec + 0x10), MEM8(rec + 0x11), MEM8(rec + 0xF1));
+    }
+    fprintf(stderr, "=== end snapshot ===\n\n");
+    fflush(stderr);
+}
+
 void xwa_ui_driver(void) {
     static int enabled = -1;
     if (enabled < 0) enabled = getenv("XWA_FLYDEMO") ? 1 : 0;
@@ -799,6 +1845,11 @@ void xwa_ui_driver(void) {
             MEM32(0x7B1D04) = 0; MEM32(0x7B1D08) = 0; MEM32(0x7B1D0C) = 0;
             MEM32(0x77330C) = 1;   /* session/render-context flag: ungate the per-frame 3D scene render */
             if (MEM32(0x7B1CE0) == 0) MEM32(0x7B1CE0) = 0x00B0D8A0;
+            /* Measured in a live skirmish: the real game has the 3D render context
+             * 0x7B1CE8 = 0x00B0D2CC (a STATIC address, same base+index scheme as 0x7B1CE0,
+             * both with index 0). Earlier notes wrote this off as a red herring because it
+             * is 0 on the concourse -- it is not 0 in flight. */
+            if (MEM32(0x7B1CE8) == 0) MEM32(0x7B1CE8) = 0x00B0D2CC;
             /* Wire all three D3D device-interface globals used by the flight render to the mock device:
              * 0x7B15BC (execute submit), 0x7B1D14 (CreateExecuteBuffer, vtable[6]), 0x7B1D18 (aux). */
             { extern uint32_t com_ensure_d3d_device(void); uint32_t d = com_ensure_d3d_device();
@@ -876,7 +1927,13 @@ void xwa_ui_driver(void) {
              * world-build, so the host's create-broadcast sub_004E7A10 (gated on 0x77330C!=0 in sub_004F6510)
              * runs and generates the 0x3E creates for the mission craft. This is the documented sole blocker
              * (#58-59). Set it here (pre loading-screen) so it's active through the whole mission-load. */
-            if (getenv("XWA_DPSESSION")) { MEM32(0xB0C7BCu) = 1;
+            /* 0xB0C7BC is a TWO-entry byte array, not a dword: worldinit does
+             * 0x77330C = MEM8(0xB0C7BC + (sub_0049C950() > 0)) @0x50ACAE. Writing a dword 1
+             * set [0]=1 but left [1]=0, so when that index came out 1 the session flag was
+             * cleared right back to 0 -- which is why 0x77330C was 0 by [WI-CKPT] despite
+             * XWA_RUNSCENE setting it. The real game runs a skirmish with 0x77330C==1
+             * (measured live), so set both entries. */
+            if (getenv("XWA_DPSESSION")) { MEM8(0xB0C7BCu) = 1; MEM8(0xB0C7BDu) = 1;
                 fprintf(stderr, "[DPSESSION] set 0xB0C7BC=1 (0x77330C session flag) before world-build\n"); fflush(stderr); }
             fprintf(stderr, "[TRAINLAUNCH] invoking sub_50EC70 (craft-def load) + sub_57E370 + sub_541810(0x5316B0,0)\n");
             fflush(stderr);
@@ -988,8 +2045,31 @@ void xwa_ui_driver(void) {
             static int _vp = 0;
             int sk = getenv("XWA_SKIRMISH") ? 1 : 0;   /* XWA_SKIRMISH: offline skirmish (case 3) vs historical (case 1) */
             if (_vp < 2) { fprintf(stderr, "[CSIM] forcing 0x782FFC 0->%d %s\n", sk?4:2, sk?"(OFFLINE SKIRMISH, ABD7B4=2)":"(historical 'single')"); fflush(stderr); _vp++; }
-            if (sk) { MEM32(0x782FFC) = 4; MEM32(0xABD7B4) = 2; }   /* case 3 = offline skirmish; ABD7B4=2 -> L_544BA8 lobby */
+            /* #390: the lobby launch needs ABD7B4 != edi, and edi is hardcoded 2 at L_00544BA3 --
+             * so forcing ABD7B4=2 here GUARANTEES the launch check fails. With the pump fixed the
+             * game reaches the lobby on its own; let it set the phase itself. XWA_NOPHASE skips the force. */
+            if (sk) { MEM32(0x782FFC) = 4;
+                if (!getenv("XWA_NOPHASE")) MEM32(0xABD7B4) = 2;
+                else { static int _np; if(!_np){_np=1; fprintf(stderr,"[NOPHASE] not forcing ABD7B4 (was %u)\n", MEM32(0xABD7B4u)); fflush(stderr);} } }
             else      MEM32(0x782FFC) = 2;                          /* case 1 = historical campaign-mission */
+        }
+        /* XWA_PUSHSKIRM (#359): on the ORIGINAL loader path the simulated click never causes the
+         * transition (#358/#358b). The real path pushes the skirmish-setup screen at 0x0053B824:
+         *     push 0x00543720; push 0x005438B0; call sub_00541810
+         * reached when sub_005321F0 returns 0x23. Drive that push directly instead of clicking. */
+        if (getenv("XWA_PUSHSKIRM")) {
+            static int _ps = 0;
+            if (!_ps && fip >= 30) { _ps = 1;
+                extern void sub_00541810(void);
+                uint32_t sb = g_ebx, ss = g_esi, sd = g_edi;
+                fprintf(stderr, "[PUSHSKIRM] pushing skirmish setup (0x5438B0) directly at fip=%d\n", fip); fflush(stderr);
+                PUSH32(g_esp, 0x00543720u);
+                PUSH32(g_esp, 0x005438B0u);
+                PUSH32(g_esp, 0xDEAD0000u);
+                sub_00541810();
+                g_esp += 8;
+                g_ebx = sb; g_esi = ss; g_edi = sd;
+            }
         }
         MEM32(0x9F65ED) = (uint32_t)(507 - 5);         /* (507,338) inside rect 384,252..630,424 */
         MEM32(0x9F65F1) = (uint32_t)(338 - 5);
@@ -1002,7 +2082,7 @@ void xwa_ui_driver(void) {
         /* The autopilot lands here after pilot creation, not the concourse. The barracks transitions to the
          * next screen via the reconstructed jump table at 0x560124 (gated on 78397C-selector + 9F4B48/9F4B4C==3
          * transition phase). Drive it to the concourse (78397C=1) so the combat-door click logic can run. */
-        if (fip >= 20) {
+        if (fip >= 0) {   /* #372: was fip>=20 -- the barracks handler reads 78397C from its FIRST call (#371), so the force must land immediately */
             static int _bp = 0;
             /* XWA_TRAINDOOR: route barracks -> CONCOURSE (78397C=1) so the Training-door click can fire
              * (concourse -> sub_57E370 training setup -> sub_5316B0 loading -> sub_549330 REAL mission loader
@@ -1090,6 +2170,27 @@ void xwa_ui_driver(void) {
      * collapse. sub_004949B0 copies the matrix from source 0x693774..0x6937A8 each frame. Seed that
      * SOURCE non-zero so the copy propagates a non-zero matrix -> no DIV0. DIAGNOSTIC: if ANY pixels
      * appear (even distorted), the camera matrix is confirmed as the sole blocker + seeding works. */
+    /* XWA_SNAP: dump the same field set tools/snap_flight.py reads out of the REAL game,
+     * so the recomp's flight state can be diffed against ground truth line-for-line instead
+     * of guessed at. One shot, on the first 3D-flight frame. */
+    if (getenv("XWA_SNAP")) {
+        /* The screen-callback slot the driver reads (0xA1C8D5) holds the flight INIT cb;
+         * the 3D FRAME cb 0x0049E600 lives in the neighbouring slot (0xA1C8D9) -- see #167.
+         * Accept either, else the snapshot never fires even though the frame loop is running. */
+        /* Don't trigger on the frame-cb slot alone: 0x0049E600 is already parked in the
+         * callback table long before flight, so that fires during boot and dumps all zeros.
+         * Wait until flight-init has been the active screen AND the world build has actually
+         * produced an FG table, then give it N more frames (XWA_SNAP=N, default 60). */
+        static int _snapped = 0, _fltframes = -1;
+        if (!_snapped) {
+            if (cb == 0x005710F0 || cb == 0x0049E600) { if (_fltframes < 0) _fltframes = 0; _fltframes++; }
+            int want = atoi(getenv("XWA_SNAP")); if (want <= 0) want = 60;
+            if (_fltframes >= want && MEM32(0x7B33C4) != 0) {
+                _snapped = 1; xwa_snap_flight(cb, depth);
+            }
+        }
+    }
+
     if (getenv("XWA_CAMSEED") && (cb == 0x005710F0 || cb == 0x0049E600)) {
         static int _cs; if (_cs < 3) { fprintf(stderr, "[CAMSEED] seeding IDENTITY camera matrix source (cb=0x%X)\n", cb); fflush(stderr); _cs++; }
         /* zero the whole rotation source region, then set the identity diagonal + the 0x8D6BB0 gate.
@@ -2480,6 +3581,123 @@ static void dump_trace_atexit(void) {
         CloseHandle(h);
     }
 
+    { extern unsigned g_rcount[8]; extern const char* const g_rcount_name[8];
+      { extern unsigned g_ccount[4];
+        fprintf(stderr, "[CAMCOUNT] build_sub_00478490=%u copy_sub_004949B0=%u percraft_sub_004EE820=%u | matrix 8D93C0=%08X CC=%08X E0=%08X E4=%08X F0=%08X F8=%08X FC=%08X gate_8D6BB0=%08X\n",
+          g_ccount[0], g_ccount[1], g_ccount[2], MEM32(0x8D93C0), MEM32(0x8D93CC), MEM32(0x8D93E0),
+          MEM32(0x8D93E4), MEM32(0x8D93F0), MEM32(0x8D93F8), MEM32(0x8D93FC), MEM32(0x8D6BB0)); }
+      { extern volatile unsigned g_t7[2]; { extern volatile unsigned g_up2[2]; fprintf(stderr, "[TYPE7] 42A4B0=%u 47D710=%u | up: 42A010=%u 4EFE00=%u\n", g_t7[0], g_t7[1], g_up2[0], g_up2[1]); } }
+      { extern volatile unsigned g_ld[4]; fprintf(stderr, "[LOADFN] 4CDED0=%u 4CE130=%u 4CF920=%u 462BE0=%u\n", g_ld[0],g_ld[1],g_ld[2],g_ld[3]); }
+      { extern volatile unsigned g_dev[8]; fprintf(stderr, "[DEVFN] 5593C0=%u 55D270=%u 558120=%u 556B10=%u 55BBA0=%u 556AF0=%u\n", g_dev[0],g_dev[1],g_dev[2],g_dev[3],g_dev[4],g_dev[5]); }
+      { extern volatile unsigned g_hw[4]; fprintf(stderr, "[HWINIT] 441EE0=%u 593F1D=%u 594063=%u 50BC20=%u | 7B1D14=0x%08X 77330C=%u\n", g_hw[0],g_hw[1],g_hw[2],g_hw[3], MEM32(0x7B1D14u), MEM32(0x77330Cu)); }
+      { extern volatile unsigned g_ty[10]; fprintf(stderr, "[TYPE] t0=%u t1=%u t2=%u t3=%u t4=%u t5=%u t6=%u t7+=%u | arg0=%u badebp=%u\n", g_ty[0],g_ty[1],g_ty[2],g_ty[3],g_ty[4],g_ty[5],g_ty[6],g_ty[7],g_ty[8],g_ty[9]); }
+      { extern volatile unsigned g_ebf[4]; extern volatile unsigned g_up[4]; fprintf(stderr, "[EBFN] 595006=%u 5954D6=%u | 442F70=%u 448000=%u 482000=%u 481AD0(per-craft)=%u | 480370=%u 482000=%u\n", g_ebf[0], g_ebf[1], g_ebf[2], g_ebf[3], g_up[0], g_up[1]); }
+      { extern volatile unsigned g_sd[4]; fprintf(stderr, "[SCENEDRAW] 448660=%u 50D780=%u 448B80=%u 4D3520=%u\n", g_sd[0],g_sd[1],g_sd[2],g_sd[3]); fflush(stderr); }
+      if (getenv("XWA_DRAWTRACE")) { extern unsigned g_dcount[8]; extern const char* const g_dcount_name[8];
+        fprintf(stderr, "[DRAWTRACE]");
+        for (int _i = 0; _i < 8; _i++) fprintf(stderr, "  %s=%u", g_dcount_name[_i], g_dcount[_i]);
+        fprintf(stderr, "\n"); fflush(stderr); }
+      if (getenv("XWA_TEXPATH")) { extern unsigned g_texpath[3]; extern unsigned g_texnode_n; extern unsigned g_bindfn[8];
+        fprintf(stderr, "[TEXPATH] sub_00597784 calls=%u -> create(sub_0059786E)=%u resident(sub_00597DBE)=%u distinct-nodes=%u | binders: 442F70=%u 44A5A0=%u 44A7B0=%u 448000=%u 482000=%u 481AD0-percraft=%u 45A520=%u 43FE50-drawobj=%u\n", g_texpath[0], g_texpath[1], g_texpath[2], g_texnode_n, g_bindfn[0], g_bindfn[1], g_bindfn[2], g_bindfn[3], g_bindfn[4], g_bindfn[5], g_bindfn[6], g_bindfn[7]); fflush(stderr); }
+      if (getenv("XWA_OBJTYPE")) { extern unsigned g_objtype[40]; extern unsigned g_node1;
+        fprintf(stderr, "[OBJTYPE] type1-nodes-created=%u |", g_node1);
+        for (int _i = 0; _i < 40; _i++) if (g_objtype[_i]) fprintf(stderr, " type%d=%u", _i, g_objtype[_i]);
+        fprintf(stderr, "\n"); fflush(stderr); }
+      if (getenv("XWA_FGTYPE")) { extern unsigned g_fgtype[16]; extern unsigned g_fgtype_n;
+        fprintf(stderr, "[FGTYPE] gate checks=%u  distinct [fg+2] values:", g_fgtype_n);
+        for (int _i = 0; _i < 15; _i++) if (g_fgtype[_i]) fprintf(stderr, " 0x%X", g_fgtype[_i]);
+        fprintf(stderr, "  (need 0xDE)\n"); fflush(stderr); }
+      if (getenv("XWA_A5TYPE")) { extern unsigned g_a5type[24];
+        fprintf(stderr, "[A5TYPE] switch @0x0045AA11 (need 11 or 13):");
+        for (int _i = 0; _i < 24; _i++) if (g_a5type[_i]) fprintf(stderr, " t%d=%u", _i, g_a5type[_i]);
+        fprintf(stderr, "\n"); fflush(stderr); }
+      if (getenv("XWA_SURFSCAN")) { extern uint32_t g_surfreg[8192][5]; extern unsigned g_surfreg_n;
+        fprintf(stderr, "[SURFSCAN] %u surfaces registered\n", g_surfreg_n);
+        unsigned _best = 0, _bestd = 0;
+        for (unsigned _i = 0; _i < g_surfreg_n; _i++) {
+            const uint32_t* _e = (const uint32_t*)(uintptr_t)g_surfreg[_i][0];
+            if (!_e || IsBadReadPtr(_e, 20)) continue;
+            uint32_t _px = _e[0], _w = _e[1], _h = _e[2];
+            if (!_px || !_w || !_h || _w > 4096 || _h > 4096) continue;
+            if (IsBadReadPtr((void*)(uintptr_t)_px, (size_t)_w * _h * 2)) continue;
+            const uint16_t* _p = (const uint16_t*)(uintptr_t)_px;
+            /* distinct-colour estimate over a sparse sample */
+            uint16_t _seen[64]; unsigned _n = 0;
+            for (unsigned _k = 0; _k < (unsigned)(_w * _h); _k += 37u) {
+                uint16_t _c = _p[_k]; unsigned _j; int _f = 0;
+                for (_j = 0; _j < _n; _j++) if (_seen[_j] == _c) { _f = 1; break; }
+                if (!_f) { if (_n < 64) _seen[_n++] = _c; else { _n = 65; break; } }
+            }
+            if (_n > _bestd) { _bestd = _n; _best = _i; }
+            if (_n >= 8) fprintf(stderr, "[SURFSCAN]   surf#%u %ux%u distinct~%u%s\n",
+                                 _i, _w, _h, _n, (_n > 32) ? "  <-- RICH CONTENT" : "");
+        }
+        /* XWA_SURFDUMP=N: write surface N to surf_N.bmp (16bpp RGB565 -> 24bpp BMP). */
+        if (getenv("XWA_SURFDUMP")) {
+            unsigned _want = (unsigned)atoi(getenv("XWA_SURFDUMP"));
+            if (_want < g_surfreg_n) {
+                const uint32_t* _e = (const uint32_t*)(uintptr_t)g_surfreg[_want][0];
+                if (_e && !IsBadReadPtr(_e, 20) && _e[0] && _e[1] && _e[2]) {
+                    uint32_t _w = _e[1], _h = _e[2], _pitch = _e[4] ? _e[4] : _w * 2;
+                    const uint8_t* _base = (const uint8_t*)(uintptr_t)_e[0];
+                    uint32_t _rowb = ((_w * 3u) + 3u) & ~3u, _img = _rowb * _h;
+                    char _nm[64]; sprintf(_nm, "surf_%u.bmp", _want);
+                    FILE* _f = fopen(_nm, "wb");
+                    if (_f) {
+                        uint8_t _hd[54]; uint32_t _off = 54, _fsz = 54 + _img;
+                        memset(_hd, 0, sizeof _hd); _hd[0]='B'; _hd[1]='M';
+                        memcpy(_hd+2,&_fsz,4); memcpy(_hd+10,&_off,4);
+                        { uint32_t _v=40; memcpy(_hd+14,&_v,4); }
+                        memcpy(_hd+18,&_w,4); memcpy(_hd+22,&_h,4);
+                        { uint16_t _pl=1,_bc=24; memcpy(_hd+26,&_pl,2); memcpy(_hd+28,&_bc,2); }
+                        memcpy(_hd+34,&_img,4);
+                        fwrite(_hd,1,54,_f);
+                        uint8_t* _row = (uint8_t*)malloc(_rowb);
+                        for (uint32_t _y = 0; _y < _h && _row; _y++) {
+                            const uint16_t* _sp = (const uint16_t*)(_base + (size_t)(_h-1-_y) * _pitch);
+                            memset(_row, 0, _rowb);
+                            for (uint32_t _x = 0; _x < _w; _x++) {
+                                uint16_t _c = _sp[_x];              /* RGB565 */
+                                _row[_x*3+0] = (uint8_t)(( _c        & 0x1F) << 3);
+                                _row[_x*3+1] = (uint8_t)(((_c >> 5)  & 0x3F) << 2);
+                                _row[_x*3+2] = (uint8_t)(((_c >> 11) & 0x1F) << 3);
+                            }
+                            fwrite(_row,1,_rowb,_f);
+                        }
+                        free(_row); fclose(_f);
+                        fprintf(stderr, "[SURFDUMP] wrote %s (%ux%u pitch=%u)\n", _nm, _w, _h, _pitch);
+                        fflush(stderr);
+                    }
+                }
+            }
+        }
+        { uint32_t _rt = MEM32(0x6002BC), _match = 0xFFFFFFFFu;
+          for (unsigned _i = 0; _i < g_surfreg_n; _i++) {
+              const uint32_t* _e2 = (const uint32_t*)(uintptr_t)g_surfreg[_i][0];
+              if (_e2 && !IsBadReadPtr(_e2, 20) && _e2[0] == _rt) { _match = _i; break; }
+          }
+          fprintf(stderr, "[RTARGET] 0x6002BC=0x%08X -> surf#%d  dims=%ux%u\n",
+                  _rt, (int)_match, MEM32(0x6002B0), MEM32(0x6002B4));
+          fflush(stderr); }
+        fprintf(stderr, "[SURFSCAN] richest surf#%u distinct~%u (%ux%u)\n",
+                _best, _bestd, ((const uint32_t*)(uintptr_t)g_surfreg[_best][0])[1], ((const uint32_t*)(uintptr_t)g_surfreg[_best][0])[2]);
+        fflush(stderr); }
+      if (getenv("XWA_WALK")) { extern unsigned g_walk[4]; extern unsigned g_exits[4]; extern unsigned g_link_n; extern unsigned g_subload_n;
+        fprintf(stderr, "[LINKS] sub_004CCC40 calls=%u child-array writes=%u | [WALK] 480A80=%u 482D60=%u 4836F0=%u 483EB0=%u | exits: 4848A9=%u 4848E5=%u 484953=%u\n",
+                g_subload_n, g_link_n, g_walk[0], g_walk[1], g_walk[2], g_walk[3], g_exits[0], g_exits[1], g_exits[2]); fflush(stderr); }
+      if (getenv("XWA_BLD")) { extern unsigned g_bld[4];
+        fprintf(stderr, "[BLD] sub_0041EF60 calls=%u  write@41F471=%u  write@41F77F=%u  slot=%u  gate=0x%X\n",
+                g_bld[0], g_bld[1], g_bld[2], MEM32(0x8C1CC8),
+                MEM16(MEM32(0x8C1CC8) * 0xBCFu + 0x8B96F9)); fflush(stderr); }
+      if (getenv("XWA_BLD")) { extern unsigned g_cal[8];
+        fprintf(stderr, "[CALLERS] 4034D0=%u 457C20=%u 4F9320=%u 4FBA80=%u 500F9A=%u 5064D0=%u 507D60=%u\n",
+          g_cal[0],g_cal[1],g_cal[2],g_cal[3],g_cal[4],g_cal[5],g_cal[6]); fflush(stderr); }
+      if (getenv("XWA_GATES")) { extern unsigned g_gt[4];
+        fprintf(stderr, "[GATES] gateA(91AE7C) checks=%u passed=%u | gateB(+0x219) checks=%u passed=%u\n",
+                g_gt[0], g_gt[1], g_gt[2], g_gt[3]); fflush(stderr); }
+      fprintf(stderr, "[RENDCOUNT-FINAL]");
+      for (int i = 0; i < 8; i++) fprintf(stderr, "  %s=%u", g_rcount_name[i], g_rcount[i]);
+      fprintf(stderr, "\n"); fflush(stderr); }
     fprintf(stderr, "\n=== EXIT TRACE DUMP ===\n");
     fprintf(stderr, "Total ICALLs: %u, call depth: %u (max %u)\n",
             g_icall_count, g_call_depth, g_call_depth_max);
@@ -2494,6 +3712,61 @@ static void dump_trace_atexit(void) {
 }
 
 /* Watchdog thread: dumps trace to file using raw Win32 API, then terminates */
+/* XWA_PROFILE=<ms> -- sampling profiler. Suspends the guest thread every <ms>, reads EIP and
+ * attributes it to a guest function via guest_func_for_host(). The trace ring only shows the
+ * last 512 CALLS, which is useless when time is being burned INSIDE one long-running function
+ * (or in host code); this shows where the time actually goes. Prints a top-15 every 10s. */
+static HANDLE g_guest_thread = NULL;
+#define PROF_SLOTS 4096
+static struct { uint32_t gva; unsigned hits; } g_prof[PROF_SLOTS];
+static unsigned g_prof_total, g_prof_host;
+
+static void prof_record(uint32_t gva) {
+    unsigned h = (gva * 2654435761u) & (PROF_SLOTS - 1);
+    for (unsigned i = 0; i < PROF_SLOTS; i++) {
+        unsigned k = (h + i) & (PROF_SLOTS - 1);
+        if (g_prof[k].gva == gva) { g_prof[k].hits++; return; }
+        if (g_prof[k].hits == 0) { g_prof[k].gva = gva; g_prof[k].hits = 1; return; }
+    }
+}
+
+static void prof_dump(void) {
+    { extern unsigned g_rcount[8]; extern const char* const g_rcount_name[8];
+      if (getenv("XWA_RENDCOUNT")) { fprintf(stderr, "[RENDCOUNT]");
+        for (int i = 0; i < 8; i++) fprintf(stderr, "  %s=%u", g_rcount_name[i], g_rcount[i]);
+        fprintf(stderr, "\n"); } }
+    fprintf(stderr, "[PROF] %u samples (%u unattributed)\n", g_prof_total, g_prof_host);
+    for (int rank = 0; rank < 15; rank++) {
+        unsigned best = 0; int bi = -1;
+        for (int i = 0; i < PROF_SLOTS; i++) if (g_prof[i].hits > best) { best = g_prof[i].hits; bi = i; }
+        if (bi < 0 || !best) break;
+        fprintf(stderr, "[PROF]   %5.1f%%  %6u  sub_%08X\n",
+                100.0 * best / (g_prof_total ? g_prof_total : 1), best, g_prof[bi].gva);
+        g_prof[bi].hits = 0;   /* consume so the next rank surfaces */
+    }
+    fflush(stderr);
+}
+
+static DWORD WINAPI profiler_thread(LPVOID param) {
+    DWORD period = (DWORD)(uintptr_t)param;
+    extern uint32_t guest_func_for_host(uintptr_t host_addr);
+    unsigned since_dump = 0;
+    for (;;) {
+        Sleep(period);
+        if (!g_guest_thread) continue;
+        if (SuspendThread(g_guest_thread) == (DWORD)-1) continue;
+        CONTEXT c; c.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(g_guest_thread, &c)) {
+            uint32_t gva = guest_func_for_host((uintptr_t)c.Eip);
+            g_prof_total++;
+            if (gva) prof_record(gva); else g_prof_host++;
+        }
+        ResumeThread(g_guest_thread);
+        if (++since_dump >= (10000 / (period ? period : 1))) { since_dump = 0; prof_dump(); }
+    }
+    return 0;
+}
+
 static DWORD WINAPI watchdog_thread(LPVOID param) {
     DWORD timeout_ms = (DWORD)(uintptr_t)param;
     Sleep(timeout_ms);
@@ -2581,6 +3854,12 @@ volatile int g_exit_via_bridge = 0;
 
 static void NTAPI hook_NtTerminateProcess(HANDLE hProcess, NTSTATUS_T exitStatus) {
     /* Signal on stderr FIRST (before any file I/O) */
+    { extern volatile unsigned g_lastblk;
+      fprintf(stderr, "=== TERMINATE CONTEXT === last guest block: L_%08X  guest esp=0x%08X\n", g_lastblk, g_esp);
+      fprintf(stderr, "recent ICALLs:");
+      for (int _i = 0; _i < 12; _i++) { unsigned _k = (g_icall_trace_idx - 1 - _i) & (ICALL_TRACE_SIZE - 1);
+          fprintf(stderr, " 0x%08X", g_icall_trace[_k]); }
+      fprintf(stderr, "\n"); fflush(stderr); }
     fprintf(stderr, "\n!!! NtTerminateProcess HOOKED: handle=0x%X status=0x%08X bridge=%d !!!\n",
         (uint32_t)(uintptr_t)hProcess, (uint32_t)exitStatus, g_exit_via_bridge);
     fflush(stderr);
@@ -2722,6 +4001,12 @@ char g_trace_ring[TRACE_RING_SIZE][TRACE_ENTRY_SIZE] = {{0}};
 uint32_t g_trace_ring_idx = 0;
 
 int main(int argc, char* argv[]) {
+    /* Record our own module's image range so LINK_OK can exclude it (see recomp_types.h). */
+    { HMODULE _h = GetModuleHandleA(NULL);
+      if (_h) { IMAGE_DOS_HEADER* _d = (IMAGE_DOS_HEADER*)_h;
+                IMAGE_NT_HEADERS* _n = (IMAGE_NT_HEADERS*)((char*)_h + _d->e_lfanew);
+                g_hostmod_lo = (uint32_t)(uintptr_t)_h;
+                g_hostmod_hi = g_hostmod_lo + _n->OptionalHeader.SizeOfImage; } }
     setvbuf(stderr, NULL, _IONBF, 0); /* Force unbuffered stderr */
     /* Trace ring buffer is in-memory, dumped by watchdog thread */
     printf("=== X-Wing Alliance Static Recompilation ===\n");
@@ -2749,6 +4034,7 @@ int main(int argc, char* argv[]) {
     SetUnhandledExceptionFilter(veh_handler);
 
     printf("[*] VEH + UEF crash handler installed\n");
+    xwa_arm_watch();
 
     /* Set up memory layout */
     if (!setup_memory(data_file)) {
@@ -2797,6 +4083,43 @@ int main(int argc, char* argv[]) {
      * WinMain(hInstance, hPrevInstance=NULL, lpCmdLine, nCmdShow=SW_SHOWDEFAULT)
      * Args pushed right-to-left on simulated stack.
      */
+    /* Mask ALL x87/SSE floating-point exceptions before entering the guest. The original
+     * runs with control word 0x037F (every exception masked), so an invalid op or a divide
+     * by zero quietly yields NaN/INF there. In this process they were being RAISED instead:
+     * flight entry died with STATUS_FLOAT_INVALID_OPERATION (0xC0000090) at FLIGHT INIT in
+     * 6 of 6 runs. Trapping is still available on demand via XWA_FPTRAP. */
+    if (!getenv("XWA_FPTRAP")) {
+        unsigned _fpcur = 0;
+        _controlfp_s(&_fpcur, _MCW_EM, _MCW_EM);
+        fprintf(stderr, "[FP] all FP exceptions masked (cw now 0x%X)\n", _fpcur);
+        fflush(stderr);
+    }
+
+    /* XWA_HW3D: 0xB0C7BC is the MASTER hardware-3D switch. sub_00526D00 is literally
+     * `return MEM32(0xB0C7BC)`, and sub_0050C640 stores that result into 0x77330C at
+     * 0x0050C6E2; sub_00489310 then reads 0x77330C and, when it is 0, logs "RIGGED FOR
+     * SOFTWARE RENDERING". So this one byte decides the whole renderer path. Setting it
+     * BEFORE the guest starts lets the engine take the hardware route coherently, instead of
+     * re-enabling 3D midway and leaving half-initialised globals (#452). */
+    /* Dump the two string constants the hardware-3D selector compares against (#453). The image
+     * is loaded by now, so these are readable here even though the guest routine may not run. */
+    if (getenv("XWA_HWSTR")) {
+        uint32_t addrs[2] = { 0x006012A0u, 0x006012A8u };
+        for (int i = 0; i < 2; i++) {
+            char b[64]; int k;
+            for (k = 0; k < 63; k++) { uint8_t c = MEM8(addrs[i] + k);
+                b[k] = (c >= 32 && c < 127) ? (char)c : 0; if (!c) break; }
+            b[k] = 0;
+            fprintf(stderr, "[HWSTR] 0x%06X = '%s'\n", addrs[i], b);
+        }
+        fflush(stderr);
+    }
+    if (getenv("XWA_HW3D")) {
+        MEM8(0xB0C7BCu) = 1;
+        fprintf(stderr, "[HW3D] master hardware-3D switch 0xB0C7BC = 1 (pre-guest)\n");
+        fflush(stderr);
+    }
+
     HINSTANCE hInst = GetModuleHandleA(NULL);
     LPSTR cmdLine = GetCommandLineA();
 
@@ -2877,8 +4200,22 @@ int main(int argc, char* argv[]) {
     /* Register a _onexit callback (MSVC-specific, runs during _exit too) */
     _onexit((_onexit_t)dump_trace_atexit);
 
-    /* Start watchdog timer (5 minutes - extended for interactive testing) */
-    CreateThread(NULL, 0, watchdog_thread, (LPVOID)300000, 0, NULL);
+    /* Watchdog: dumps the trace ring then TerminateProcess(42). It fired unconditionally at
+     * 5 minutes, which silently killed long flight runs (the mission texture upload alone
+     * takes ~4 min) and looked like the game quitting on its own. Configurable now:
+     * XWA_WATCHDOG_MS=<ms>, and 0 disables it. */
+    { const char* pr = getenv("XWA_PROFILE");
+      if (pr) {
+          DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(),
+                          &g_guest_thread, 0, FALSE, DUPLICATE_SAME_ACCESS);
+          unsigned long ms = strtoul(pr, NULL, 0); if (!ms) ms = 50;
+          CreateThread(NULL, 0, profiler_thread, (LPVOID)(uintptr_t)ms, 0, NULL);
+          fprintf(stderr, "[*] sampling profiler every %lu ms\n", ms);
+      } }
+    { const char* wd = getenv("XWA_WATCHDOG_MS");
+      unsigned long wd_ms = wd ? strtoul(wd, NULL, 0) : 300000;
+      if (wd_ms) CreateThread(NULL, 0, watchdog_thread, (LPVOID)(uintptr_t)wd_ms, 0, NULL);
+      else fprintf(stderr, "[*] watchdog disabled (XWA_WATCHDOG_MS=0)\n"); }
 
     /* Call the CRT entry point (WinMainCRTStartup / mainCRTStartup).
      * This handles all CRT initialization: _heap_init, _mtinit, _ioinit,
@@ -2952,16 +4289,95 @@ int main(int argc, char* argv[]) {
                 CloseHandle(h);
             }
             fprintf(stderr, "\n!!! SEH CRASH: Exception 0x%08lX\n", seh_code);
+            { extern volatile unsigned g_lastblk;
+              if (g_lastblk) fprintf(stderr, "!!! last instrumented block: L_%08X\n", g_lastblk); }
             fprintf(stderr, "Total calls: %u, depth: %u, trace_idx: %u\n",
                     g_total_calls, g_call_depth, g_trace_ring_idx);
-            fflush(stderr);
-        }
-    }
+            { extern volatile unsigned g_fgbase, g_fgtblptr, g_fgrec, g_fgro;
+              if (g_fgbase) fprintf(stderr, "!!! FG walk: base=0x%08X tblptr=0x%08X %s\n",
+                  g_fgbase, g_fgtblptr, (g_fgbase==g_fgtblptr)?"SAME":"DIFFERENT"); }
+            { extern volatile unsigned g_obj, g_objro, g_objtag;
+              if (g_obj) fprintf(stderr, "!!! walked obj: ecx=0x%08X ro=0x%08X type=0x%04X\n",
+                  g_obj, g_objro, g_objtag); }
+            { extern volatile unsigned g_edxcap, g_edxval;
+              fprintf(stderr, "!!! slot read: edx=0x%08X value=0x%08X\n", g_edxcap, g_edxval); }
 
-    fprintf(stderr, "[*] game entry returned! eax = 0x%08X\n", g_eax);
-    fflush(stderr);
-    printf("[*] WinMain returned (eax = 0x%08X)\n", g_eax);
+            { extern volatile unsigned g_s1, g_s2, g_s3, g_smark;
+              if (g_smark == 0x5CA9u) fprintf(stderr, "!!! strscan: esi=0x%08X tblbase=0x%08X eax=%u\n", g_s1, g_s2, g_s3); }            { extern volatile unsigned g_cw[3], g_w1, g_w2;
+              fprintf(stderr, "!!! init counts @fault: loader_457C20=%u sub_458DC0=%u builder_41EF60=%u | str_462BE0=%u str_464A20=%u\n",
+                  g_cw[0], g_cw[1], g_cw[2], g_w1, g_w2); }
+            { extern volatile unsigned g_ldrblk;
+              if (g_ldrblk) fprintf(stderr, "!!! loader last block: L_%08X\n", g_ldrblk); }
 
-    cleanup_memory();
-    return 0;
+            { extern volatile unsigned g_after1, g_after2, g_aftermark;
+              if (g_aftermark == 0xA57Eu) fprintf(stderr, "!!! slots right after loader: [0]=0x%08X [1]=0x%08X\n", g_after1, g_after2);
+              else fprintf(stderr, "!!! post-loader sample NEVER RAN\n"); }            fflush(stderr);
+
+            { extern volatile unsigned g_strblk;
+              if (g_strblk) fprintf(stderr, "!!! sub_00462BE0 last block: L_%08X\n", g_strblk); }        }
+
+            { extern volatile unsigned g_al1,g_al2,g_al3,g_almark;
+              if (g_almark == 0xA110u) fprintf(stderr, "!!! alloc blk RAN: ret=0x%08X sibling(0x68C898)=0x%08X size(0x5A9698)=%u\n", g_al1,g_al2,g_al3);
+              else fprintf(stderr, "!!! alloc blk L_00463C21 NEVER RAN (branch skipped it)\n"); }    }
+
+            { extern volatile unsigned g_g1,g_g2,g_g3,g_g4,g_gmark;
+              if (g_gmark == 0x6C1Du) fprintf(stderr, "!!! GetCraftPointer: idxoff=0x%X (idx=%u) base=0x%08X fgfillbase=0x%08X %s ro=0x%08X\n",
+                  g_g1, g_g1/0x27u, g_g2, g_g3, (g_g2==g_g3)?"SAME":"DIFFERENT", g_g4);
+              else fprintf(stderr, "!!! GetCraftPointer capture NEVER RAN\n"); }
+
+            { extern volatile unsigned g_scmark;
+              fprintf(stderr, "!!! scene-render site 0x005110FB: %s\n", (g_scmark==0x5CE7u)?"REACHED":"NEVER REACHED"); }    fprintf(stderr, "[*] game entry returned! eax = 0x%08X\n", g_eax);
+
+    { extern volatile unsigned g_fltblk;
+      if (g_fltblk) fprintf(stderr, "[EXIT] sub_005710F0 last block: L_%08X\n", g_fltblk); fflush(stderr); }
+
+    { extern volatile unsigned g_wb1,g_wb2,g_wbmark;
+      if (g_wbmark == 0x0B1D) fprintf(stderr, "[WORLDBUILD] CALLED (pre=%u) returned=%d\n", g_wb1, (int)g_wb2-1);
+      else fprintf(stderr, "[WORLDBUILD] call site NEVER REACHED\n"); fflush(stderr); }    { extern volatile unsigned g_scblk, g_sc[2];
+
+    { extern volatile unsigned g_wbblk;
+      if (g_wbblk) fprintf(stderr, "[WBBLK] sub_0050A7E0 last block: L_%08X\n", g_wbblk); fflush(stderr); }      fprintf(stderr, "[EXIT] sub_00564D10 calls=%u last block=L_%08X\n", g_sc[0], g_scblk); fflush(stderr); }
+
+    { extern volatile unsigned g_sel,g_selmark;
+      if (g_selmark==0x5E1E) fprintf(stderr, "[SELECTOR] MEM8(0xB0C7D6) = %u\n", g_sel);
+      else fprintf(stderr, "[SELECTOR] site never reached\n"); fflush(stderr); }
+    { extern volatile unsigned g_af1; fprintf(stderr, "[AFC0] sub_0049AFC0 entries = %u\n", g_af1); fflush(stderr); }
+
+    { extern volatile unsigned g_afblk; if (g_afblk) fprintf(stderr, "[AFBLK] sub_0049AFC0 last block: L_%08X\n", g_afblk); fflush(stderr); }            { extern volatile unsigned g_p1,g_p2,g_p3,g_pmark;
+              if (g_pmark==0x0BA1u) fprintf(stderr, "!!! palette call: edx=0x%08X *edx=0x%08X esi=0x%08X\n", g_p1,g_p2,g_p3);
+              else fprintf(stderr, "!!! palette capture NEVER RAN\n"); }    fflush(stderr);
+
+            { extern volatile unsigned g_r1,g_r2,g_rmark;
+              if (g_rmark==0x00E5u) fprintf(stderr, "!!! resource slot: ecx=0x%X (idx=%u) entry=0x%08X\n", g_r1, g_r1/4u, g_r2); }    printf("[*] WinMain returned (eax = 0x%08X)\n", g_eax);
+
+            { extern volatile unsigned g_rw[4], g_rwidx[4]; int _k;
+              fprintf(stderr, "!!! registry writers:");
+              for (_k=0;_k<4;_k++) fprintf(stderr, " [%d]=%u(lastidx=%u)", _k, g_rw[_k], g_rwidx[_k]/4u);
+              fprintf(stderr, "\n"); }
+            { extern volatile unsigned g_setup[4];
+              fprintf(stderr, "!!! setup fns: 0050E5C0=%u 0050EC00=%u 0050FBE0=%u 0050FC50=%u | 7825E8=0x%X 773310=0x%X\n",
+                  g_setup[0],g_setup[1],g_setup[2],g_setup[3], MEM32(0x7825E8u), MEM32(0x773310u)); }
+            { extern volatile unsigned g_dd[2];
+              fprintf(stderr, "!!! ddraw setup: sub_0050C640=%u sub_0050C6F0=%u\n", g_dd[0], g_dd[1]); }
+            { extern volatile unsigned g_sd[4];
+              fprintf(stderr, "!!! screen-shutdown callers: 52BC00=%u 53E340=%u 53E6C0=%u 53E760=%u\n",
+                  g_sd[0],g_sd[1],g_sd[2],g_sd[3]); }
+            { extern volatile unsigned g_fl[2], g_flmark;
+              fprintf(stderr, "!!! flight sets 0x9F701E: mark=0x%X  @0x57136A=%u  @0x571540=%u | current 9F701E=%u\n",
+                  g_flmark, g_fl[0], g_fl[1], MEM32(0x9F701Eu)); }
+            { extern volatile unsigned g_sc[2];
+              fprintf(stderr, "!!! screen-layer: sub_00564D10=%u sub_00574CE0=%u\n", g_sc[0], g_sc[1]); }
+            { extern volatile unsigned g_scblk;
+              if (g_scblk) fprintf(stderr, "!!! sub_00564D10 last block: L_%08X\n", g_scblk); }
+            { extern volatile unsigned g_ctxblk;
+              if (g_ctxblk) fprintf(stderr, "!!! sub_00441EE0 last block: L_%08X\n", g_ctxblk); }
+
+            { extern volatile unsigned g_t1,g_t2,g_t3,g_t4,g_tmark;
+              if (g_tmark==0x7E10u) fprintf(stderr, "!!! TEX flag: cfg(eax)=%d edi=%d -> idx=%d  table[0]=%u table[1]=%u  set=%u\n",
+                  (int)g_t1,(int)g_t2,(int)g_t1>(int)g_t2?1:0, g_t3&0xFF, (g_t3>>8)&0xFF, g_t4);
+              else fprintf(stderr, "!!! TEX capture NEVER RAN\n"); }    cleanup_memory();
+
+            { extern volatile unsigned g_dv1,g_dv2,g_dv3,g_dvmark;
+              if (g_dvmark==0x0DE7u) fprintf(stderr, "!!! device record: idx=%u rec=0x%08X dword0=0x%08X\n", g_dv1,g_dv2,g_dv3);
+              else fprintf(stderr, "!!! device-record capture NEVER RAN\n"); }    return 0;
 }

@@ -252,12 +252,6 @@
   "num_instructions": 7
  },
  {
-  "address": "0x0040F248",
-  "address_int": 4256328,
-  "name": "sub_0040F248",
-  "num_instructions": 79
- },
- {
   "address": "0x00411DE0",
   "address_int": 4267488,
   "name": "sub_00411DE0",
@@ -2874,12 +2868,6 @@
   "num_instructions": 17
  },
  {
-  "address": "0x00479F7B",
-  "address_int": 4693883,
-  "name": "sub_00479F7B",
-  "num_instructions": 275
- },
- {
   "address": "0x0047A280",
   "address_int": 4694656,
   "name": "sub_0047A280",
@@ -4788,22 +4776,10 @@
   "num_instructions": 138
  },
  {
-  "address": "0x004A14A2",
-  "address_int": 4854946,
-  "name": "sub_004A14A2",
-  "num_instructions": 246
- },
- {
   "address": "0x004A1850",
   "address_int": 4855888,
   "name": "sub_004A1850",
   "num_instructions": 134
- },
- {
-  "address": "0x004A1A03",
-  "address_int": 4856323,
-  "name": "sub_004A1A03",
-  "num_instructions": 235
  },
  {
   "address": "0x004A1D80",
@@ -7926,28 +7902,10 @@
   "num_instructions": 1540
  },
  {
-  "address": "0x004FEFE1",
-  "address_int": 5238753,
-  "name": "sub_004FEFE1",
-  "num_instructions": 2
- },
- {
-  "address": "0x004FEFEB",
-  "address_int": 5238763,
-  "name": "sub_004FEFEB",
-  "num_instructions": 4
- },
- {
   "address": "0x004FEFF5",
   "address_int": 5238773,
   "name": "sub_004FEFF5",
   "num_instructions": 2
- },
- {
-  "address": "0x004FEFFF",
-  "address_int": 5238783,
-  "name": "sub_004FEFFF",
-  "num_instructions": 2142
  },
  {
   "address": "0x00500DFE",
@@ -8044,12 +8002,6 @@
   "address_int": 5260016,
   "name": "sub_005042F0",
   "num_instructions": 159
- },
- {
-  "address": "0x0050450B",
-  "address_int": 5260555,
-  "name": "sub_0050450B",
-  "num_instructions": 243
  },
  {
   "address": "0x005048B0",
@@ -14754,12 +14706,6 @@
   "num_instructions": 37
  },
  {
-  "address": "0x00594F85",
-  "address_int": 5853061,
-  "name": "sub_00594F85",
-  "num_instructions": 27
- },
- {
   "address": "0x00595006",
   "address_int": 5853190,
   "name": "sub_00595006",
@@ -14818,12 +14764,6 @@
   "address_int": 5857470,
   "name": "sub_005960BE",
   "num_instructions": 10
- },
- {
-  "address": "0x0059610A",
-  "address_int": 5857546,
-  "name": "sub_0059610A",
-  "num_instructions": 723
  },
  {
   "address": "0x00596EA2",

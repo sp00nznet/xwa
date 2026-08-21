@@ -36,9 +36,53 @@ int  recomp_fp_valid(FILE* fp);
 
 /* Volatile (caller-saved) registers */
 extern uint32_t g_eax, g_ecx, g_edx, g_esp;
+extern int g_ret_probe;
+
+/* The x87 stack is ONE piece of hardware shared by the whole program, so it must be global.
+ * It used to be a per-function `double _st[8] = {0}`, which meant any function returning a
+ * value in st(0) silently returned nothing: the callee read its own zeroed copy. That is what
+ * made the CRT __ftol helper return 0 for every float->int conversion in the game. */
+extern volatile unsigned g_lastblk;
+extern volatile unsigned g_cw[3];
+extern volatile unsigned g_edxcap, g_edxval;
+extern volatile unsigned g_w1, g_w2;
+extern volatile unsigned g_ldrblk;
+extern volatile unsigned g_after1, g_after2, g_aftermark;
+extern volatile unsigned g_strblk;
+extern volatile unsigned g_al1,g_al2,g_al3,g_almark;
+extern volatile unsigned g_g1,g_g2,g_g3,g_g4,g_gmark;
+extern volatile unsigned g_scmark;
+extern volatile unsigned g_p1,g_p2,g_p3,g_pmark;
+extern volatile unsigned g_r1,g_r2,g_rmark;
+extern volatile unsigned g_rw[4], g_rwidx[4];
+extern volatile unsigned g_setup[4];
+extern volatile unsigned g_dd[2];
+extern volatile unsigned g_ctxblk;
+extern volatile unsigned g_t1,g_t2,g_t3,g_t4,g_tmark;
+extern volatile unsigned g_dv1,g_dv2,g_dv3,g_dvmark;
+extern volatile unsigned g_sd[4];
+extern volatile unsigned g_fl[2], g_flmark;
+extern volatile unsigned g_sc[2];
+extern volatile unsigned g_scblk;
+extern volatile unsigned g_csblk;
+extern volatile unsigned g_fltblk;
+extern volatile unsigned g_wb1,g_wb2,g_wbmark;
+extern volatile unsigned g_wbblk;
+extern volatile unsigned g_sel,g_selmark;
+extern volatile unsigned g_af1;
+extern volatile unsigned g_afblk;
+extern volatile unsigned g_s1, g_s2, g_s3, g_smark;
+extern volatile unsigned g_obj, g_objro, g_objtag;
+extern volatile unsigned g_fgbase, g_fgtblptr, g_fgrec, g_fgro;
+extern double _st[8];
+extern int    _fp_top;
 
 /* Callee-saved registers (also global for implicit parameter passing) */
 extern uint32_t g_ebx, g_esi, g_edi;
+/* EBP is a real callee-saved register in the guest ABI and some functions take
+ * PARAMETERS in it (e.g. sub_00482000 derefs [ebp+4]). It was previously a per-function
+ * local initialised to 0, so those parameters always arrived as NULL. */
+extern uint32_t g_ebp;
 
 /* Segment registers (flat mode Win32 - effectively unused) */
 extern uint16_t g_seg_cs, g_seg_ds, g_seg_es, g_seg_fs, g_seg_gs, g_seg_ss;
@@ -65,6 +109,7 @@ extern const uint32_t recomp_dispatch_count;
 #define ecx g_ecx
 #define edx g_edx
 #define ebx g_ebx
+#define ebp g_ebp
 #define esp g_esp
 #define esi g_esi
 #define edi g_edi
@@ -114,7 +159,18 @@ extern ptrdiff_t g_mem_base;
 
 /* Guest-pointer sanity check for defensive list-unlink guards: 4-byte aligned and within the
  * guest address space [0x400000, 0x40000000). Used to skip writes through garbage link pointers. */
-#define LINK_OK(p)   (((uint32_t)(p) & 3u) == 0u && (uint32_t)(p) >= 0x00400000u && (uint32_t)(p) < 0x40000000u)
+/* Route every getenv() in the generated code + mocks through the pointer-keyed cache
+ * (see xwa_getenv_cached in main.c). Hot-loop probes called it per-invocation. */
+#include <stdlib.h>
+extern char* xwa_getenv_cached(const char* name);
+#define getenv(n) xwa_getenv_cached(n)
+
+/* LINK_OK was a pure range test [0x400000,0x40000000), and OUR OWN host module is loaded at
+ * 0x10000000 -- inside that range. So a mock-object pointer that reaches a guest linked-list
+ * unlink passed the test and the guest wrote through it into our read-only image (measured:
+ * WRITE addr=0x111511A0 in sub_00597E5F, killing the flight loop). Exclude the host module. */
+extern uint32_t g_hostmod_lo, g_hostmod_hi;
+#define LINK_OK(p)   (((uint32_t)(p) & 3u) == 0u && (uint32_t)(p) >= 0x00400000u && (uint32_t)(p) < 0x40000000u                       && !((uint32_t)(p) >= g_hostmod_lo && (uint32_t)(p) < g_hostmod_hi))
 
 /* ============================================================
  * FS Segment Access (Thread Environment Block)
@@ -303,16 +359,17 @@ extern uint32_t g_trace_ring_idx;
  * calling convention. This masks stack imbalance bugs in recompiled code
  * that would otherwise cause corrupted pop values to propagate. */
 #define RECOMP_CALL(func) do { \
-    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi; \
+    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi, _save_ebp = g_ebp; \
     PUSH32(esp, 0xDEAD0000u); /* dummy return address */ \
     g_call_depth++; \
     g_total_calls++; \
     if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
     TRACE_LOG("[CALL %u d%u] -> %s\n", g_total_calls, g_call_depth, #func); \
     func(); \
+    if (g_ret_probe) { fprintf(stderr, "[MACRO] just after %s: g_eax=0x%08X\n", #func, g_eax); fflush(stderr); } \
     TRACE_LOG("[RET  %u d%u] <- %s\n", g_total_calls, g_call_depth, #func); \
     g_call_depth--; \
-    g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; \
+    g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; g_ebp = _save_ebp; \
     if (g_heap_check_enabled && !HeapValidate(GetProcessHeap(), 0, NULL)) { \
         fprintf(stderr, "[HEAP] CORRUPTION after CALL %s (call #%u)\n", #func, g_total_calls); \
         fprintf(stderr, "    Last OK: call #%u va 0x%08X\n", g_heap_check_last_ok_call, g_heap_check_last_ok_va); \
@@ -327,7 +384,7 @@ extern uint32_t g_trace_ring_idx;
  * Same callee-saved register protection as RECOMP_CALL. */
 #define RECOMP_ICALL(target_va) do { \
     uint32_t _va = (uint32_t)(target_va); \
-    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi; \
+    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi, _save_ebp = g_ebp; \
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
@@ -343,7 +400,7 @@ extern uint32_t g_trace_ring_idx;
         _fn(); \
         TRACE_LOG("[IRET  %u d%u] <- 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         g_call_depth--; \
-        g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; \
+        g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; g_ebp = _save_ebp; \
         if (g_heap_check_enabled && !HeapValidate(GetProcessHeap(), 0, NULL)) { \
             fprintf(stderr, "[HEAP] CORRUPTION after ICALL 0x%08X in %s (icall #%u, call #%u)\n", _va, __func__, g_total_icalls, g_total_calls); \
             fprintf(stderr, "    Last OK: call #%u va 0x%08X\n", g_heap_check_last_ok_call, g_heap_check_last_ok_va); \
@@ -361,7 +418,7 @@ extern uint32_t g_trace_ring_idx;
             fprintf(stderr, "!!! UNRESOLVED ICALL: VA 0x%08X (call #%u, icall #%u) in %s\n", _va, g_total_calls, g_total_icalls, __func__); \
             eax = 0; \
         } \
-        g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; \
+        g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; g_ebp = _save_ebp; \
     } \
 } while(0)
 
@@ -383,13 +440,17 @@ extern uint32_t g_trace_ring_idx;
         g_call_depth--; \
     } else if (!recomp_native_call(_va)) { \
         TRACE_LOG("ITAIL: unresolved VA 0x%08X\n", _va); \
+        /* Cap the report. A hot unresolved tail-target (a CRT math epilogue reached every \
+         * frame) otherwise buries the log in millions of identical dumps. */ \
+        static unsigned _itail_reports = 0; \
+        if (_itail_reports++ < 20) { \
         fprintf(stderr, "!!! UNRESOLVED ITAIL: VA 0x%08X (call #%u, icall #%u) in %s\n", _va, g_total_calls, g_total_icalls, __func__); \
         fprintf(stderr, "    Last 16 ICALL/ITAIL targets:\n"); \
         for (int _i = 16; _i > 0; _i--) { \
             uint32_t _idx = (g_icall_trace_idx - _i) & (ICALL_TRACE_SIZE-1); \
             fprintf(stderr, "      [-%d] 0x%08X\n", _i, g_icall_trace[_idx]); \
         } \
-        fprintf(stderr, "    g_esp=0x%08X\n", g_esp); \
+        fprintf(stderr, "    g_esp=0x%08X\n", g_esp); } \
     } \
 } while(0)
 

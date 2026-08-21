@@ -43,8 +43,10 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Game install (copyrighted assets — user-supplied)
+# Game install / binaries (copyrighted assets — user-supplied)
 Star Wars X-Wing Alliance/
+Star Wars X-Wing Alliance
+config/*.exe
 # Frame dumps / traces / scratch
 *.bmp
 trace*.txt

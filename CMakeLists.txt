@@ -32,7 +32,12 @@ if(MSVC)
     # Optimization for Release
     # NOTE: /GL (whole program optimization) disabled - it causes MSVC to misoptimize
     # cross-function global register variable accesses in the recompiled code.
-    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Oi")
+    # /Zi + /DEBUG: keep a PDB for Release. The crash handler uses it to name the exact
+    # generated-C line for a faulting host address, and every generated line carries the
+    # guest instruction in a comment -- so a crash points straight at the guest opcode.
+    # Does not change codegen (/Zi is debug info only) and costs nothing at runtime.
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Oi /Zi")
+    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
     #set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
 endif()
 

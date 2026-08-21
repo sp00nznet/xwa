@@ -284,8 +284,8 @@ def lift_function_linear(lifter, name, instructions, leaders, func_start, switch
     lines = []
     lines.append(f'void {name}(void) {{')
     lines.append(f'    uint32_t ebp = 0;')
-    lines.append(f'    double _st[8] = {{0}};')
-    lines.append(f'    int _fp_top = 0;')
+    # _st / _fp_top are GLOBAL (see recomp_types.h): one x87 stack for the whole
+    # program, so values returned in st(0) survive across calls.
     lines.append(f'    int _fpu_cmp = 0;')
     lines.append(f'    uint32_t _cf = 0;')
     lines.append(f'    int _df = 1;')

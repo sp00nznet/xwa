@@ -12,6 +12,7 @@
 #include <d3dcompiler.h>
 #include <dxgi.h>
 #include <stdio.h>
+#include <float.h>
 #include <string.h>
 
 #include "d3d11_renderer.h"
@@ -83,6 +84,23 @@ static uint32_t g_cur_src_blend = D3DBLEND_ONE;
 static uint32_t g_cur_dst_blend = D3DBLEND_ZERO;
 static int g_cur_colorkey = 0;
 static uint32_t g_cur_texmapblend = D3DTBLEND_MODULATE;
+
+/* g_cur_texmapblend used to be recorded and then ignored -- the pixel shader always did
+ * `texel * diffuse`, so when the engine emitted diffuse 0xFF000000 (opaque black) every
+ * textured pixel came out black. Push the mode into the shader constant buffer. */
+static void push_viewport_cb(void) {
+    if (!g_context || !g_cb_viewport) return;
+    D3D11_MAPPED_SUBRESOURCE m;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_cb_viewport, 0,
+                                          D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        float* d = (float*)m.pData;
+        d[0] = (float)g_vp_width;
+        d[1] = (float)g_vp_height;
+        d[2] = (float)g_cur_texmapblend;
+        d[3] = 0.0f;
+        ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_cb_viewport, 0);
+    }
+}
 
 /* Frame stats */
 static uint32_t g_frame_count = 0;
@@ -200,6 +218,58 @@ static void create_texture_from_pixels(texture_entry_t* tex) {
 /* ============================================================
  * Initialization
  * ============================================================ */
+
+/* The game calls SetDisplayMode(640x480) for the menus and then SetDisplayMode(800x600) for
+ * flight. D3D11 was initialised on the first call and never resized, so the flight screen
+ * projected vertices into an 800x600 space while the render target stayed 640x480 -- the whole
+ * scene landed below and to the right of the visible area (measured: draws at y 485..594 with
+ * a 480-tall target). Resize the swap chain and depth buffer to follow the mode change. */
+int d3d11_resize(uint32_t width, uint32_t height) {
+    if (!g_d3d11_initialized || !g_swapchain) return 0;
+    if (width == g_vp_width && height == g_vp_height) return 1;
+    if (!width || !height) return 0;
+
+    ID3D11DeviceContext_OMSetRenderTargets(g_context, 0, NULL, NULL);
+    if (g_rtv)       { ID3D11RenderTargetView_Release(g_rtv);  g_rtv = NULL; }
+    if (g_dsv)       { ID3D11DepthStencilView_Release(g_dsv);  g_dsv = NULL; }
+    if (g_depth_tex) { ID3D11Texture2D_Release(g_depth_tex);   g_depth_tex = NULL; }
+
+    HRESULT hr = IDXGISwapChain_ResizeBuffers(g_swapchain, 0, width, height,
+                                              DXGI_FORMAT_UNKNOWN, 0);
+    if (FAILED(hr)) {
+        fprintf(stderr, "[D3D11] ResizeBuffers(%ux%u) failed hr=0x%08lX\n", width, height, (unsigned long)hr);
+        return 0;
+    }
+
+    ID3D11Texture2D* back_buffer = NULL;
+    hr = IDXGISwapChain_GetBuffer(g_swapchain, 0, &IID_ID3D11Texture2D, (void**)&back_buffer);
+    if (FAILED(hr)) return 0;
+    hr = ID3D11Device_CreateRenderTargetView(g_device, (ID3D11Resource*)back_buffer, NULL, &g_rtv);
+    ID3D11Texture2D_Release(back_buffer);
+    if (FAILED(hr)) return 0;
+
+    D3D11_TEXTURE2D_DESC dtd = {0};
+    dtd.Width = width;
+    dtd.Height = height;
+    dtd.MipLevels = 1;
+    dtd.ArraySize = 1;
+    dtd.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    dtd.SampleDesc.Count = 1;
+    dtd.Usage = D3D11_USAGE_DEFAULT;
+    dtd.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_device, &dtd, NULL, &g_depth_tex))) return 0;
+    if (FAILED(ID3D11Device_CreateDepthStencilView(g_device, (ID3D11Resource*)g_depth_tex, NULL, &g_dsv))) return 0;
+
+    g_vp_width = width;
+    g_vp_height = height;
+    ID3D11DeviceContext_OMSetRenderTargets(g_context, 1, &g_rtv, g_dsv);
+    D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)width, (float)height, 0.0f, 1.0f };
+    ID3D11DeviceContext_RSSetViewports(g_context, 1, &vp);
+    push_viewport_cb();
+    fprintf(stderr, "[D3D11] resized render target to %ux%u\n", width, height);
+    fflush(stderr);
+    return 1;
+}
 
 int d3d11_init(void* hwnd, uint32_t width, uint32_t height) {
     HRESULT hr;
@@ -423,7 +493,11 @@ int d3d11_init(void* hwnd, uint32_t width, uint32_t height) {
     D3D11_RASTERIZER_DESC rd = {0};
     rd.FillMode = D3D11_FILL_SOLID;
     rd.CullMode = D3D11_CULL_NONE;
-    rd.DepthClipEnable = TRUE;
+    /* The engine hands us already-transformed vertices whose sz runs outside [0,1] (measured
+     * down to -1.875). D3D11 hard-clips anything outside 0 <= z <= w, which silently deleted
+     * whole primitives -- the space backdrop drew as one triangle of its quad. DirectDraw/D3D5
+     * clamped instead, so match that and let the depth test handle ordering. */
+    rd.DepthClipEnable = FALSE;
     ID3D11Device_CreateRasterizerState(g_device, &rd, &g_raster_solid);
 
     rd.FillMode = D3D11_FILL_WIREFRAME;
@@ -501,6 +575,7 @@ int d3d11_init(void* hwnd, uint32_t width, uint32_t height) {
     ID3D11DeviceContext_IASetPrimitiveTopology(g_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D11DeviceContext_VSSetShader(g_context, g_vs_tlvertex, NULL, 0);
     ID3D11DeviceContext_VSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
     ID3D11DeviceContext_PSSetSamplers(g_context, 0, 1, &g_sampler_linear);
     ID3D11DeviceContext_RSSetState(g_context, g_raster_solid);
     ID3D11DeviceContext_OMSetDepthStencilState(g_context, g_dss_enabled, 0);
@@ -511,6 +586,12 @@ int d3d11_init(void* hwnd, uint32_t width, uint32_t height) {
     memset(g_textures, 0, sizeof(g_textures));
 
     g_d3d11_initialized = 1;
+    /* Creating the D3D11 device re-enables FP exceptions in this process: the mask applied
+     * before the guest entry (main.c) is undone by the time flight starts, and flight then
+     * dies with STATUS_FLOAT_INVALID_OPERATION (0xC0000090) at FLIGHT INIT. The original
+     * runs with x87 CW 0x037F -- everything masked. Re-apply it here. */
+    if (!getenv("XWA_FPTRAP")) { unsigned _cw = 0; _controlfp_s(&_cw, _MCW_EM, _MCW_EM);
+        fprintf(stderr, "[FP] re-masked after D3D11 device creation (cw=0x%X)\n", _cw); }
     fprintf(stderr, "[D3D11] Renderer initialized successfully\n");
     return 1;
 }
@@ -604,6 +685,7 @@ static void draw_surface_quad(void) {
 
     ID3D11DeviceContext_VSSetShader(g_context, g_vs_tlvertex, NULL, 0);
     ID3D11DeviceContext_VSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
     ID3D11DeviceContext_PSSetShader(g_context, g_ps_textured, NULL, 0);
     ID3D11DeviceContext_PSSetShaderResources(g_context, 0, 1, &g_staging_srv);
     ID3D11DeviceContext_PSSetSamplers(g_context, 0, 1, &g_sampler_point);
@@ -617,10 +699,339 @@ static void draw_surface_quad(void) {
     ID3D11DeviceContext_DrawIndexed(g_context, 6, 0, 0);
 }
 
-unsigned long g_execute_calls = 0;  /* ponytail: count d3d11_execute invocations for diagnosis */
+unsigned long g_execute_calls = 0;
+static uint32_t g_3d_since_present = 0;   /* 3D vertices submitted since the last Present */  /* ponytail: count d3d11_execute invocations for diagnosis */
+
+/* XWA_CAPTURE: read the backbuffer back and report/dump it. Proof of what is actually on
+ * screen, independent of the DirectDraw-side nz counters. */
+static void d3d11_capture_frame(void) {
+    static int on = -1, shots = 0;
+    if (on < 0) on = getenv("XWA_CAPTURE") ? 1 : 0;
+    /* Only capture frames that actually contain 3D geometry -- otherwise the first few
+     * (empty) presents consume the budget. */
+    if (!on || shots >= 10 || g_3d_since_present < 150) return;   /* frames carrying real geometry */
+    ID3D11Texture2D* back = NULL;
+    if (FAILED(IDXGISwapChain_GetBuffer(g_swapchain, 0, &IID_ID3D11Texture2D, (void**)&back))) return;
+    D3D11_TEXTURE2D_DESC td; ID3D11Texture2D_GetDesc(back, &td);
+    D3D11_TEXTURE2D_DESC sd = td;
+    sd.Usage = D3D11_USAGE_STAGING; sd.BindFlags = 0;
+    sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.MiscFlags = 0;
+    ID3D11Texture2D* stage = NULL;
+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_device, &sd, NULL, &stage))) {
+        ID3D11DeviceContext_CopyResource(g_context, (ID3D11Resource*)stage, (ID3D11Resource*)back);
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)stage, 0, D3D11_MAP_READ, 0, &m))) {
+            uint32_t nz = 0, w = td.Width, h = td.Height;
+            for (uint32_t y = 0; y < h; y++) {
+                uint8_t* row = (uint8_t*)m.pData + (size_t)y * m.RowPitch;
+                for (uint32_t x = 0; x < w; x++) {
+                    uint8_t* px = row + x * 4;
+                    if (px[0] | px[1] | px[2]) nz++;
+                }
+            }
+            shots++;
+            fprintf(stderr, "[CAPTURE] backbuffer %ux%u: %u/%u non-black pixels (%.1f%%)\n",
+                    w, h, nz, w * h, 100.0 * nz / (w * h));
+            if (nz) {
+                char path[128]; sprintf(path, "D:\\recomp\\pc\\xwa\\frame_3d_%d.bmp", shots);
+                FILE* f = fopen(path, "wb");
+                if (f) {
+                    uint32_t row32 = w * 3; if (row32 % 4) row32 += 4 - (row32 % 4);
+                    uint32_t img = row32 * h; uint8_t hdr[54] = {0};
+                    hdr[0]='B'; hdr[1]='M'; *(uint32_t*)(hdr+2)=54+img; *(uint32_t*)(hdr+10)=54;
+                    *(uint32_t*)(hdr+14)=40; *(int32_t*)(hdr+18)=(int32_t)w; *(int32_t*)(hdr+22)=(int32_t)h;
+                    *(uint16_t*)(hdr+26)=1; *(uint16_t*)(hdr+28)=24; *(uint32_t*)(hdr+34)=img;
+                    fwrite(hdr,1,54,f);
+                    uint8_t* line = (uint8_t*)calloc(1,row32);
+                    for (int y = (int)h - 1; y >= 0; y--) {
+                        uint8_t* row = (uint8_t*)m.pData + (size_t)y * m.RowPitch;
+                        for (uint32_t x = 0; x < w; x++) {
+                            line[x*3+0] = row[x*4+0]; line[x*3+1] = row[x*4+1]; line[x*3+2] = row[x*4+2];
+                        }
+                        fwrite(line,1,row32,f);
+                    }
+                    free(line); fclose(f);
+                    fprintf(stderr, "[CAPTURE] wrote %s\n", path);
+                }
+            }
+            fflush(stderr);
+            ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)stage, 0);
+        }
+        ID3D11Texture2D_Release(stage);
+    }
+    ID3D11Texture2D_Release(back);
+}
+
+
+/* Capture the swap-chain back buffer to a 24-bit BMP. The existing frame dump reads the
+ * DirectDraw mock's back buffer, which is the SOFTWARE surface -- it stays black even when
+ * the D3D11 path is drawing thousands of triangles. This reads what actually reaches the GPU. */
+void d3d11_capture_bmp(const char* path) {
+    ID3D11Texture2D* back = NULL; ID3D11Texture2D* stage = NULL;
+    D3D11_TEXTURE2D_DESC td; D3D11_MAPPED_SUBRESOURCE map;
+    if (!g_device || !g_context || !g_swapchain) return;
+    if (FAILED(g_swapchain->lpVtbl->GetBuffer(g_swapchain, 0, &IID_ID3D11Texture2D, (void**)&back))) return;
+    back->lpVtbl->GetDesc(back, &td);
+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ; td.MiscFlags = 0;
+    if (SUCCEEDED(g_device->lpVtbl->CreateTexture2D(g_device, &td, NULL, &stage))) {
+        g_context->lpVtbl->CopyResource(g_context, (ID3D11Resource*)stage, (ID3D11Resource*)back);
+        if (SUCCEEDED(g_context->lpVtbl->Map(g_context, (ID3D11Resource*)stage, 0, D3D11_MAP_READ, 0, &map))) {
+            uint32_t w = td.Width, h = td.Height;
+            uint32_t rowb = ((w * 3u) + 3u) & ~3u;      /* BMP rows are 4-byte aligned */
+            uint32_t imgsz = rowb * h;
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                uint8_t hdr[54]; uint32_t off = 54, fsz = 54 + imgsz; uint32_t i;
+                memset(hdr, 0, sizeof hdr);
+                hdr[0]='B'; hdr[1]='M';
+                memcpy(hdr+2,&fsz,4); memcpy(hdr+10,&off,4);
+                { uint32_t v=40; memcpy(hdr+14,&v,4); }
+                memcpy(hdr+18,&w,4); memcpy(hdr+22,&h,4);
+                { uint16_t pl=1, bc=24; memcpy(hdr+26,&pl,2); memcpy(hdr+28,&bc,2); }
+                memcpy(hdr+34,&imgsz,4);
+                fwrite(hdr,1,54,f);
+                { uint8_t* row = (uint8_t*)malloc(rowb);
+                  if (row) {
+                    for (i = 0; i < h; i++) {          /* BMP is bottom-up */
+                        const uint8_t* src = (const uint8_t*)map.pData + (size_t)(h-1-i) * map.RowPitch;
+                        uint32_t x; memset(row, 0, rowb);
+                        for (x = 0; x < w; x++) {      /* RGBA/BGRA -> BGR */
+                            row[x*3+0] = src[x*4+0]; row[x*3+1] = src[x*4+1]; row[x*3+2] = src[x*4+2];
+                        }
+                        fwrite(row,1,rowb,f);
+                    }
+                    free(row);
+                  } }
+                fclose(f);
+                fprintf(stderr, "[RTDUMP] wrote %s (%ux%u)\n", path, w, h); fflush(stderr);
+            }
+            g_context->lpVtbl->Unmap(g_context, (ID3D11Resource*)stage, 0);
+        }
+        stage->lpVtbl->Release(stage);
+    }
+    back->lpVtbl->Release(back);
+}
+
+/* ============================================================
+ * d3d11_draw_native -- submit already-screen-space triangles directly.
+ *
+ * The lifted model renderer (sub_00442F70) is unreachable in this port: the OPT node records the
+ * resource resolver returns do not match the layout the walker's type dispatch expects, and there is
+ * no working in-port reference to diff against (the concourse uses a different renderer entirely).
+ * The GEOMETRY ITSELF is loaded and valid, so draw it here instead -- the standard recomp fallback of
+ * replacing a render path that cannot be lifted.
+ * ============================================================ */
+/* Vertices are submitted mid-frame by the guest render walk, but the frame is cleared afterwards,
+ * so they never survive to the presented image. Buffer them and draw just before Present. */
+static D3DTLVERTEX g_native_buf[32768];
+static int g_native_n = 0;
+
+/* Native geometry is drawn per texture, so the buffer carries a batch list alongside it. */
+#define NATIVE_BATCHES 256
+typedef struct { int tex; int start; int count; } native_batch_t;
+static native_batch_t g_native_batch[NATIVE_BATCHES];
+static int g_native_batch_n = 0;
+
+/* Textures the native path owns, keyed by the OPT texture node address. */
+#define NATIVE_TEXTURES 256
+static struct { uint32_t key; ID3D11ShaderResourceView* srv; } g_native_tex[NATIVE_TEXTURES];
+static int g_native_tex_n = 0;
+
+int d3d11_native_texture(uint32_t key, const uint32_t* rgba, int w, int h) {
+    int i;
+    for (i = 0; i < g_native_tex_n; i++) if (g_native_tex[i].key == key) return i;
+    if (!g_device || g_native_tex_n >= NATIVE_TEXTURES || !rgba || w <= 0 || h <= 0) return -1;
+    {
+        D3D11_TEXTURE2D_DESC td = {0};
+        D3D11_SUBRESOURCE_DATA sd = {0};
+        ID3D11Texture2D* tex = NULL;
+        ID3D11ShaderResourceView* srv = NULL;
+        td.Width = (UINT)w; td.Height = (UINT)h; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        sd.pSysMem = rgba;
+        sd.SysMemPitch = (UINT)(w * 4);
+        if (FAILED(ID3D11Device_CreateTexture2D(g_device, &td, &sd, &tex))) return -1;
+        if (FAILED(ID3D11Device_CreateShaderResourceView(g_device, (ID3D11Resource*)tex, NULL, &srv))) {
+            ID3D11Texture2D_Release(tex); return -1;
+        }
+        ID3D11Texture2D_Release(tex);
+        g_native_tex[g_native_tex_n].key = key;
+        g_native_tex[g_native_tex_n].srv = srv;
+        return g_native_tex_n++;
+    }
+}
+
+/* Drop anything queued this frame: the scene is rebuilt from scratch on every update, and it can
+ * be rebuilt several times between presents. */
+void d3d11_native_reset(void) { g_native_n = 0; g_native_batch_n = 0; }
+
+void d3d11_draw_native(const D3DTLVERTEX* verts, int count, int tex) {
+    if (!verts || count < 3) return;
+    if (g_native_n + count > 32768) count = 32768 - g_native_n;
+    if (count <= 0) return;
+    memcpy(&g_native_buf[g_native_n], verts, (size_t)count * sizeof(D3DTLVERTEX));
+    if (g_native_batch_n > 0 && g_native_batch[g_native_batch_n - 1].tex == tex
+        && g_native_batch[g_native_batch_n - 1].start + g_native_batch[g_native_batch_n - 1].count == g_native_n) {
+        g_native_batch[g_native_batch_n - 1].count += count;
+    } else if (g_native_batch_n < NATIVE_BATCHES) {
+        g_native_batch[g_native_batch_n].tex = tex;
+        g_native_batch[g_native_batch_n].start = g_native_n;
+        g_native_batch[g_native_batch_n].count = count;
+        g_native_batch_n++;
+    }
+    g_native_n += count;
+}
+
+/* The mesh recogniser only runs on a few frames, so geometry arrives in bursts. Keep the last
+ * complete set and redraw it every frame -- otherwise the ship flashes for one frame and the
+ * capture (and the user) sees an empty sky. */
+static D3DTLVERTEX g_native_keep[32768];
+static int g_native_keep_n = 0;
+static native_batch_t g_native_keep_batch[NATIVE_BATCHES];
+static int g_native_keep_batch_n = 0;
+
+static void d3d11_flush_native(void) {
+    int count = g_native_n, nbatch = g_native_batch_n;
+    g_native_n = 0; g_native_batch_n = 0;
+    if (count >= 3) {
+        memcpy(g_native_keep, g_native_buf, (size_t)count * sizeof(D3DTLVERTEX));
+        memcpy(g_native_keep_batch, g_native_batch, (size_t)nbatch * sizeof(native_batch_t));
+        g_native_keep_n = count; g_native_keep_batch_n = nbatch;
+    } else if (g_native_keep_n >= 3) {
+        memcpy(g_native_buf, g_native_keep, (size_t)g_native_keep_n * sizeof(D3DTLVERTEX));
+        memcpy(g_native_batch, g_native_keep_batch, (size_t)g_native_keep_batch_n * sizeof(native_batch_t));
+        count = g_native_keep_n; nbatch = g_native_keep_batch_n;
+    }
+    if (!g_d3d11_initialized || count < 3) return;
+    if (count > MAX_VERTICES) count = MAX_VERTICES;
+    {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (FAILED(ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_vb, 0,
+                                           D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+        memcpy(mapped.pData, g_native_buf, (size_t)count * sizeof(D3DTLVERTEX));
+        ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_vb, 0);
+    }
+    {
+        /* Bind the same pipeline state d3d11_execute establishes -- without it the draw is a no-op
+         * (no shaders / render target bound at present time). */
+        UINT stride = sizeof(D3DTLVERTEX), offset = 0;
+        D3D11_VIEWPORT vp = { 0.0f, 0.0f, (float)g_vp_width, (float)g_vp_height, 0.0f, 1.0f };
+        ID3D11DeviceContext_OMSetRenderTargets(g_context, 1, &g_rtv, g_dsv);
+        ID3D11DeviceContext_RSSetViewports(g_context, 1, &vp);
+        ID3D11DeviceContext_IASetInputLayout(g_context, g_input_layout);
+        ID3D11DeviceContext_VSSetShader(g_context, g_vs_tlvertex, NULL, 0);
+        ID3D11DeviceContext_VSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
+        ID3D11DeviceContext_PSSetShader(g_context, g_ps_solid, NULL, 0);
+        ID3D11DeviceContext_PSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
+        ID3D11DeviceContext_RSSetState(g_context, g_raster_solid);
+        /* Solid, depth-sorted: the native path emits real OPT faces as triangles, so it needs a
+         * clean depth buffer of its own (the guest's 2D blits leave whatever was there). */
+        ID3D11DeviceContext_ClearDepthStencilView(g_context, g_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+        ID3D11DeviceContext_OMSetDepthStencilState(g_context, g_dss_enabled, 0);
+        ID3D11DeviceContext_IASetVertexBuffers(g_context, 0, 1, &g_vb, &stride, &offset);
+        ID3D11DeviceContext_IASetPrimitiveTopology(g_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        if (nbatch <= 0) {
+            ID3D11DeviceContext_Draw(g_context, (UINT)count, 0);
+        } else {
+            /* MODULATE, so the flat shading still lights the textured hull. */
+            D3D11_MAPPED_SUBRESOURCE cb;
+            int b;
+            if (SUCCEEDED(ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_cb_viewport, 0,
+                                                  D3D11_MAP_WRITE_DISCARD, 0, &cb))) {
+                float* f = (float*)cb.pData;
+                f[0] = (float)g_vp_width; f[1] = (float)g_vp_height; f[2] = 2.0f; f[3] = 0.0f;
+                ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_cb_viewport, 0);
+            }
+            for (b = 0; b < nbatch; b++) {
+                int t = g_native_batch[b].tex;
+                if (g_native_batch[b].count < 3) continue;
+                if (t >= 0 && t < g_native_tex_n && g_native_tex[t].srv) {
+                    ID3D11DeviceContext_PSSetShader(g_context, g_ps_textured, NULL, 0);
+                    ID3D11DeviceContext_PSSetShaderResources(g_context, 0, 1, &g_native_tex[t].srv);
+                    /* POINT sampling: these are 8x8..128x64 textures stretched over whole hull
+                     * panels. Linear filtering turns them into smooth gradients that read as shading;
+                     * the original renderer's chunky texels are what makes them read as texture. */
+                    {   ID3D11SamplerState* smp = getenv("XWA_TEXLINEAR") ? g_sampler_linear : g_sampler_point;
+                        if (!smp) smp = g_sampler_linear;
+                        if (smp) ID3D11DeviceContext_PSSetSamplers(g_context, 0, 1, &smp); }
+                } else {
+                    ID3D11DeviceContext_PSSetShader(g_context, g_ps_solid, NULL, 0);
+                }
+                ID3D11DeviceContext_Draw(g_context, (UINT)g_native_batch[b].count,
+                                         (UINT)g_native_batch[b].start);
+            }
+        }
+        g_draw_calls++;
+        g_total_triangles += (uint32_t)(count / 3);
+    }
+}
+
+static void d3d11_draw_native_unused(const D3DTLVERTEX* verts, int count) {
+    if (!g_d3d11_initialized || !verts || count < 3) return;
+    if (count > MAX_VERTICES) count = MAX_VERTICES;
+    {
+        D3D11_MAPPED_SUBRESOURCE mapped;
+        if (FAILED(ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_vb, 0,
+                                           D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return;
+        memcpy(mapped.pData, verts, (size_t)count * sizeof(D3DTLVERTEX));
+        ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_vb, 0);
+    }
+    {
+        UINT stride = sizeof(D3DTLVERTEX), offset = 0;
+        ID3D11DeviceContext_IASetVertexBuffers(g_context, 0, 1, &g_vb, &stride, &offset);
+        ID3D11DeviceContext_IASetPrimitiveTopology(g_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11DeviceContext_Draw(g_context, (UINT)(count - (count % 3)), 0);
+        g_draw_calls++;
+        g_total_triangles += (uint32_t)(count / 3);
+    }
+}
 
 void d3d11_present(void) {
     if (!g_d3d11_initialized) return;
+
+    d3d11_flush_native();   /* draw buffered native geometry onto the finished frame */
+
+    /* XWA_PERIODIC: the default (concourse) run never exits, so the end-of-run counter summary
+     * never prints. Emit the object-type histogram and model-renderer counts periodically so the
+     * CONCOURSE can be compared against flight. */
+    if (getenv("XWA_PERIODIC")) {
+        static unsigned _pp;
+        if ((_pp++ % 600u) == 0u) {
+            extern unsigned g_objtype[40]; extern unsigned g_bindfn[8];
+            fprintf(stderr, "[PERIODIC] 442F70=%u 448000=%u 482000=%u | types:",
+                    g_bindfn[0], g_bindfn[3], g_bindfn[4]);
+            for (int _i = 0; _i < 40; _i++) if (g_objtype[_i]) fprintf(stderr, " t%d=%u", _i, g_objtype[_i]);
+            fprintf(stderr, "\n"); fflush(stderr);
+        }
+    }
+
+    /* XWA_RTDUMP=N: after N presents that actually drew something, save the GPU back buffer.
+     * Waits for a frame with real draw calls so the dump is not an empty pre-flight frame. */
+    if (getenv("XWA_RTDUMP")) {
+        static int _done = 0; static unsigned _drawn = 0;
+        if (!_done) {
+            if (g_draw_calls > 0) _drawn++;
+            unsigned _want = (unsigned)atoi(getenv("XWA_RTDUMP")); if (!_want) _want = 30;
+            if (_drawn >= _want) { _done = 1; d3d11_capture_bmp("rt_flight.bmp"); }
+        }
+    }
+
+    /* XWA_RENDCOUNT read from the PRESENT path. The other dump site is the flight-source blit,
+     * which is capped at 12 prints and fires during loading -- long before the flight render
+     * loop -- so it always reported zeros regardless of what the render pipeline did. */
+    if (getenv("XWA_RENDCOUNT")) {
+        static unsigned _pf; 
+        if ((_pf++ % 60) == 0) {
+            extern unsigned g_rcount[8]; extern const char* const g_rcount_name[8];
+            fprintf(stderr, "[RC@present %u]", _pf);
+            for (int _i = 0; _i < 8; _i++) fprintf(stderr, "  %s=%u", g_rcount_name[_i], g_rcount[_i]);
+            fprintf(stderr, "\n"); fflush(stderr);
+        }
+    }
 
     { static int _sb = -1; extern ptrdiff_t g_mem_base; extern void xwa_drive_render(void);
       volatile uint32_t *_fg;
@@ -633,9 +1044,17 @@ void d3d11_present(void) {
       _fg2 = (volatile uint32_t*)((uintptr_t)0x7B33C4u + g_mem_base);
       if (_ds && *_fg2 != 0) xwa_drive_spawn(); }
 
-    /* Always redraw the surface quad before presenting */
-    draw_surface_quad();
+    /* The surface quad CLEARS the render target and blits the 2D DirectDraw surface over it.
+     * That is right for the frontend, but in flight the 3D scene is drawn through execute
+     * buffers and the DirectDraw surface holds only (currently empty) cockpit/HUD overlay --
+     * so painting it here erased the ships every frame. Keep the 3D frame when geometry was
+     * submitted; XWA_QUADALWAYS restores the old unconditional behaviour. */
+    if (g_3d_since_present == 0 || getenv("XWA_QUADALWAYS")) draw_surface_quad();
+    else { static int _k; if (_k < 3) { _k++;
+        fprintf(stderr, "[D3D11] keeping 3D frame (%u verts this frame), not overpainting with the 2D surface\n", g_3d_since_present); fflush(stderr); } }
 
+    d3d11_capture_frame();
+    g_3d_since_present = 0;
     IDXGISwapChain_Present(g_swapchain, 1, 0);
     g_frame_count++;
 
@@ -653,6 +1072,13 @@ void d3d11_present(void) {
                   _M32(0x63185Cu), _M32(0x7B33C4u), _M32(0x5BA994u), _M32(0x8C1CC8u), valid,
                   _M32(0x7828D0u), _M32(0x9109C0u), _M32(0x8C1CE4u),
                   _M32(0x76E578u), _M32(0x77330Cu), _M32(0xA21449u));
+          { unsigned _k; fprintf(stderr, "[SLOTS]");
+            for (_k = 0; _k < 6; _k++) fprintf(stderr, " [%u]=0x%X", _k, _M32(0x8B94E0u + _k*0xBCFu));
+            fprintf(stderr, "  8C1CC8=%u\n", _M32(0x8C1CC8u)); }
+          { extern volatile unsigned g_w1, g_w2;
+            fprintf(stderr, "[STRSET] sub_00462BE0=%u sub_00464A20=%u  ptr(0x68C89C)=0x%X\n", g_w1, g_w2, _M32(0x68C89Cu)); }
+          { extern volatile unsigned g_cw[3];
+            fprintf(stderr, "[CRAFTW] loader_457C20=%u sub_458DC0=%u builder_41EF60=%u\n", g_cw[0], g_cw[1], g_cw[2]); }
           fprintf(stderr, "[OBJST2] 9F702A(DDrawObj)=0x%X 773358=0x%X 7B1CE8(missState)=0x%X 7B1D3C=%u\n",
                   _M32(0x9F702Au), _M32(0x773358u), _M32(0x7B1CE8u), _M32(0x7B1D3Cu));
           #undef _M32
@@ -700,6 +1126,7 @@ static void apply_depth_state(void) {
 
 void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex_count,
                    uint32_t instruction_offset, uint32_t instruction_size) {
+    if (vertex_count) g_3d_since_present += vertex_count;
     g_execute_calls++;
     if (g_execute_calls <= 5) { fprintf(stderr, "[EXEC] d3d11_execute call #%lu verts=%u\n", g_execute_calls, vertex_count); fflush(stderr); }
     if (!g_d3d11_initialized) return;
@@ -715,7 +1142,55 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
                                               D3D11_MAP_WRITE_DISCARD, 0, &mapped);
         if (SUCCEEDED(hr)) {
             memcpy(mapped.pData, src_verts, vertex_count * sizeof(D3DTLVERTEX));
+            /* The engine transforms to screen space itself, and with the camera/projection
+             * state unbuilt it emits inf/NaN coordinates. Those rasterise as screen-filling
+             * garbage that hides whatever valid geometry exists, so collapse any non-finite
+             * vertex to a degenerate point -- its triangles then cover no pixels.
+             * XWA_NOSANITIZE keeps the raw values. */
+            if (!getenv("XWA_NOSANITIZE")) {
+                D3DTLVERTEX* dv = (D3DTLVERTEX*)mapped.pData;
+                uint32_t bad = 0;
+                for (uint32_t i = 0; i < vertex_count; i++) {
+                    float* v = (float*)&dv[i];
+                    if (!(v[0] > -1e6f && v[0] < 1e6f) || !(v[1] > -1e6f && v[1] < 1e6f) ||
+                        !(v[2] > -1e6f && v[2] < 1e6f) || !(v[3] > -1e6f && v[3] < 1e6f)) {
+                        v[0] = v[1] = 0.0f; v[2] = 0.0f; v[3] = 1.0f; bad++;
+                    }
+                }
+                if (bad) { static int _b; if (_b < 5) { _b++;
+                    fprintf(stderr, "[SANITIZE] %u/%u vertices were inf/NaN (degenerate projection)\n", bad, vertex_count);
+                    fflush(stderr); } }
+            }
             ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_vb, 0);
+        }
+    }
+
+    /* XWA_VERTDUMP: the engine hands D3D already-transformed screen-space vertices
+     * (D3DTLVERTEX: sx, sy, sz, rhw, colour), so these coordinates ARE what lands on screen.
+     * Dumping them says immediately whether the projection is sane (inside 0..640/0..480) or
+     * degenerate, without guessing at the camera matrix format. */
+    if (getenv("XWA_VERTDUMP") && vertex_count >= 32) {
+        static int _vd; if (_vd < 3) { _vd++;
+            float minx=1e30f, maxx=-1e30f, miny=1e30f, maxy=-1e30f, minz=1e30f, maxz=-1e30f;
+            /* Scan the WHOLE batch, not the first 64 -- a 64-vertex sample of a 3500-vertex
+             * frame reported ranges that had nothing to do with what actually rendered. */
+            uint32_t scan = vertex_count;
+            uint32_t offscreen = 0;
+            for (uint32_t i = 0; i < scan; i++) {
+                float* v = (float*)&src_verts[i];
+                if (v[0]<minx) minx=v[0]; if (v[0]>maxx) maxx=v[0];
+                if (v[1]<miny) miny=v[1]; if (v[1]>maxy) maxy=v[1];
+                if (v[2]<minz) minz=v[2]; if (v[2]>maxz) maxz=v[2];
+                if (v[0] < 0.0f || v[0] > (float)g_vp_width || v[1] < 0.0f || v[1] > (float)g_vp_height) offscreen++;
+            }
+            fprintf(stderr, "[VERT] n=%u (first %u)  x[%.1f..%.1f] y[%.1f..%.1f] z[%.4f..%.4f]\n",
+                    vertex_count, scan, minx, maxx, miny, maxy, minz, maxz);
+            for (uint32_t i = 0; i < 4 && i < vertex_count; i++) {
+                float* v = (float*)&src_verts[i];
+                fprintf(stderr, "[VERT]   v%u  sx=%.1f sy=%.1f sz=%.4f rhw=%.4f colour=0x%08X\n",
+                        i, v[0], v[1], v[2], v[3], ((uint32_t*)v)[4]);
+            }
+            fflush(stderr);
         }
     }
 
@@ -727,6 +1202,7 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
     ID3D11DeviceContext_IASetPrimitiveTopology(g_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D11DeviceContext_VSSetShader(g_context, g_vs_tlvertex, NULL, 0);
     ID3D11DeviceContext_VSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_context, 0, 1, &g_cb_viewport);
 
     /* Walk instruction stream */
     uint8_t* inst_ptr = buffer_data + instruction_offset;
@@ -753,43 +1229,50 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
         uint32_t data_size = (uint32_t)inst->bSize * (uint32_t)inst->wCount;
         inst_ptr += data_size;
 
+        /* XWA_OPHIST: 3056 execute() calls yield only ~117 draws, so most buffers submit no
+         * geometry. Histogram what the guest actually puts in them. */
+        if (getenv("XWA_OPHIST")) {
+            static unsigned _hist[32], _n;
+            if (inst->bOpcode < 32) _hist[inst->bOpcode] += inst->wCount;
+            if ((++_n % 20000u) == 0u) {
+                static const char* nm[16] = {"?0","POINT","LINE","TRIANGLE","MATRIXLOAD",
+                    "MATRIXMULTIPLY","STATETRANSFORM","STATELIGHT","STATERENDER","PROCESSVERTICES",
+                    "TEXTURELOAD","EXIT","BRANCHFORWARD","SPAN","SETSTATUS","?15"};
+                fprintf(stderr, "[OPHIST]");
+                for (int _i = 1; _i < 16; _i++) if (_hist[_i]) fprintf(stderr, " %s=%u", nm[_i], _hist[_i]);
+                fprintf(stderr, "\n"); fflush(stderr);
+            }
+        }
+
         switch (inst->bOpcode) {
         case D3DOP_TRIANGLE: {
-            /* Collect triangle indices */
+            /* Collect triangle indices. On overflow, flush and KEEP GOING from the triangle we
+             * stopped at -- the old code flushed and then re-collected only `wCount - 1` (the
+             * last triangle in the instruction), silently dropping every triangle between the
+             * overflow point and the end of the batch. */
             for (uint16_t i = 0; i < inst->wCount; i++) {
-                D3DTRIANGLE* tri = (D3DTRIANGLE*)(data + i * inst->bSize);
                 if (index_count + 3 > index_capacity) {
-                    /* Flush current batch */
-                    goto flush_and_continue;
+                    if (index_count > 0) {
+                        D3D11_MAPPED_SUBRESOURCE mapped;
+                        HRESULT hr = ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_ib, 0,
+                                                              D3D11_MAP_WRITE_DISCARD, 0, &mapped);
+                        if (SUCCEEDED(hr)) {
+                            memcpy(mapped.pData, indices, index_count * sizeof(uint16_t));
+                            ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_ib, 0);
+                        }
+                        ID3D11DeviceContext_IASetIndexBuffer(g_context, g_ib, DXGI_FORMAT_R16_UINT, 0);
+                        ID3D11DeviceContext_DrawIndexed(g_context, index_count, 0, 0);
+                        g_draw_calls++;
+                        g_total_triangles += index_count / 3;
+                        index_count = 0;
+                    }
                 }
-                indices[index_count++] = tri->v1;
-                indices[index_count++] = tri->v2;
-                indices[index_count++] = tri->v3;
-            }
-            break;
-
-        flush_and_continue:
-            /* Flush accumulated triangles */
-            if (index_count > 0) {
-                D3D11_MAPPED_SUBRESOURCE mapped;
-                HRESULT hr = ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_ib, 0,
-                                                      D3D11_MAP_WRITE_DISCARD, 0, &mapped);
-                if (SUCCEEDED(hr)) {
-                    memcpy(mapped.pData, indices, index_count * sizeof(uint16_t));
-                    ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_ib, 0);
+                {
+                    D3DTRIANGLE* tri = (D3DTRIANGLE*)(data + i * inst->bSize);
+                    indices[index_count++] = tri->v1;
+                    indices[index_count++] = tri->v2;
+                    indices[index_count++] = tri->v3;
                 }
-                ID3D11DeviceContext_IASetIndexBuffer(g_context, g_ib, DXGI_FORMAT_R16_UINT, 0);
-                ID3D11DeviceContext_DrawIndexed(g_context, index_count, 0, 0);
-                g_draw_calls++;
-                g_total_triangles += index_count / 3;
-                index_count = 0;
-            }
-            /* Re-collect the triangle that caused overflow */
-            {
-                D3DTRIANGLE* tri = (D3DTRIANGLE*)(data + (inst->wCount - 1) * inst->bSize);
-                indices[index_count++] = tri->v1;
-                indices[index_count++] = tri->v2;
-                indices[index_count++] = tri->v3;
             }
             break;
         }
@@ -868,6 +1351,11 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
 
                 case D3DRENDERSTATE_TEXTUREMAPBLEND:
                     g_cur_texmapblend = st->dwArg;
+                    push_viewport_cb();
+                    { static uint32_t _seen = 0xFFFFFFFFu;
+                      if (_seen != st->dwArg && getenv("XWA_TEXBLEND")) { _seen = st->dwArg;
+                        fprintf(stderr, "[TEXBLEND] TEXTUREMAPBLEND = %u\n", st->dwArg);
+                        fflush(stderr); } }
                     break;
 
                 case D3DRENDERSTATE_FILLMODE:
@@ -920,6 +1408,30 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
             ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_ib, 0);
         }
         ID3D11DeviceContext_IASetIndexBuffer(g_context, g_ib, DXGI_FORMAT_R16_UINT, 0);
+        /* XWA_DRAWPROBE: screen bounding box + span of each draw. A compact cluster of a few
+         * hundred triangles is a ship model; thousands of tiny primitives smeared over the
+         * whole frame are the star/particle field. Tells the two apart without guessing. */
+        if (getenv("XWA_DRAWPROBE")) {
+            static int _dp; if (_dp < 24) { _dp++;
+                float lo_x = 1e30f, hi_x = -1e30f, lo_y = 1e30f, hi_y = -1e30f;
+                uint32_t degen = 0;
+                for (uint32_t i = 0; i + 2 < index_count; i += 3) {
+                    float* a = (float*)&src_verts[indices[i]];
+                    float* b = (float*)&src_verts[indices[i+1]];
+                    float* c = (float*)&src_verts[indices[i+2]];
+                    float area = (b[0]-a[0])*(c[1]-a[1]) - (c[0]-a[0])*(b[1]-a[1]);
+                    if (area < 0.5f && area > -0.5f) degen++;
+                    for (int k = 0; k < 3; k++) {
+                        float* v = k == 0 ? a : (k == 1 ? b : c);
+                        if (v[0] < lo_x) lo_x = v[0]; if (v[0] > hi_x) hi_x = v[0];
+                        if (v[1] < lo_y) lo_y = v[1]; if (v[1] > hi_y) hi_y = v[1];
+                    }
+                }
+                fprintf(stderr, "[DRAW] tris=%u  x[%.0f..%.0f] y[%.0f..%.0f]  span=%.0fx%.0f  degenerate=%u\n",
+                        index_count / 3, lo_x, hi_x, lo_y, hi_y, hi_x - lo_x, hi_y - lo_y, degen);
+                fflush(stderr);
+            }
+        }
         ID3D11DeviceContext_DrawIndexed(g_context, index_count, 0, 0);
         g_draw_calls++;
         g_total_triangles += index_count / 3;

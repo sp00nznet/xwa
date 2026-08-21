@@ -139,6 +139,7 @@ typedef struct {
 
 /* Initialize D3D11 device, swap chain, and GPU resources */
 int d3d11_init(void* hwnd, uint32_t width, uint32_t height);
+int d3d11_resize(uint32_t width, uint32_t height);
 
 /* Shutdown and release all D3D11 resources */
 void d3d11_shutdown(void);
@@ -170,5 +171,14 @@ void d3d11_set_viewport(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
 
 /* Check if renderer is initialized */
 int d3d11_is_initialized(void);
+
+/* Save the real GPU back buffer to a BMP (see d3d11_capture_bmp in the .c). */
+void d3d11_capture_bmp(const char* path);
+
+/* Submit screen-space triangles directly (see d3d11_draw_native in the .c). */
+void d3d11_draw_native(const D3DTLVERTEX* verts, int count, int tex);
+/* Register an OPT texture (BGRA8) for the native path; returns a batch texture id. */
+int  d3d11_native_texture(uint32_t key, const uint32_t* rgba, int w, int h);
+void d3d11_native_reset(void);
 
 #endif /* D3D11_RENDERER_H */

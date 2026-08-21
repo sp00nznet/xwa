@@ -77,6 +77,16 @@ static void bridge_RegQueryValueExA_005A9008(void) { /* ADVAPI32.dll:RegQueryVal
     uint32_t a4 = MEM32(g_esp + 20);
     uint32_t a5 = MEM32(g_esp + 24);
     if (fn) g_eax = fn(a0, a1, a2, a3, a4, a5);
+    /* XWA_REGLOG: the guest reads the REAL registry here. Retail XWA records its 3D-device
+     * choice in the registry, and this machine's XWA key holds only SoundCard/JoystickID --
+     * no renderer value -- consistent with the engine running software (#445). Log every value
+     * queried and whether it was found, to identify which one to supply. */
+    if (getenv("XWA_REGLOG")) {
+        const char* nm = a1 ? (const char*)(uintptr_t)ADDR(a1) : "(null)";
+        fprintf(stderr, "[REG] Query \"%s\" -> rc=%u%s\n",
+                nm, g_eax, (g_eax == 0) ? "" : "  <== NOT FOUND");
+        fflush(stderr);
+    }
     g_esp += 28;
 }
 
@@ -93,10 +103,37 @@ static void bridge_RegCloseKey_005A900C(void) { /* ADVAPI32.dll:RegCloseKey (1 a
 
 static void bridge_DirectDrawEnumerateExA_005A9014(void) { /* DDRAW.dll:DirectDrawEnumerateExA (3 args, stdcall) */
     BRIDGE_TRACE("DDRAW.dll:DirectDrawEnumerateExA");
+    uint32_t _cb = MEM32(g_esp + 4), _ctx = MEM32(g_esp + 8), _flags = MEM32(g_esp + 12);
     fprintf(stderr, "[COM] DirectDrawEnumerateExA(callback=0x%08X, ctx=0x%08X, flags=0x%08X)\n",
-            MEM32(g_esp + 4), MEM32(g_esp + 8), MEM32(g_esp + 12));
+            _cb, _ctx, _flags);
+    /* This used to return DD_OK WITHOUT ever invoking the callback, so the guest built an EMPTY
+     * display-device list. XWA scans that list and enables its HARDWARE-3D path only if a driver
+     * description matches "3dfx" or "voodoo" (strcmp at 0x00520638/0x0052064E against the
+     * constants at 0x6012A0/0x6012A8; a match sets the master switch 0xB0C7BC = 1). With no
+     * devices enumerated the match could never happen, so the engine always chose software
+     * rendering -- the root cause of the black 3D viewport (#453/#454).
+     * Enumerate one device and describe it as a Voodoo so the hardware path is selected.
+     * Callback is DDENUMCALLBACKEXA(GUID*, LPSTR desc, LPSTR name, LPVOID ctx, HMONITOR) stdcall. */
     g_eax = 0; /* DD_OK */
-    g_esp += 16; /* pop ret + 3 args */
+    g_esp += 16;
+    if (_cb) {
+        static const char _desc[] = "3dfx Voodoo Graphics";
+        static const char _name[] = "voodoo";
+        uint32_t _d = (uint32_t)(uintptr_t)_desc, _n = (uint32_t)(uintptr_t)_name;
+        extern void com_dispatch_callback(uint32_t);
+        uint32_t _save_esp = g_esp;
+        PUSH32(g_esp, 0);      /* hMonitor */
+        PUSH32(g_esp, _ctx);   /* lpContext */
+        PUSH32(g_esp, _n);     /* lpDriverName */
+        PUSH32(g_esp, _d);     /* lpDriverDescription */
+        PUSH32(g_esp, 0);      /* lpGUID = NULL (primary display) */
+        PUSH32(g_esp, 0xDEAD0099u);  /* dummy return address */
+        fprintf(stderr, "[DDENUM] invoking callback with desc=\"%s\" name=\"%s\"\n", _desc, _name);
+        fflush(stderr);
+        com_dispatch_callback(_cb);
+        g_esp = _save_esp;     /* stdcall callback; restore regardless */
+        g_eax = 0;
+    }
 }
 
 /* Forward declaration - implemented in com_mocks.c */
@@ -371,6 +408,12 @@ static void bridge_GlobalLock_005A9088(void) { /* KERNEL32.dll:GlobalLock (1 arg
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "GlobalLock");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
+    /* #477: the model path does GlobalLock(handle) and branches on the RESULT -- non-zero uses
+     * the data, zero falls through to a re-fetch. Log it: if these handles are not real HGLOBALs
+     * in this process, the lock returns NULL and no mesh bytes are ever consumed. */
+    if (getenv("XWA_LOCKLOG")) { static int _l; if (_l < 12) { _l++;
+        fprintf(stderr, "[LOCK] GlobalLock(0x%08X) -> 0x%08X %s\n",
+                a0, g_eax, g_eax ? "OK" : "*** NULL ***"); fflush(stderr); } }
     g_esp += 8;
 }
 
@@ -627,7 +670,10 @@ static void bridge_GetLogicalDriveStringsA_005A90E0(void) { /* KERNEL32.dll:GetL
     g_esp += 12;
 }
 
-static void bridge_TerminateProcess_005A90E4(void) { /* KERNEL32.dll:TerminateProcess (2 args) */
+static void bridge_TerminateProcess_005A90E4(void) {
+    { extern volatile unsigned g_lastblk;
+      fprintf(stderr, "\n*** bridge_TerminateProcess_005A90E4 CALLED BY GUEST *** lastblk=L_%08X esp=0x%08X arg0=0x%08X\n",
+              g_lastblk, g_esp, MEM32(g_esp + 4)); fflush(stderr); } /* KERNEL32.dll:TerminateProcess (2 args) */
     BRIDGE_TRACE("KERNEL32.dll:TerminateProcess");
     uint32_t a0 = MEM32(g_esp + 4);  /* hProcess */
     uint32_t a1 = MEM32(g_esp + 8);  /* uExitCode */
@@ -695,7 +741,10 @@ static void bridge_GetCurrentProcess_005A90E8(void) { /* KERNEL32.dll:GetCurrent
     g_esp += 4;
 }
 
-static void bridge_ExitProcess_005A90EC(void) { /* KERNEL32.dll:ExitProcess (1 args) */
+static void bridge_ExitProcess_005A90EC(void) {
+    { extern volatile unsigned g_lastblk;
+      fprintf(stderr, "\n*** bridge_ExitProcess_005A90EC CALLED BY GUEST *** lastblk=L_%08X esp=0x%08X arg0=0x%08X\n",
+              g_lastblk, g_esp, MEM32(g_esp + 4)); fflush(stderr); } /* KERNEL32.dll:ExitProcess (1 args) */
     BRIDGE_TRACE("KERNEL32.dll:ExitProcess");
     uint32_t a0 = MEM32(g_esp + 4);
 
@@ -707,6 +756,18 @@ static void bridge_ExitProcess_005A90EC(void) { /* KERNEL32.dll:ExitProcess (1 a
     fprintf(stderr, "Total calls: %u, icalls: %u, depth: %u (max: %u)\n",
         g_total_calls, g_total_icalls, g_call_depth, g_call_depth_max);
     fflush(stderr);
+
+    /* Who called ExitProcess? The game's fatal paths exit without going through its own
+     * logger, so the ICALL/ITAIL ring is the only breadcrumb. */
+    {
+        extern uint32_t g_icall_trace[]; extern unsigned g_icall_trace_idx;
+        fprintf(stderr, "Last 16 ICALL/ITAIL targets before exit:\n");
+        for (int _i = 16; _i > 0; _i--) {
+            unsigned _idx = (g_icall_trace_idx - _i) & (ICALL_TRACE_SIZE - 1);
+            fprintf(stderr, "      [-%d] 0x%08X\n", _i, g_icall_trace[_idx]);
+        }
+        fflush(stderr);
+    }
 
     /* Dump trace ring buffer to file before exit */
     HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_exit.log",
@@ -977,7 +1038,12 @@ static void bridge_HeapAlloc_005A9148(void) { /* KERNEL32.dll:HeapAlloc (3 args)
     g_heapop_count++;
     g_last_heapalloc_heap = a0;
     g_last_heapalloc_size = a2;
-    g_eax = (uint32_t)(uintptr_t)HeapAlloc(hHeap, a1, a2);
+    /* Pad every guest heap block. The game's own code routinely reads one element past the
+     * end of a table (sentinel-terminated walks like the font-entry loop at 0x0043280F), which
+     * is harmless on the real heap because a block is never flush against an unmapped page.
+     * Our blocks can end exactly on a page boundary, turning that benign read into a fault.
+     * 64 bytes of slack restores the original behaviour. */
+    g_eax = (uint32_t)(uintptr_t)HeapAlloc(hHeap, a1, a2 + 256);
     g_last_heapalloc_ret = g_eax;
     g_esp += 16;
 }
@@ -989,7 +1055,7 @@ static void bridge_HeapReAlloc_005A914C(void) { /* KERNEL32.dll:HeapReAlloc (4 a
     uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
     uint32_t a3 = MEM32(g_esp + 16);  /* dwBytes */
     HANDLE hHeap = (HANDLE)(uintptr_t)a0;
-    g_eax = (uint32_t)(uintptr_t)HeapReAlloc(hHeap, a1, (void*)(uintptr_t)a2, a3);
+    g_eax = (uint32_t)(uintptr_t)HeapReAlloc(hHeap, a1, (void*)(uintptr_t)a2, a3 + 256);  /* same padding as HeapAlloc */
     g_esp += 20;
 }
 
@@ -1002,14 +1068,30 @@ static void bridge_HeapFree_005A9150(void) { /* KERNEL32.dll:HeapFree (3 args) *
     g_heapop_count++;
     g_last_heapfree_ptr = a2;
     if (a2) {
+        /* #353b: a pointer inside the guest IMAGE (0x400000-0x600000) is never a heap block --
+         * freeing one is always a bug, and HeapValidate has been observed returning TRUE for
+         * such addresses (0x00539760, a code VA). Reject them outright before validating. */
+        if (a2 >= 0x00400000u && a2 < 0x00600000u) {
+            static int _bad; if (_bad < 8) { _bad++;
+                fprintf(stderr, "[HEAP] HeapFree REJECTED image-range ptr=0x%08X (guest code/data, not heap) op#%u\n", a2, g_heapop_count);
+                fflush(stderr); }
+            g_eax = 1; g_esp += 16; return;
+        }
         /* Validate the specific block before freeing */
         if (!HeapValidate(hHeap, 0, (void*)(uintptr_t)a2)) {
             fprintf(stderr, "[HEAP] HeapFree: block validation FAILED! heap=0x%08X ptr=0x%08X flags=0x%X op#%u\n",
                     a0, a2, a1, g_heapop_count);
-            /* Try to read the 16 bytes before the block (heap metadata) */
-            uint32_t* meta = (uint32_t*)((uintptr_t)a2 - 16);
-            fprintf(stderr, "[HEAP]   meta[-16]: %08X %08X %08X %08X\n",
-                    meta[0], meta[1], meta[2], meta[3]);
+            /* Try to read the 16 bytes before the block (heap metadata). The pointer that got
+             * us here is by definition NOT a valid block, so it can be arbitrary garbage --
+             * dereferencing it blind crashed the process here (observed ptr 0xCEB19825 during
+             * the first 3D flight frame). Probe before reading: a diagnostic must never fault. */
+            { uint32_t* meta = (uint32_t*)((uintptr_t)a2 - 16);
+              if (a2 >= 16 && !IsBadReadPtr(meta, 16)) {
+                  fprintf(stderr, "[HEAP]   meta[-16]: %08X %08X %08X %08X\n",
+                          meta[0], meta[1], meta[2], meta[3]);
+              } else {
+                  fprintf(stderr, "[HEAP]   meta[-16]: <unreadable>\n");
+              } }
             fflush(stderr);
             /* Skip the free to avoid crash, return success */
             g_eax = 1;
@@ -1500,6 +1582,12 @@ static void bridge_CreateFileA_005A9200(void) { /* KERNEL32.dll:CreateFileA (7 a
     static STDFN7 fn = NULL;
     if (!fn) fn = (STDFN7)GetProcAddress(LoadLibraryA("KERNEL32.dll"), "CreateFileA");
     uint32_t a0 = MEM32(g_esp + 4);
+    /* CreateFileA was bridged but NEVER logged, so every conclusion of the form "no .opt file is
+     * ever opened" rested solely on the _lopen logging and may be wrong. Log the filename. */
+    if (getenv("XWA_FILELOG") && a0) {
+        fprintf(stderr, "[FILE] CreateFileA(\"%s\")\n", (const char*)(uintptr_t)ADDR(a0));
+        fflush(stderr);
+    }
     uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
     uint32_t a3 = MEM32(g_esp + 16);
@@ -1919,6 +2007,17 @@ static void bridge_GetForegroundWindow_005A9288(void) { /* USER32.dll:GetForegro
     static STDFN0 fn = NULL;
     if (!fn) fn = (STDFN0)GetProcAddress(LoadLibraryA("USER32.dll"), "GetForegroundWindow");
     if (fn) g_eax = fn();
+    /* XWA_FGWIN: the terminate-context dump (#514) shows the last guest ICALLs before the
+     * process quits are GetForegroundWindow / SetCursorPos / SetFocus -- classic 1999-era
+     * "am I still the active window?" polling. In an automated/headless run our window is not
+     * foreground, so the game concludes it lost focus and exits. Report the game window. */
+    if (getenv("XWA_FGWIN")) {
+        extern HWND g_game_hwnd;
+        if (g_game_hwnd) {
+            g_eax = (uint32_t)(uintptr_t)g_game_hwnd;
+            { static int _f; if (_f < 3) { _f++; fprintf(stderr, "[FGWIN] GetForegroundWindow -> game hwnd 0x%08X\n", g_eax); fflush(stderr); } }
+        }
+    }
     g_esp += 4;
 }
 

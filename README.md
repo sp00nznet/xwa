@@ -15,10 +15,33 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 | **Phase 6** | **Complete** | Win32/DirectX HAL — COM mocks operational, main loop running |
 | **Phase 7** | **Complete** | D3D11 rendering backend — device, shaders, execute buffer parser, 2D surface pipeline |
 | **Phase 8** | **Complete** | Frontend + concourse rendering — pilot creation, the fully-rendered Azzameen concourse room (backdrop, Emkay droid, holo-globe, animated doors), mouse hover/click input |
-| **Phase 9** | **In Progress** | Menu navigation + flight entry — screen-to-screen navigation renders (pilot creation → concourse → Combat Simulator menu → skirmish setup → mission load); the flight loop loads a real 20-flight-group mission and presents frames crash-free; the 3D scene render is traced end-to-end and blocked on one thing — a coherent player-craft state (see *Flight Entry* below) |
-| Phase 10 | Pending | Visible 3D flight (spacecraft + environment), audio, full game logic |
+| **Phase 9** | **Complete** | Menu navigation + flight entry — pilot creation → concourse → Combat Simulator → skirmish setup → mission load → flight, with a real 20-flight-group mission and a crash-free flight loop presenting frames |
+| **Phase 10** | **In Progress** | **Visible 3D flight** — texture-mapped spacecraft rendered from the game's own OPT models, in a starfield, with perspective, per-face lighting and backface culling (see *3D Flight* below). Remaining: transparency, full flight-group population, the engine's own camera, audio, game logic |
 
 ### Screenshots
+
+**Texture-mapped spacecraft in flight** — a Y-wing rendered from the game's own OPT model data: real
+faces, per-face normals for lighting and backface culling, and the original 1999 textures point-sampled
+onto the hull. An X-wing sits off in the distance, and the cyan flight HUD is the game's own:
+
+![Textured Y-wing in flight](docs/flight_ships_textured.png)
+
+<details>
+<summary>Getting there: flat-shaded, then starfield</summary>
+
+![Shaded ships](docs/flight_ships_shaded.png)
+
+*Correct geometry with flat shading, before textures — the same Y-wing plus a second craft.*
+
+![First ships and starfield](docs/flight_ships_starfield.png)
+
+*Earlier: the first correctly-placed craft with a starfield, before the face-index stride was fixed.*
+
+![First visible flight frame](docs/first_visible_flight_frame.png)
+
+*And before that — the first flight frame that was not black at all.*
+</details>
+
 
 The recompiled game boots, creates a pilot, and navigates the full frontend — each screen rendered from the original game's assets via the recompiled 2D pipeline and D3D11 backend.
 
@@ -103,14 +126,61 @@ The recompiled binary boots through full initialization, loads game assets, and 
 | 30 | Game CRT file I/O native replacements (7 functions) | MSVC 6.0 FILE* layout differs from host CRT — ftell returned -1, crashing string parser |
 | 31 | String table loading (strings.txt + fronttxt.txt) | 184KB game strings + 47KB menu labels parsed and available for text rendering |
 
-## Flight Entry (Phase 9, in progress)
+## 3D Flight (Phase 10, in progress)
 
-Beyond the frontend, the recompiled game drives the training/skirmish launch path all the way into the flight engine. This is where the current work is:
+The recompiled game now flies: it drives the skirmish launch path into the flight engine, loads a real
+`.tie` mission, and renders **texture-mapped craft in space**.
 
-- **A real mission loads.** From the concourse the game reaches the loading screen and flight-init, parses a `.tie` mission, and builds a **20-flight-group** world — crash-free. The flight loop runs and presents 800×600 frames continuously.
-- **The 3D render pipeline is mapped end-to-end.** The per-frame flight render (`sub_004F2070` → visible-list build `sub_004652F0` → per-object transform/rasterizer) has been traced instruction-by-instruction and *runs* — it builds a real visible-object list from the scene object-manager.
-- **The remaining blocker is a single, well-localized thing: a coherent player-craft state.** The camera view matrix is built from the player craft's position + orientation; under the forced-launch path those fields aren't fully populated, so the camera-update and render-object linkage fault and the projection collapses (perspective-divide by zero). The frame is currently **black** — no spacecraft rendered yet — and this is the honestly-reported state, not a solved step.
-- **Cross-validated against X-Wing vs. TIE Fighter.** XWA's engine is the successor to the 1997 *X-Wing vs. TIE Fighter* engine. Running the **same unmodified toolchain** on `Z_XVT__.EXE` recompiles it cleanly (1,787 functions), and XvT's *local* (non-DirectPlay) single-player craft-spawn routine gives the exact per-craft field recipe (position, orientation, active + render-status flags) needed to populate XWA's craft coherently — the concrete next step toward visible 3D flight.
+**How the geometry gets drawn.** The lifted model renderer (`sub_00442F70`) turned out to be
+unreachable in this port — it is fed by a node-type dispatch that never sees a valid node, and nothing
+in the port had ever exercised that path (the concourse uses an entirely different renderer, so there
+was no working reference to diff against). Rather than keep chasing it, the port takes the standard
+recompilation fallback: **replace the render path that cannot be lifted, using the game's own loaded
+data.** A native D3D11 path walks each object's OPT model out of guest memory and submits it directly.
+It is env-gated (`XWA_NATIVEDRAW`); the default build is unchanged.
+
+**What renders today:**
+
+- **Craft built from the real OPT models** — each object resolves its own model through the engine's
+  own resource table, and every mesh root in that model is walked (a Y-wing is six).
+- **Real faces**, not a vertex-order wireframe: the OPT face record is decoded properly, including the
+  quad/triangle distinction.
+- **Per-face normals** from the model, used for flat shading and backface culling.
+- **The original textures**, taken from the 16-bit surfaces the engine itself converted them into, and
+  **point-sampled** — these are 8×8 to 128×64 textures stretched over whole hull panels, so bilinear
+  filtering smears them into what looks like shiny lighting instead of panel detail.
+- **Perspective projection** matching the engine's own focal scale, with a depth buffer, plus a
+  starfield so the scene reads as space.
+
+**The OPT runtime format, as decoded for this** (byte-packed, 2-byte aligned — every node is
+`+0x00 = 0`, `+0x04 = type`, `+0x08 = child count`, `+0x0C = child array`, `+0x10 = count`,
+`+0x14 = inline data`):
+
+| Node | Meaning | Layout notes |
+|------|---------|--------------|
+| 3 | Mesh vertices | `count` xyz float triples |
+| 13 | Texture coordinates | (u,v) float pairs |
+| 11 | Vertex normals | xyz float triples |
+| 1 | **Face data** | `+0x10` = face count, then **16 int32 per face** — `vertex[4]`, `edge[4]`, `texcoord[4]`, `normal[4]` (`-1` = triangle) — then a 3-float face normal each, then 6 more floats: **100 bytes per face** |
+| 21 | Face grouping | children are **LODs**; each LOD's children are texture/faces pairs |
+| 27 | Texture (in memory) | the file's type 20, rewritten on load; its descriptor leads to a converted 16-bit surface |
+| 24 | Node reference | indirection to a texture defined elsewhere |
+
+A loaded model image begins at **file offset 8** (the loader overwrites the file's global-pointer field
+with the load address), with the mesh-root count at `img+6` and the root pointer array at `img+0x0E`.
+Reading that image as if it were a node is what made earlier sessions report "garbage models": the
+value they read as a node type was the file's *size* field.
+
+**Honest limits.** Alpha is forced opaque, so cockpit glass and engine glow have no transparency yet.
+Only the craft whose flight-group coordinates are sane render — the forced-launch path still leaves
+some flight groups with junk positions. The camera uses the engine's real orientation, but in this
+force-built world the wingmen sit 40–80° off that axis, so the screenshots use a spectator camera
+(`XWA_NLOOKAT`) that aims at the nearest craft. The model→view transform is the port's own, not the
+engine's.
+
+**Cross-validated against X-Wing vs. TIE Fighter.** XWA's engine is the successor to the 1997 *X-Wing
+vs. TIE Fighter* engine. Running the **same unmodified toolchain** on `Z_XVT__.EXE` recompiles it
+cleanly (1,787 functions), which is a useful check on the toolchain itself.
 
 ## Binary Analysis
 
