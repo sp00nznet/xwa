@@ -20,14 +20,19 @@ A static recompilation of **Star Wars: X-Wing Alliance** (1999) by Totally Games
 
 ### Screenshots
 
-**Texture-mapped spacecraft in flight** — a Y-wing rendered from the game's own OPT model data: real
-faces, per-face normals for lighting and backface culling, and the original 1999 textures point-sampled
-onto the hull. An X-wing sits off in the distance, and the cyan flight HUD is the game's own:
+**Texture-mapped spacecraft in flight** — rendered from the game's own OPT model data: real faces,
+per-face normals for lighting and backface culling, and the original 1999 textures point-sampled onto
+the hull. Every object in the world is drawn with its own model, loaded on demand from the game's
+craft list. The cyan flight HUD is the game's own:
 
-![Textured Y-wing in flight](docs/flight_ships_textured.png)
+![Textured craft in flight](docs/flight_populated.png)
 
 <details>
-<summary>Getting there: flat-shaded, then starfield</summary>
+<summary>Getting there: one ship, then textures, then a populated world</summary>
+
+![Textured Y-wing](docs/flight_ships_textured.png)
+
+*A Y-wing with its 1999 hull textures — the first craft rendered with real faces and materials.*
 
 ![Shaded ships](docs/flight_ships_shaded.png)
 
@@ -171,9 +176,29 @@ with the load address), with the mesh-root count at `img+6` and the root pointer
 Reading that image as if it were a node is what made earlier sessions report "garbage models": the
 value they read as a node type was the file's *size* field.
 
+**Populating the world.** Getting more than a couple of craft on screen took three separate fixes:
+
+- **The object walk was looking at the wrong slice of the table.** Objects live at
+  `MEM32(0x7B33C4) + i*0x27` and the render walk runs `[MEM32(0x7CA3B4), MEM32(0x917E64))` — a
+  partition window that `sub_004154A0` computes from a region index. Under the force-launch path that
+  index is garbage, so the window landed on empty slots (632..760) while the mission's real objects
+  sat at 0..6. The walk already skips dead entries, so it is widened to the whole table.
+- **The engine's own dispatch only handles categories 8..15**, and the mission's craft are categories
+  1/3/5/17, drawn by a different path entirely — so hooking after that switch only ever saw a
+  fraction of the world. The native draw now hooks right after the "is this object alive" test.
+- **Most craft types had no model loaded at all.** `WORD[0x7CA6E0 + type*2]` was 0 for everything but
+  the one or two types the player path happened to load, because the force-launch path never runs the
+  mission's model preload. `FLIGHTMODELS/SPACECRAFT0.LST` is the game's own list of OPT paths in
+  craft-type order — exactly the index an object's `+0x00` field holds — so any missing model is
+  loaded on demand through `sub_004CC940` (the same path the concourse uses) and registered in the
+  type map. 25 models load this way in a typical run.
+
 **Honest limits.** Alpha is forced opaque, so cockpit glass and engine glow have no transparency yet.
-Only the craft whose flight-group coordinates are sane render — the forced-launch path still leaves
-some flight groups with junk positions. The camera uses the engine's real orientation, but in this
+Objects with junk coordinates are filtered out — the forced-launch path fabricates flight-group
+entries whose position fields hold float bit patterns. More importantly, **the mission's own spawn
+logic is not running**: this mission defines 32 flight groups, and the world contains about ten real
+objects, so what renders is everything that *exists*, not everything the mission calls for. Arrivals
+over time are the next piece. The camera uses the engine's real orientation, but in this
 force-built world the wingmen sit 40–80° off that axis, so the screenshots use a spectator camera
 (`XWA_NLOOKAT`) that aims at the nearest craft. The model→view transform is the port's own, not the
 engine's.

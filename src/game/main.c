@@ -258,10 +258,14 @@ static float xwa_f32(uint32_t a) { uint32_t v = MEM32(a); float f; memcpy(&f, &v
 
 /* Shared view basis (right / forward / up) -- one camera for the whole scene. */
 static double vbx, vby, vbz, vfx, vfy, vfz, vux, vuy, vuz;
+/* Eye position. Normally the player craft, but the spectator camera can pull in toward its target:
+ * with the mission's real distances a craft a few km out is a handful of pixels, correctly. */
+static double vex, vey, vez;
 
 static void nview_build(void)
 {
     double fx, fy, fz, rxv, ryv, l;
+    vex = g_np[3]; vey = g_np[4]; vez = g_np[5];
     if (getenv("XWA_NLOOKAT") && g_nmesh_n > 0) {
         /* Spectator view: aim at the centroid of everything cached, so the whole formation is in
          * one frame. The cockpit camera (below) is the game's real view; here the force-built
@@ -278,6 +282,12 @@ static void nview_build(void)
         fx = g_nmesh[best].p[0] - (double)g_np[3];
         fy = g_nmesh[best].p[1] - (double)g_np[4];
         fz = g_nmesh[best].p[2] - (double)g_np[5];
+        {   double zoom = getenv("XWA_NZOOM") ? atof(getenv("XWA_NZOOM")) : 1.0;
+            if (zoom > 1.0) {                       /* move the eye along the sight line */
+                double f2 = 1.0 - 1.0 / zoom;
+                vex = g_np[3] + fx * f2; vey = g_np[4] + fy * f2; vez = g_np[5] + fz * f2;
+            }
+        }
     } else {
         double poff = getenv("XWA_NPITCHOFF") ? atof(getenv("XWA_NPITCHOFF")) : 16384.0;
         double cu = g_camrot[0] * 9.5873799e-5, cp = (g_camrot[1] - poff) * 9.5873799e-5;
@@ -331,6 +341,35 @@ static int nstars_emit(D3DTLVERTEX* vb, int n, int cap)
 }
 
 /* Emit one cached mesh into vb; returns the new vertex count. */
+/* Craft type -> model path. FLIGHTMODELS/SPACECRAFT0.LST is the game's own list, one OPT path per
+ * line in craft-type order (0 = Xwing, 1 = Ywing, ...), which is exactly the index an object's +0x00
+ * field holds. Used to load the models the force-launch path never preloaded. */
+const char* xwa_craft_opt(unsigned type)
+{
+    static char* lines[600];
+    static int n = -1;
+    if (n < 0) {
+        FILE* f = fopen("FLIGHTMODELS\\SPACECRAFT0.LST", "rb");
+        n = 0;
+        if (f) {
+            char buf[260];
+            while (n < 600 && fgets(buf, sizeof buf, f)) {
+                size_t L = strlen(buf);
+                while (L && (buf[L-1] == '\n' || buf[L-1] == '\r' || buf[L-1] == ' ')) buf[--L] = 0;
+                if (!L) continue;
+                lines[n] = (char*)malloc(L + 1);
+                if (!lines[n]) break;
+                memcpy(lines[n], buf, L + 1);
+                n++;
+            }
+            fclose(f);
+        }
+        fprintf(stderr, "[CRAFTLIST] %d craft models listed\n", n);
+        fflush(stderr);
+    }
+    return (type < (unsigned)n) ? lines[type] : NULL;
+}
+
 /* Textures. The OPT's own 8-bit pixels plus palette are a dead end here -- the palette pointer in
  * the loaded record does not survive the load. But the engine has ALREADY converted every texture
  * into a 16-bit DirectDraw surface through our own mock, so read it from there instead:
@@ -450,9 +489,9 @@ static int nmesh_emit(int mi, D3DTLVERTEX* vb, int n, int cap)
     m[3] =  sa*cc - ca*sb*sc;  m[4] =  ca*cb;  m[5] =  sa*sc + ca*sb*cc;
     m[6] = -cb*sc;             m[7] = -sb;     m[8] =  cb*cc;
 
-    relx = (double)(g_nmesh[mi].p[0] - g_np[3]);
-    rely = (double)(g_nmesh[mi].p[1] - g_np[4]);
-    relz = (double)(g_nmesh[mi].p[2] - g_np[5]);
+    relx = (double)g_nmesh[mi].p[0] - vex;
+    rely = (double)g_nmesh[mi].p[1] - vey;
+    relz = (double)g_nmesh[mi].p[2] - vez;
 
     /* OPT units -> world units. No measurement has pinned this constant, so it stays a knob:
      * raise it if ships are specks, lower it if one hull fills the screen. */
@@ -759,8 +798,9 @@ void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch
             }
             if (getenv("XWA_NMESHLOG")) { static int lg2;
                 if (lg2 < 10) { lg2++;
-                    fprintf(stderr, "[NOBJ] type=0x%X img=0x%08X roots=%u meshes+%u total=%d at (%d,%d,%d)\n",
-                            type, img, nroot, hits, g_nmesh_n, px, py, pz); fflush(stderr); } }
+                    fprintf(stderr, "[NOBJ] type=0x%X img=0x%08X roots=%u meshes+%u total=%d at (%d,%d,%d) ypr=(%d,%d,%d)\n",
+                            type, img, nroot, hits, g_nmesh_n, px, py, pz, yaw, pitch, roll);
+                    fflush(stderr); } }
             if (hits) xwa_native_flush();
             return;
         }
@@ -773,9 +813,11 @@ void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch
     if (!root) return;
     pos[0] = px; pos[1] = py; pos[2] = pz;
     rot[0] = yaw; rot[1] = pitch; rot[2] = roll;
-    {   /* some flight groups carry junk coordinates; a craft 500 million units away is not real */
-        double dx = (double)(px - g_np[3]), dy = (double)(py - g_np[4]), dz = (double)(pz - g_np[5]);
-        if (dx*dx + dy*dy + dz*dz > 4.0e10) return;
+    {   /* Reject junk coordinates. Mission space runs to a few tens of thousands of units; the
+         * fabricated flight groups carry float bit patterns in these int fields, which show up as
+         * values in the hundreds of millions. */
+        if (px < -200000 || px > 200000 || py < -200000 || py > 200000
+            || pz < -200000 || pz > 200000) return;
     }
     added = nwalk(root, pos, rot, 0);
     if (added) xwa_native_flush();
