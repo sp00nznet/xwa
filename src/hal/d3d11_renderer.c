@@ -1000,8 +1000,20 @@ void d3d11_present(void) {
      * CONCOURSE can be compared against flight. */
     if (getenv("XWA_PERIODIC")) {
         static unsigned _pp;
-        if ((_pp++ % 600u) == 0u) {
+        if ((_pp++ % 100u) == 0u) {
             extern unsigned g_objtype[40]; extern unsigned g_bindfn[8];
+            extern unsigned g_spawnfn[8]; extern unsigned g_frameblk;
+            {   extern int xwa_readable(uint32_t, uint32_t);
+                extern ptrdiff_t g_mem_base;
+                uint32_t tbl = *(uint32_t*)((uintptr_t)0x7B33C4u + g_mem_base);
+                uint32_t cnt = *(uint32_t*)((uintptr_t)0x917E64u + g_mem_base), i, live = 0;
+                if (tbl && cnt && cnt < 4096u) for (i = 0; i < cnt; i++) {
+                    uint32_t o = tbl + i * 0x27u;
+                    if (xwa_readable(o, 0x27) && *(uint16_t*)((uintptr_t)(o + 2) + g_mem_base)) live++;
+                }
+                fprintf(stderr, "[PERIODIC] frameblk=0x%06X simtick=%u arrsched=%u create=%u | live objects=%u\n",
+                        g_frameblk, g_spawnfn[4], g_spawnfn[6], g_spawnfn[7], live);
+            }
             fprintf(stderr, "[PERIODIC] 442F70=%u 448000=%u 482000=%u | types:",
                     g_bindfn[0], g_bindfn[3], g_bindfn[4]);
             for (int _i = 0; _i < 40; _i++) if (g_objtype[_i]) fprintf(stderr, " t%d=%u", _i, g_objtype[_i]);
@@ -1033,6 +1045,13 @@ void d3d11_present(void) {
         }
     }
 
+    {   /* the mission's per-frame update, which the force-launch flight loop never calls */
+        static int _st = -1; extern void xwa_drive_simtick(void); extern ptrdiff_t g_mem_base;
+        volatile uint32_t* _fgt;
+        if (_st < 0) _st = getenv("XWA_SIMDRIVE") ? 1 : 0;
+        _fgt = (volatile uint32_t*)((uintptr_t)0x7B33C4u + g_mem_base);
+        if (_st && *_fgt != 0) xwa_drive_simtick();
+    }
     { static int _sb = -1; extern ptrdiff_t g_mem_base; extern void xwa_drive_render(void);
       volatile uint32_t *_fg;
       if (_sb < 0) { char* e = getenv("XWA_DRIVERENDER"); _sb = e ? 1 : 0; }

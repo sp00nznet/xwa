@@ -227,6 +227,12 @@ unsigned g_bld[4];
 unsigned g_cal[8];
 unsigned g_bpath;
 int g_np[8];
+unsigned g_spawnfn[8];
+unsigned g_frameblk;
+int g_in_flight;       /* set once the flight object walk has run */
+unsigned g_loaderblk;
+unsigned g_simblk;     /* last block reached inside the sim update */  /* last block reached inside the player-craft loader */   /* last block reached inside the flight frame function */   /* candidate mission spawn/update entry points */
+
 
 /* ============================================================================
  * xwa_native_mesh -- draw the game's own loaded OPT geometry (XWA_NATIVEDRAW).
@@ -1595,6 +1601,76 @@ frame_skip:
  * takes INIT branch). sub_00511A90 allocates the buffer + registers the view; sub_004340D0(0)
  * dispatches the per-viewport render (-> sub_00433850 -> ICALL 0x9109C0). Both are the real
  * game functions, called with correct args (the old d3d11 injection passed a garbage stack arg). */
+/* Drive the mission's per-frame sim update (XWA_SIMDRIVE).
+ *
+ * Under force-launch the flight loop that actually runs is sub_00457C20 -> sub_004596C0, which never
+ * reaches the per-frame call to sub_004F6510(tick) that the engine's own frame function
+ * (sub_0050FCB0) makes at 0x5109C9 -- that function enters once and stays inside the flight loop.
+ * So mission state never advances and no flight group ever arrives. Call the update from the present
+ * path, which really is once per frame; the engine's frame timer at 0x7D4B8C is advanced here too,
+ * since the loop that would normally advance it is not running.
+ *
+ * This is NOT the DirectPlay handler sub_004F8A40: that one expects a message and faults on a
+ * poisoned pointer when called with nothing. */
+void xwa_drive_simtick(void) {
+    extern void sub_004F6510(void);
+    static int _in = 0;
+    static unsigned _n = 0;
+    #define esp g_esp
+    if (_in || !g_in_flight) return; /* only inside flight, and never re-entered */
+    _in = 1;
+    {   /* Flight presents only ~20 frames per run here, so one tick per frame gives the mission
+         * almost no time and nothing ever arrives. XWA_SIMDRIVE=N runs N updates per frame, which
+         * fast-forwards mission time. */
+        const char* e = getenv("XWA_SIMDRIVE");
+        int steps = e ? atoi(e) : 1, k;
+        if (steps < 1) steps = 1;
+        if (steps > 4000) steps = 4000;
+        /* Two flags gate this path, both documented at the sites that read them: sub_004F6510
+         * diverts unless MEM8(0x8053E4) != 1, and the per-craft create sub_00405590 returns
+         * immediately while MEM32(0x7827E4) is non-zero. Under force-launch they are left set, so
+         * the update runs but the world never advances. Clear them across the call. */
+        uint32_t sv1 = MEM32(0x7827E4);
+        uint8_t  sv2 = MEM8(0x8053E4);
+        if (getenv("XWA_SIMGATE")) { MEM32(0x7827E4) = 0; MEM8(0x8053E4) = 0; }
+        /* The update returns immediately unless the tick it is handed is PAST the time it last
+         * simulated, which it keeps at 0x8B94D4 (`if (last >= tick) return`). Feeding it the engine's
+         * frame timer is not enough -- something else advances that too, so the value was usually
+         * already behind. Drive from the last-simulated time instead, one step at a time. */
+        for (k = 0; k < steps; k++) {
+            uint32_t t = MEM32(0x8B94D4) + 1u;
+            MEM32(0x7D4B8C) = t;
+            PUSH32(esp, t);
+            RECOMP_CALL(sub_004F6510);
+            esp = esp + 4;
+            _n++;
+        }
+        if (getenv("XWA_SIMGATE") && getenv("XWA_SIMRESTORE")) { MEM32(0x7827E4) = sv1; MEM8(0x8053E4) = sv2; }
+        if (_n < (unsigned)steps + 1u)
+            fprintf(stderr, "[SIMGATE] entry flags: 7827E4=%u 8053E4=%u\n", sv1, sv2);
+    }
+    if ((_n % 500u) < 2u) {          /* is the world actually growing? */
+        uint32_t tbl = MEM32(0x7B33C4), cnt = MEM32(0x917E64), i, live = 0;
+        if (tbl && cnt && cnt < 4096u)
+            for (i = 0; i < cnt; i++)
+                if (xwa_readable(tbl + i*0x27u, 0x27) && MEM16(tbl + i*0x27u + 2)) live++;
+        {   /* is the sim actually simulating? watch a real craft and the pending-create cursor */
+            uint32_t o3 = tbl + 3u * 0x27u;
+            fprintf(stderr, "[SIMDRIVE] simtime=%u ticks=%u live=%u obj3=(%d,%d,%d) cursor=%u count=%u\n",
+                    MEM32(0x8B94D4), _n, live,
+                    xwa_readable(o3, 0x27) ? (int32_t)MEM32(o3 + 7) : 0,
+                    xwa_readable(o3, 0x27) ? (int32_t)MEM32(o3 + 0xB) : 0,
+                    xwa_readable(o3, 0x27) ? (int32_t)MEM32(o3 + 0xF) : 0,
+                    MEM16(0x80B61C), MEM32(0x8BF380));
+            { extern unsigned g_simblk;
+              fprintf(stderr, "           sim update last block = 0x%06X\n", g_simblk); }
+        }
+        fflush(stderr);
+    }
+    _in = 0;
+    #undef esp
+}
+
 void xwa_drive_render(void) {
     extern void sub_00511A90(void);
     extern void sub_004340D0(void);
@@ -3790,6 +3866,12 @@ static void dump_trace_atexit(void) {
       if (getenv("XWA_GATES")) { extern unsigned g_gt[4];
         fprintf(stderr, "[GATES] gateA(91AE7C) checks=%u passed=%u | gateB(+0x219) checks=%u passed=%u\n",
                 g_gt[0], g_gt[1], g_gt[2], g_gt[3]); fflush(stderr); }
+      { extern unsigned g_spawnfn[8]; extern unsigned g_frameblk;
+        uint32_t tbl = MEM32(0x7B33C4), cnt = MEM32(0x917E64), i, live = 0;
+        if (tbl && cnt && cnt < 4096u) for (i = 0; i < cnt; i++)
+            if (xwa_readable(tbl + i*0x27u, 0x27) && MEM16(tbl + i*0x27u + 2)) live++;
+        fprintf(stderr, "[SPAWN-FINAL] frameFn=%u lastblk=0x%06X preTick=%u simtick=%u arrsched=%u create=%u | live objects=%u\n",
+                g_spawnfn[1], g_frameblk, g_spawnfn[2], g_spawnfn[4], g_spawnfn[6], g_spawnfn[7], live); }
       fprintf(stderr, "[RENDCOUNT-FINAL]");
       for (int i = 0; i < 8; i++) fprintf(stderr, "  %s=%u", g_rcount_name[i], g_rcount[i]);
       fprintf(stderr, "\n"); fflush(stderr); }

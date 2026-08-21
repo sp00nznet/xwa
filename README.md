@@ -194,6 +194,19 @@ value they read as a node type was the file's *size* field.
   type map. 25 models load this way in a typical run.
 
 **Honest limits.** Alpha is forced opaque, so cockpit glass and engine glow have no transparency yet.
+**Arrivals are the current frontier, and are not working yet.** The mission's 32 flight groups are
+parsed and present in memory (the table sits at `0x80DC80` with a `0xE42` stride, names at offset 0),
+but only the seven objects the initial build creates ever exist. The reason is now measured rather
+than guessed: the engine's frame function `sub_0050FCB0` calls the per-frame sim update
+`sub_004F6510(tick)`, but under force-launch it never reaches that call — it enters, stops at block
+`0x510668`, and **flight itself runs inside that call**, down `sub_00457C20 -> sub_004596C0`. So the
+update can only be driven manually, which `XWA_SIMDRIVE=N` now does from the present path (N steps per
+frame, since flight presents only about twenty frames per run). Its gate turns out to be time-based:
+the update returns immediately unless the tick it is handed is past the time it last simulated, which
+it keeps at `0x8B94D4`. Driving it from that value makes it do real work — the pending-create cursor
+advances from 8 to 236 of 632 — but no new craft appear yet, so a further gate remains in the create
+path itself.
+
 Objects with junk coordinates are filtered out — the forced-launch path fabricates flight-group
 entries whose position fields hold float bit patterns. More importantly, **the mission's own spawn
 logic is not running**: this mission defines 32 flight groups, and the world contains about ten real
