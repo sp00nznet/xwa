@@ -246,8 +246,8 @@ int g_np[8];
 int g_nrot[4];              /* object orientation: yaw, pitch, roll (XwaObject +0x13/+0x15/+0x17) */
 int g_camrot[4];            /* player craft orientation = camera orientation (cockpit view) */
 
-#define NMESH_MAX 96
-static struct { uint32_t vnode; int p[3]; int rot[3]; } g_nmesh[NMESH_MAX];
+#define NMESH_MAX 512
+static struct { uint32_t vnode; int obj; int p[3]; int rot[3]; } g_nmesh[NMESH_MAX];
 static int g_nmesh_n;
 
 static int xwa_blk(uint32_t a) {
@@ -262,9 +262,27 @@ static double vbx, vby, vbz, vfx, vfy, vfz, vux, vuy, vuz;
  * with the mission's real distances a craft a few km out is a handful of pixels, correctly. */
 static double vex, vey, vez;
 
+/* The engine's own camera record: playerslot*0xBCF + 0x8BA028 holds the camera POSITION (3 int32)
+ * and its orientation as 16-bit angles -- +0x14 pitch, +0x16 yaw, +0x18 roll. Both track the player
+ * craft as it flies. Reading them directly beats the old heuristic of borrowing the angles from
+ * whichever object happened to sit nearest the camera. */
+static void ncam_read(void)
+{
+    uint32_t base = MEM32(0x8C1CC8) * 0xBCFu + 0x8BA028u;
+    if (getenv("XWA_CAMOBJ") || !xwa_readable(base, 0x20)) return;   /* XWA_CAMOBJ = old heuristic */
+    g_np[3] = (int32_t)MEM32(base);
+    g_np[4] = (int32_t)MEM32(base + 4);
+    g_np[5] = (int32_t)MEM32(base + 8);
+    g_np[6] = 1;
+    g_camrot[1] = (int16_t)MEM16(base + 0x14);      /* pitch */
+    g_camrot[0] = (int16_t)MEM16(base + 0x16);      /* yaw */
+    g_camrot[2] = (int16_t)MEM16(base + 0x18);      /* roll */
+}
+
 static void nview_build(void)
 {
     double fx, fy, fz, rxv, ryv, l;
+    ncam_read();
     vex = g_np[3]; vey = g_np[4]; vez = g_np[5];
     if (getenv("XWA_NLOOKAT") && g_nmesh_n > 0) {
         /* Spectator view: aim at the centroid of everything cached, so the whole formation is in
@@ -301,6 +319,29 @@ static void nview_build(void)
     vbx = rxv; vby = ryv; vbz = 0.0;
     vfx = fx;  vfy = fy;  vfz = fz;
     vux = ryv*fz - 0.0*fy; vuy = 0.0*fx - rxv*fz; vuz = rxv*fy - ryv*fx;
+    {   /* roll: spin right/up about the forward axis, so banking tilts the view as it should */
+        double rl = g_camrot[2] * 9.5873799e-5, cr, sr, bx, by, bz;
+        if (!getenv("XWA_NLOOKAT") && rl != 0.0) {
+            cr = cos(rl); sr = sin(rl);
+            bx = vbx*cr + vux*sr; by = vby*cr + vuy*sr; bz = vbz*cr + vuz*sr;
+            vux = vux*cr - vbx*sr; vuy = vuy*cr - vby*sr; vuz = vuz*cr - vbz*sr;
+            vbx = bx; vby = by; vbz = bz;
+        }
+    }
+    if (getenv("XWA_CAMCHECK")) {   /* does the heading implied by yaw match how the ship moves? */
+        static int cs; static double lx, ly, lz; static int have;
+        if (cs < 8) {
+            double dx = vex - lx, dy = vey - ly, dz = vez - lz;
+            double dl = sqrt(dx*dx + dy*dy + dz*dz);
+            if (have && dl > 1.0) { cs++;
+                fprintf(stderr, "[CAMCHECK] yaw=%d pitch=%d roll=%d fwd=(%.2f,%.2f,%.2f) "
+                                "moved=(%.2f,%.2f,%.2f) dot=%.3f\n",
+                        g_camrot[0], g_camrot[1], g_camrot[2], vfx, vfy, vfz,
+                        dx/dl, dy/dl, dz/dl, (vfx*dx + vfy*dy + vfz*dz) / dl);
+                fflush(stderr); }
+            lx = vex; ly = vey; lz = vez; have = 1;
+        }
+    }
 }
 
 /* Starfield: without it a correct scene still reads as an empty blue void. Fixed directions from
@@ -699,15 +740,22 @@ static int nfaces_emit(uint32_t a, D3DTLVERTEX* vb, int n, int cap)
 
 /* Add one mesh (a type-3 vertex node) to the scene cache with the transform of the object it
  * belongs to. Returns 1 if it was new. */
-static int nmesh_add(uint32_t vnode, const int* pos, const int* rot)
+/* One entry per (object, mesh). The transform is REFRESHED on every pass -- keying on position
+ * instead meant a moving craft kept adding new entries, so the scene was a trail of stale copies
+ * frozen where each object was first seen. */
+static int nmesh_add(uint32_t vnode, const int* pos, const int* rot, int obj)
 {
     int i;
     if (!xwa_blk(vnode) || MEM32(vnode + 4) != 3u) return 0;
     for (i = 0; i < g_nmesh_n; i++)
-        if (g_nmesh[i].vnode == vnode && g_nmesh[i].p[0] == pos[0]
-            && g_nmesh[i].p[1] == pos[1] && g_nmesh[i].p[2] == pos[2]) return 0;
+        if (g_nmesh[i].vnode == vnode && g_nmesh[i].obj == obj) {
+            g_nmesh[i].p[0] = pos[0]; g_nmesh[i].p[1] = pos[1]; g_nmesh[i].p[2] = pos[2];
+            g_nmesh[i].rot[0] = rot[0]; g_nmesh[i].rot[1] = rot[1]; g_nmesh[i].rot[2] = rot[2];
+            return 0;                                  /* already known -- just moved */
+        }
     if (g_nmesh_n >= NMESH_MAX) return 0;
     g_nmesh[g_nmesh_n].vnode  = vnode;
+    g_nmesh[g_nmesh_n].obj    = obj;
     g_nmesh[g_nmesh_n].p[0]   = pos[0]; g_nmesh[g_nmesh_n].p[1] = pos[1]; g_nmesh[g_nmesh_n].p[2] = pos[2];
     g_nmesh[g_nmesh_n].rot[0] = rot[0]; g_nmesh[g_nmesh_n].rot[1] = rot[1]; g_nmesh[g_nmesh_n].rot[2] = rot[2];
     g_nmesh_n++;
@@ -716,16 +764,16 @@ static int nmesh_add(uint32_t vnode, const int* pos, const int* rot)
 
 /* Walk an OPT node tree and cache every mesh in it. Container nodes carry a child count at +8 and
  * an array of child pointers at +0xC; leaf data blocks have count/inline-data at +0x10/+0x14. */
-static int nwalk(uint32_t node, const int* pos, const int* rot, int depth)
+static int nwalk(uint32_t node, const int* pos, const int* rot, int obj, int depth)
 {
     uint32_t nch, arr, i;
     int added = 0;
     if (depth > 8 || !xwa_readable(node, 0x18) || MEM32(node) != 0u) return 0;
-    if (MEM32(node + 4) == 3u) return nmesh_add(node, pos, rot);
+    if (MEM32(node + 4) == 3u) return nmesh_add(node, pos, rot, obj);
     nch = MEM32(node + 8);
     arr = MEM32(node + 0xC);
     if (nch < 1u || nch > 128u || !xwa_readable(arr, nch * 4u)) return 0;
-    for (i = 0; i < nch; i++) added += nwalk(MEM32(arr + i * 4u), pos, rot, depth + 1);
+    for (i = 0; i < nch; i++) added += nwalk(MEM32(arr + i * 4u), pos, rot, obj, depth + 1);
     return added;
 }
 
@@ -773,11 +821,17 @@ static uint32_t xwa_opt_root(uint32_t img)
 /* Called per object from the render walk. Draws THAT object's own model: the mesh recogniser only
  * ever hands over whichever model it happens to be resolving, so every craft came out with the
  * same hull. */
-void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch, int roll)
+void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch, int roll, int obj)
 {
     int pos[3], rot[3], added;
     uint32_t img, root;
     if (!getenv("XWA_NATIVEDRAW")) return;
+    {   /* The walk restarts at object 0 every pass; that boundary is the frame. Re-emit the scene
+         * there, so what reaches the screen is this pass's positions rather than a snapshot. */
+        static int last = -1;
+        if (obj <= last) xwa_native_flush();
+        last = obj;
+    }
     img = xwa_model_for_type(type);
     root = img ? xwa_opt_root(img) : 0u;
     /* An OPT holds SEVERAL mesh roots (an X-wing is 5: fuselage plus wings). The count sits at
@@ -794,14 +848,13 @@ void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch
             for (ri = 0; ri < nroot; ri++) {
                 uint32_t r = MEM32(img + 0x0Eu + ri * 4u);
                 if (!xwa_readable(r, 0x18) || MEM32(r) != 0u || MEM32(r + 4) > 32u) continue;
-                hits += (uint32_t)nwalk(r, pos, rot, 0);
+                hits += (uint32_t)nwalk(r, pos, rot, obj, 0);
             }
             if (getenv("XWA_NMESHLOG")) { static int lg2;
                 if (lg2 < 10) { lg2++;
                     fprintf(stderr, "[NOBJ] type=0x%X img=0x%08X roots=%u meshes+%u total=%d at (%d,%d,%d) ypr=(%d,%d,%d)\n",
                             type, img, nroot, hits, g_nmesh_n, px, py, pz, yaw, pitch, roll);
                     fflush(stderr); } }
-            if (hits) xwa_native_flush();
             return;
         }
     }
@@ -819,8 +872,8 @@ void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch
         if (px < -200000 || px > 200000 || py < -200000 || py > 200000
             || pz < -200000 || pz > 200000) return;
     }
-    added = nwalk(root, pos, rot, 0);
-    if (added) xwa_native_flush();
+    added = nwalk(root, pos, rot, obj, 0);
+    (void)added;
 }
 
 /* Re-emit the whole cached scene. */
@@ -872,7 +925,7 @@ void xwa_native_mesh(uint32_t vnode)
     }
     pos[0] = g_np[0]; pos[1] = g_np[1]; pos[2] = g_np[2];
     rot[0] = g_nrot[0]; rot[1] = g_nrot[1]; rot[2] = g_nrot[2];
-    if (nmesh_add(vnode, pos, rot)) xwa_native_flush();
+    if (nmesh_add(vnode, pos, rot, -1)) xwa_native_flush();
 }
 
 unsigned g_gt[4];
