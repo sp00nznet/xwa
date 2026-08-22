@@ -229,7 +229,8 @@ unsigned g_bpath;
 int g_np[8];
 unsigned g_spawnfn[8];
 unsigned g_frameblk;
-int g_in_flight;       /* set once the flight object walk has run */
+int g_in_flight;
+int g_ui_snap_req;     /* set by the UI driver, serviced by the present path */       /* set once the flight object walk has run */
 unsigned g_loaderblk;
 unsigned g_simblk;
 unsigned g_crloopblk;
@@ -1996,6 +1997,21 @@ void xwa_ui_driver(void) {
     uint32_t cb = MEM32(0xA1C8D5 + 0x850u * depth);
     static uint32_t last_cb = 0;
     static int fip = 0;            /* frames since the active screen last changed */
+    /* XWA_SNAPUI=N: dump the composited 2D screen N frames after the active screen last changed,
+     * so a menu can actually be looked at (which control launches the mission, and where it is). */
+    if (getenv("XWA_SNAPUI")) {
+        static int _snapped_for = -1;
+        int want = atoi(getenv("XWA_SNAPUI")); if (want <= 0) want = 40;
+        if (fip == want && _snapped_for != want + (int)MEM32(0x9F60D4)) {
+            /* Ask the PRESENT path to capture: capturing from here grabs the back buffer before
+             * the frame has been composited and presented, which just yields black. */
+            extern int g_ui_snap_req;
+            _snapped_for = want + (int)MEM32(0x9F60D4);
+            g_ui_snap_req = 1;
+            fprintf(stderr, "[SNAPUI] requested a capture of the presented screen at fip=%d\n", fip);
+            fflush(stderr);
+        }
+    }
 
     /* Activate the DirectPlay loopback (com_mocks) only on the mission-load screens
      * (skirmish lobby / loading / flight-init), so it doesn't replay unrelated

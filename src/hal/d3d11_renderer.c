@@ -1021,6 +1021,11 @@ void d3d11_present(void) {
         }
     }
 
+    {   /* Serviced here so the capture sees a composited, presented frame (see XWA_SNAPUI). */
+        extern int g_ui_snap_req;
+        if (g_ui_snap_req) { g_ui_snap_req = 0; d3d11_capture_bmp("ui_screen.bmp"); }
+    }
+
     /* XWA_RTDUMP=N: after N presents that actually drew something, save the GPU back buffer.
      * Waits for a frame with real draw calls so the dump is not an empty pre-flight frame. */
     if (getenv("XWA_RTDUMP")) {
