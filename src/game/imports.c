@@ -1655,6 +1655,34 @@ static void bridge_SetWindowTextA_005A921C(void) { /* USER32.dll:SetWindowTextA 
     g_esp += 12;
 }
 
+/* XWA_WINKEY=<vk>: menus read the keyboard through the Win32 path, not DirectInput -- the game
+ * only ever creates joystick DirectInput devices, so the DI key injection (XWA_SENDKEY) can never
+ * answer them. Headless, the real GetAsyncKeyState/GetKeyboardState report an idle keyboard, so a
+ * screen waiting on ENTER waits forever. Report the chosen key as held for a window of calls,
+ * repeating, so either polling style sees a press.
+ *   XWA_WINKEY=0x0D (VK_RETURN), XWA_WINKEYAFTER=<calls>, XWA_WINKEYEVERY=<calls>. */
+static int xwa_winkey_down(uint32_t vk) {
+    static unsigned n = 0;
+    const char* k = getenv("XWA_WINKEY");
+    unsigned after, every;
+    uint32_t want;
+    if (!k) return 0;
+    want = (uint32_t)strtoul(k, NULL, 0);
+    if (vk != want) return 0;
+    n++;
+    after = getenv("XWA_WINKEYAFTER") ? (unsigned)strtoul(getenv("XWA_WINKEYAFTER"), NULL, 0) : 200u;
+    every = getenv("XWA_WINKEYEVERY") ? (unsigned)strtoul(getenv("XWA_WINKEYEVERY"), NULL, 0) : 60u;
+    if (every < 2u) every = 2u;
+    if (n <= after) return 0;
+    {   int down = (((n - after) % every) < (every / 4u + 1u));
+        static int logged = 0;
+        if (down && logged < 4) { logged++;
+            fprintf(stderr, "[WINKEY] reporting vk 0x%02X held (call %u)\n", vk, n);
+            fflush(stderr); }
+        return down;
+    }
+}
+
 static void bridge_GetAsyncKeyState_005A9220(void) { /* USER32.dll:GetAsyncKeyState (1 args) */
     BRIDGE_TRACE("USER32.dll:GetAsyncKeyState");
     static STDFN1 fn = NULL;
@@ -1717,6 +1745,7 @@ static void bridge_PostQuitMessage_005A9238(void) { /* USER32.dll:PostQuitMessag
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "PostQuitMessage");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
+    if (xwa_winkey_down(a0)) g_eax = 0x8001u;      /* high bit = currently down */
     g_esp += 8;
 }
 
@@ -1726,6 +1755,10 @@ static void bridge_GetKeyboardState_005A923C(void) { /* USER32.dll:GetKeyboardSt
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "GetKeyboardState");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
+    if (a0 && getenv("XWA_WINKEY")) {
+        uint32_t vk = (uint32_t)strtoul(getenv("XWA_WINKEY"), NULL, 0) & 0xFFu;
+        if (xwa_winkey_down(vk)) MEM8(a0 + vk) = 0x80u;
+    }
     g_esp += 8;
 }
 

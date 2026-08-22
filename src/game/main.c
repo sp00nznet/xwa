@@ -1996,6 +1996,45 @@ void xwa_ui_driver(void) {
     uint32_t depth = MEM32(0xA1C089);
     uint32_t cb = MEM32(0xA1C8D5 + 0x850u * depth);
     static uint32_t last_cb = 0;
+    /* XWA_CLICKSWEEP: find a screen's active control empirically. Sweep the click position over a
+     * grid while the screen is up and report which point was last clicked when the screen changes.
+     * XWA_CLICKSWEEP=<screen-hex>, XWA_SWEEPSTEP=<px>, XWA_SWEEPHOLD=<frames per point>. */
+    if (getenv("XWA_CLICKSWEEP")) {
+        static int sweep_i = 0, sweep_lx = -1, sweep_ly = -1, reported = 0;
+        static uint32_t sweep_screen = 0;
+        uint32_t want = (uint32_t)strtoul(getenv("XWA_CLICKSWEEP"), NULL, 16);
+        int step = getenv("XWA_SWEEPSTEP") ? atoi(getenv("XWA_SWEEPSTEP")) : 32;
+        int hold = getenv("XWA_SWEEPHOLD") ? atoi(getenv("XWA_SWEEPHOLD")) : 3;
+        if (step < 4) step = 4;
+        if (hold < 1) hold = 1;
+        if (cb == want) {
+            int y0 = getenv("XWA_SWEEPY0") ? atoi(getenv("XWA_SWEEPY0")) : 0;
+            int y1 = getenv("XWA_SWEEPY1") ? atoi(getenv("XWA_SWEEPY1")) : 480;
+            int cols = 640 / step;
+            int idx  = sweep_i / hold;
+            int x = (idx % cols) * step + step / 2;
+            int y = y0 + (idx / cols) * step + step / 2;
+            sweep_screen = cb;
+            if (y < y1) {
+                MEM32(0x9F65ED) = (uint32_t)(x - 5);
+                MEM32(0x9F65F1) = (uint32_t)(y - 5);
+                if ((sweep_i % hold) == 0) {
+                    MEM8(0x9F6884) = 1;
+                    sweep_lx = x; sweep_ly = y;
+                    if ((idx % 40) == 0) {
+                        fprintf(stderr, "[SWEEP] point %d -> (%d,%d)\n", idx, x, y);
+                        fflush(stderr);
+                    }
+                }
+                sweep_i++;
+            }
+        } else if (sweep_screen == want && !reported) {
+            reported = 1;
+            fprintf(stderr, "[SWEEP] *** screen 0x%08X left after clicking (%d,%d) -> now 0x%08X ***\n",
+                    want, sweep_lx, sweep_ly, cb);
+            fflush(stderr);
+        }
+    }
     static int fip = 0;            /* frames since the active screen last changed */
     /* XWA_SNAPUI=N: dump the composited 2D screen N frames after the active screen last changed,
      * so a menu can actually be looked at (which control launches the mission, and where it is). */
