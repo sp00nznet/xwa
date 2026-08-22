@@ -231,7 +231,10 @@ unsigned g_spawnfn[8];
 unsigned g_frameblk;
 int g_in_flight;       /* set once the flight object walk has run */
 unsigned g_loaderblk;
-unsigned g_simblk;     /* last block reached inside the sim update */  /* last block reached inside the player-craft loader */   /* last block reached inside the flight frame function */   /* candidate mission spawn/update entry points */
+unsigned g_simblk;
+unsigned g_crloopblk;
+unsigned g_crloopprev;  /* block reached just before the create loop exits */  /* last block inside the craft-create loop */
+unsigned g_createblk;  /* last block inside the per-craft create */     /* last block reached inside the sim update */  /* last block reached inside the player-craft loader */   /* last block reached inside the flight frame function */   /* candidate mission spawn/update entry points */
 
 
 /* ============================================================================
@@ -1662,8 +1665,10 @@ void xwa_drive_simtick(void) {
                     xwa_readable(o3, 0x27) ? (int32_t)MEM32(o3 + 0xB) : 0,
                     xwa_readable(o3, 0x27) ? (int32_t)MEM32(o3 + 0xF) : 0,
                     MEM16(0x80B61C), MEM32(0x8BF380));
-            { extern unsigned g_simblk;
-              fprintf(stderr, "           sim update last block = 0x%06X\n", g_simblk); }
+            { extern unsigned g_simblk, g_crloopblk, g_createblk; extern unsigned g_spawnfn[8];
+              { extern unsigned g_crloopprev;
+                fprintf(stderr, "           simblk=0x%06X crloop=0x%06X prev=0x%06X(calls=%u) create=0x%06X(calls=%u)\n",
+                      g_simblk, g_crloopblk, g_crloopprev, g_spawnfn[6], g_createblk, g_spawnfn[7]); } }
         }
         fflush(stderr);
     }
