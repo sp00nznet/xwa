@@ -2484,18 +2484,26 @@ static void dp_enqueue(uint32_t lpData, uint32_t len) {
     if (g_dp_q_tail - g_dp_q_head > DP_Q_CAP) g_dp_q_head = g_dp_q_tail - DP_Q_CAP;
 }
 /* IDirectPlay4::Send(this, idFrom, idTo, dwFlags, lpData, dwDataSize) — 6 args */
+/* Call counters for the DirectPlay surface, so "does the game use DP in flight?" is measured rather
+ * than inferred from crash-dump markers. Index: 0 Send, 1 SendEx, 2 Receive, 3 GetMessageCount,
+ * 4 Open, 5 CreatePlayer, 6 Receive-delivered. */
+unsigned g_dpcnt[8];
+
 static void dplay_Send(void) {
+    g_dpcnt[0]++;
     com_dplay_log_send(MEM32(g_esp + 0x18));
     dp_enqueue(MEM32(g_esp + 0x14), MEM32(g_esp + 0x18));
     g_eax = 0; g_esp += 28;
 }
 /* IDirectPlay4::SendEx(this, idFrom, idTo, dwFlags, lpData, dwDataSize, prio, timeout, ctx, msgid) — 10 args */
 static void dplay_SendEx(void) {
+    g_dpcnt[1]++;
     com_dplay_log_send(MEM32(g_esp + 0x18));
     dp_enqueue(MEM32(g_esp + 0x14), MEM32(g_esp + 0x18));
     g_eax = 0; g_esp += 44;
 }
 static void dplay_Receive(void) {  /* (this, lpidFrom, lpidTo, flags, lpData, lpdwSize) */
+    g_dpcnt[2]++;
     if (g_dploop < 0) g_dploop = getenv("XWA_DPLOOP") ? 1 : 0;
     if (g_dploop < 0) g_dploop = getenv("XWA_DPLOOP") ? 1 : 0;
     if (g_dploop && g_dp_active && g_dp_q_head != g_dp_q_tail) {
@@ -2517,7 +2525,11 @@ static void dplay_Receive(void) {  /* (this, lpidFrom, lpidTo, flags, lpData, lp
 }
 static void dplay_GetMessageCount(void) {  /* (this, idPlayer, lpdwCount) */
     uint32_t pCount = MEM32(g_esp + 12);
-    if (pCount) MEM32(pCount) = 0;
+    /* Report the ACTUAL queue depth. Returning 0 unconditionally means a caller that checks the
+     * count before receiving never calls Receive, so queued loopback messages are never delivered. */
+    uint32_t depth = (g_dploop > 0 && g_dp_active) ? (uint32_t)(g_dp_q_tail - g_dp_q_head) : 0u;
+    g_dpcnt[3]++;
+    if (pCount) MEM32(pCount) = depth;
     g_eax = 0;
     g_esp += 16;
 }

@@ -1678,9 +1678,12 @@ void xwa_drive_simtick(void) {
     }
     if ((_n % 200u) == 1u && getenv("XWA_WHERE")) {
         extern unsigned g_frameblk, g_loaderblk, g_spawnfn[8];
-        fprintf(stderr, "[WHERE] frameFn=%u lastblk=0x%06X loader=0x%06X | dispatch 4EBEE0=%u 4F91C0=%u DPhandler 4F8A40=%u simtick=%u\n",
-                g_spawnfn[1], g_frameblk, g_loaderblk,
-                g_spawnfn[0], g_spawnfn[2], g_spawnfn[3], g_spawnfn[4]);
+        { extern unsigned g_dpcnt[8]; extern int g_dp_active;
+          fprintf(stderr, "[WHERE] frameFn=%u lastblk=0x%06X loader=0x%06X | dispatch=%u handler=%u simtick=%u\n",
+                  g_spawnfn[1], g_frameblk, g_loaderblk,
+                  g_spawnfn[0], g_spawnfn[3], g_spawnfn[4]);
+          fprintf(stderr, "        DP: Send=%u SendEx=%u Receive=%u GetMsgCount=%u dp_active=%d\n",
+                  g_dpcnt[0], g_dpcnt[1], g_dpcnt[2], g_dpcnt[3], g_dp_active); }
         fflush(stderr);
     }
     if ((_n % 500u) < 2u && getenv("XWA_FLOOP")) {

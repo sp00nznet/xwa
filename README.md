@@ -203,21 +203,16 @@ are active at mission start; the recompiled game's forced launch has region-1 gr
 lands in region 1 — where the craft slice is *empty* (`base == count`), leaving the create loop nowhere
 to put an arriving craft.
 
-**And the DirectPlay session does not exist here at all.** Scanning a whole flight run for calls into
-the mock's IDirectPlay4 vtable finds *none* — the game never invokes a single DirectPlay method. So
-the problem is not that the message handler is gated; it is that there is no session, therefore no
-message, therefore no simulation. The remaining work is a build-out rather than an investigation:
-stand up a local loopback session in the COM mocks (its 53 vtable slots currently all share one
-generic stub, which is a stack-arity hazard the moment the game really uses them) and queue the
-per-frame packet, whose layout can be read off the handler's own parser.
+**Single-player flight does not use DirectPlay at all.** Call counters inside the COM mocks show
+`Send`, `SendEx`, `Receive` and `GetMessageCount` all at zero during flight, with the loopback session
+active — so the sim tick does not arrive as a network message on this path, and the engine's
+`sub_004F6510` (whose only callers are the DirectPlay handler and the outer frame function) never
+runs. An older code comment describing that handler as the thing that ticks the simulation is
+describing the multiplayer route.
 
-**What actually drives the simulation: DirectPlay messages.** The sim update `sub_004F6510` has only
-two callers — the DirectPlay message handler and the outer frame function — and measurement in flight
-shows *neither runs*: the whole dispatch path (`sub_004EBEE0`, `sub_004F91C0`, `sub_004F8A40`) sits at
-zero calls. XWA drives even single-player through a local DirectPlay session, so the per-frame tick
-arrives as a message, and the recompiled game's DirectPlay mock never delivers one. That is the
-structural reason mission state never advances — and it lives in this project's own mock rather than
-in the engine, which makes it the tractable next target.
+The simulation that *does* run lives under `sub_004598E0`, the per-frame update called by the flight
+loop: craft measurably move under it. Finding where mission logic and arrival evaluation sit inside
+that subtree is the remaining gap between "craft move" and "flight groups arrive".
 
 The real flight loop is inside `sub_00457C20`: a frame-timer accumulator that waits for eight ticks,
 then calls the per-frame update `sub_004598E0`, then stamps the sim's last-simulated time to the frame
