@@ -233,7 +233,8 @@ int g_in_flight;       /* set once the flight object walk has run */
 unsigned g_loaderblk;
 unsigned g_simblk;
 unsigned g_crloopblk;
-unsigned g_crloopprev;  /* block reached just before the create loop exits */  /* last block inside the craft-create loop */
+unsigned g_crloopprev;
+unsigned g_partsite;   /* call site that last asked for a partition */  /* block reached just before the create loop exits */  /* last block inside the craft-create loop */
 unsigned g_createblk;  /* last block inside the per-craft create */     /* last block reached inside the sim update */  /* last block reached inside the player-craft loader */   /* last block reached inside the flight frame function */   /* candidate mission spawn/update entry points */
 
 
@@ -1622,6 +1623,19 @@ void xwa_drive_simtick(void) {
     #define esp g_esp
     if (_in || !g_in_flight) return; /* only inside flight, and never re-entered */
     _in = 1;
+    if (getenv("XWA_PARTFIX") && MEM32(0x8C1CD8) != 0u) {
+        /* Put the world back in the player's region before stepping the sim. The per-flight-group
+         * loop in sub_00417580 keeps re-partitioning to region 1 (this mission's second region), and
+         * in region 1 the craft slice is empty (base == count), so the create loop has nowhere to
+         * put an arriving craft. Retail flies with partition 0, base 0, craft in [0,252). */
+        extern void sub_004154A0(void);
+        static int _pw; if (_pw < 3) { _pw++;
+            fprintf(stderr, "[PARTFIX/sim] repartitioning %u -> 0 before the tick\n",
+                    MEM32(0x8C1CD8)); fflush(stderr); }
+        PUSH32(esp, 0);
+        RECOMP_CALL(sub_004154A0);
+        esp = esp + 4;
+    }
     {   /* Flight presents only ~20 frames per run here, so one tick per frame gives the mission
          * almost no time and nothing ever arrives. XWA_SIMDRIVE=N runs N updates per frame, which
          * fast-forwards mission time. */

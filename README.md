@@ -194,6 +194,25 @@ value they read as a node type was the file's *size* field.
   type map. 25 models load this way in a typical run.
 
 **Honest limits.** Alpha is forced opaque, so cockpit glass and engine glow have no transparency yet.
+**Arrivals: the cause is now known, confirmed against the retail game.** The object/craft table is
+partitioned by *mission region*, and this mission has two of them — 18 flight groups in region 0 (the
+player's own Sabra, Xi, Selu, Azzameen, Norge) and 14 in region 1 (Harlequin Station, Pi, Chi, Psi).
+The partition index is a per-flight-group byte at `FGrecord + 0xDAA`, and `sub_00417580` applies it
+once per flight group, so the last one wins. Retail ends up in region 0 because only region-0 groups
+are active at mission start; the recompiled game's forced launch has region-1 groups active too, so it
+lands in region 1 — where the craft slice is *empty* (`base == count`), leaving the create loop nowhere
+to put an arriving craft.
+
+`tools/peek_partition.py` reads these globals out of the running retail game (read-only, no debugger,
+so it does not trip the SteamStub anti-debug). Retail in flight measures `partition 0, base 0,
+count 252, walk [252,380)`, with every live object inside `[0,252)`. Re-applying the player's region in
+the port reproduces those numbers exactly — but the engine re-partitions back continuously, so the fix
+is upstream: stop the forced launch from marking region-1 groups active, rather than clamping the
+partition.
+
+<details>
+<summary>Earlier framing of this problem</summary>
+
 **Arrivals are the current frontier, and are not working yet.** The mission's 32 flight groups are
 parsed and present in memory (the table sits at `0x80DC80` with a `0xE42` stride, names at offset 0),
 but only the seven objects the initial build creates ever exist. The reason is now measured rather
@@ -206,6 +225,8 @@ the update returns immediately unless the tick it is handed is past the time it 
 it keeps at `0x8B94D4`. Driving it from that value makes it do real work — the pending-create cursor
 advances from 8 to 236 of 632 — but no new craft appear yet, so a further gate remains in the create
 path itself.
+
+</details>
 
 Objects with junk coordinates are filtered out — the forced-launch path fabricates flight-group
 entries whose position fields hold float bit patterns. More importantly, **the mission's own spawn
