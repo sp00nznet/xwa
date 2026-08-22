@@ -210,6 +210,15 @@ active — so the sim tick does not arrive as a network message on this path, an
 runs. An older code comment describing that handler as the thing that ticks the simulation is
 describing the multiplayer route.
 
+The flight-group activation walk that would arrive new craft, `sub_00417580`, is called only from the
+outer frame function — the one whose per-frame body this port never re-enters — so arrivals are
+evaluated once at setup and never again. Driving that walk from the flight loop does create craft, but
+they are exact duplicates: the same groups at identical coordinates in fresh slots on every pass.
+Retail re-runs the same walk every frame without duplicating, so it associates each flight group with
+the object it already created; the recompiled game's hand-built world has no such association. That is
+the same wall every arrival route reaches, and the reason the honest next move is to make the mission
+load through the engine's own path rather than to extend the forced-launch shortcuts further.
+
 The simulation that *does* run lives under `sub_004598E0`, the per-frame update called by the flight
 loop: craft measurably move under it. Finding where mission logic and arrival evaluation sit inside
 that subtree is the remaining gap between "craft move" and "flight groups arrive".
