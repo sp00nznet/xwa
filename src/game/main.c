@@ -1616,6 +1616,16 @@ frame_skip:
  *
  * This is NOT the DirectPlay handler sub_004F8A40: that one expects a message and faults on a
  * poisoned pointer when called with nothing. */
+/* Ring of distinct blocks visited inside the flight loop sub_004596C0, so a spin shows up as a
+ * short repeating cycle rather than a single "last block" reading. */
+unsigned g_fbring[16];
+unsigned g_fbidx;
+void xwa_fblk(unsigned blk) {
+    if (g_fbidx && g_fbring[(g_fbidx - 1u) & 15u] == blk) return;   /* same block again */
+    g_fbring[g_fbidx & 15u] = blk;
+    g_fbidx++;
+}
+
 void xwa_drive_simtick(void) {
     extern void sub_004F6510(void);
     static int _in = 0;
@@ -1665,6 +1675,19 @@ void xwa_drive_simtick(void) {
         if (getenv("XWA_SIMGATE") && getenv("XWA_SIMRESTORE")) { MEM32(0x7827E4) = sv1; MEM8(0x8053E4) = sv2; }
         if (_n < (unsigned)steps + 1u)
             fprintf(stderr, "[SIMGATE] entry flags: 7827E4=%u 8053E4=%u\n", sv1, sv2);
+    }
+    if ((_n % 200u) == 1u && getenv("XWA_WHERE")) {
+        extern unsigned g_frameblk, g_loaderblk, g_spawnfn[8];
+        fprintf(stderr, "[WHERE] frameFn=%u lastblk=0x%06X loader=0x%06X | dispatch 4EBEE0=%u 4F91C0=%u DPhandler 4F8A40=%u simtick=%u\n",
+                g_spawnfn[1], g_frameblk, g_loaderblk,
+                g_spawnfn[0], g_spawnfn[2], g_spawnfn[3], g_spawnfn[4]);
+        fflush(stderr);
+    }
+    if ((_n % 500u) < 2u && getenv("XWA_FLOOP")) {
+        extern unsigned g_fbring[16], g_fbidx; unsigned q;
+        fprintf(stderr, "[FLOOP] last blocks:");
+        for (q = 0; q < 16u; q++) fprintf(stderr, " %06X", g_fbring[(g_fbidx + q) & 15u]);
+        fprintf(stderr, "\n"); fflush(stderr);
     }
     if ((_n % 500u) < 2u) {          /* is the world actually growing? */
         uint32_t tbl = MEM32(0x7B33C4), cnt = MEM32(0x917E64), i, live = 0;

@@ -203,6 +203,19 @@ are active at mission start; the recompiled game's forced launch has region-1 gr
 lands in region 1 — where the craft slice is *empty* (`base == count`), leaving the create loop nowhere
 to put an arriving craft.
 
+**What actually drives the simulation: DirectPlay messages.** The sim update `sub_004F6510` has only
+two callers — the DirectPlay message handler and the outer frame function — and measurement in flight
+shows *neither runs*: the whole dispatch path (`sub_004EBEE0`, `sub_004F91C0`, `sub_004F8A40`) sits at
+zero calls. XWA drives even single-player through a local DirectPlay session, so the per-frame tick
+arrives as a message, and the recompiled game's DirectPlay mock never delivers one. That is the
+structural reason mission state never advances — and it lives in this project's own mock rather than
+in the engine, which makes it the tractable next target.
+
+The real flight loop is inside `sub_00457C20`: a frame-timer accumulator that waits for eight ticks,
+then calls the per-frame update `sub_004598E0`, then stamps the sim's last-simulated time to the frame
+timer and repeats. That stamp is why ticks injected from outside can never win — the loop marks the
+sim as current every frame regardless of whether it ran.
+
 The activation loop itself is `sub_00417580`: it walks the flight groups and, for each one passing a
 runtime "already handled" test, sets the partition to *that group's* region and calls `sub_004195E0`
 to activate it — so the partition flips back and forth as it walks and ends wherever the last group
