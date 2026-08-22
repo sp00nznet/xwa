@@ -203,6 +203,22 @@ are active at mission start; the recompiled game's forced launch has region-1 gr
 lands in region 1 — where the craft slice is *empty* (`base == count`), leaving the create loop nowhere
 to put an arriving craft.
 
+The activation loop itself is `sub_00417580`: it walks the flight groups and, for each one passing a
+runtime "already handled" test, sets the partition to *that group's* region and calls `sub_004195E0`
+to activate it — so the partition flips back and forth as it walks and ends wherever the last group
+left it. That makes the failure exact: region 0's craft slice is `[0,252)` and region 1's is
+`[380,632)`; the mission's real craft sit at indices 0–6 in region 0, but the forced launch ends in
+region 1 and has filled `[380,399]` with fabricated entries. The create loop iterates region 1's
+slice, finds junk, creates nothing, and never visits the real craft.
+
+The partition cannot simply be swapped at a choke point, and that is measured rather than assumed:
+forcing it at the create loop's entry reads past the object table (the loop's bounds then disagree
+with the table allocated for the other layout), and forcing every call faults through a stub scene
+pointer instead. It has to be consistent from world-build onward. The single change that would fix
+this *and* the missing sim tick is getting `sub_0050FCB0`'s per-frame body to run — it sets the
+partition from the player's own region and calls the sim update, and the forced launch reaches
+neither.
+
 `tools/peek_partition.py` reads these globals out of the running retail game (read-only, no debugger,
 so it does not trip the SteamStub anti-debug). Retail in flight measures `partition 0, base 0,
 count 252, walk [252,380)`, with every live object inside `[0,252)`. Re-applying the player's region in
