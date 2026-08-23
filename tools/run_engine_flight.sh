@@ -37,6 +37,14 @@ while [ "$i" -lt "$TRIES" ]; do i=$((i+1))
     timeout 200 ../recomp/build/Release/xwa_recomp.exe \
       ../recomp/config/xwingalliance_decrypted.exe > "$LOG" 2>&1
   n=$(grep -ac NATIVEDRAW "$LOG")
+  # ENGINE_UNTIL=<pattern>: keep retrying until the log contains it. Flight entry is flaky and a
+  # run can reach the renderer while worldinit stalled earlier, so "geometry appeared" is not
+  # evidence that the thing under test ran. Name the marker you actually need.
+  if [ -n "$ENGINE_UNTIL" ]; then
+    if grep -aq "$ENGINE_UNTIL" "$LOG"; then echo "try$i: matched '$ENGINE_UNTIL'"; break; fi
+    echo "try$i: NATIVEDRAW=$n, no '$ENGINE_UNTIL' yet"
+    continue
+  fi
   echo "try$i: NATIVEDRAW=$n  rt_flight.bmp=$([ -f rt_flight.bmp ] && echo yes || echo no)"
   [ "$n" != "0" ] && [ -f rt_flight.bmp ] && break
 done

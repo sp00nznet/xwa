@@ -4087,6 +4087,12 @@ void xwa_wi(unsigned blk)
     fflush(stderr);
 }
 
+/* Block ring for sub_004F9320, the engine's "put the player in a craft" routine. It is 3400 lines
+ * of generated C with 529 blocks; a linear trace drowns, but the last 24 blocks before it returns
+ * name the exit path exactly. Same trick that found the DirectPlay wait loop. */
+unsigned g_pcring[24], g_pcridx;
+void xwa_pcblk(unsigned blk) { g_pcring[g_pcridx] = blk; g_pcridx = (g_pcridx + 1u) % 24u; }
+
 /* XWA_MILE: ordered milestone trace. Which of worldinit's steps runs before which is the whole
  * question when a record is still empty at a use site -- a per-site counter cannot answer it, and
  * a full call trace is far too big. One line per stamp, in execution order, is enough. */

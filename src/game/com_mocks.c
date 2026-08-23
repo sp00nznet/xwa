@@ -2777,10 +2777,14 @@ void com_mocks_init(void) {
             register_bridge(markers[i], funcs[i]);
     }
 
-    /* ---- IDirect3DViewport (16 methods) ---- */
+    /* ---- IDirect3DViewport (21 methods: the DX3 16 plus the Viewport2/3 tail) ---- */
     {
-        uint32_t markers[16];
-        recomp_func_t funcs[16];
+        /* These were [16] while every loop below runs to 21 -- five entries written past the end
+         * of both stack arrays on every startup. Slots 16..20 were then read back from whatever
+         * the smash landed on, so Clear2 (slot 20) resolved to garbage and raised an unresolved
+         * ICALL mid-render, at a different point on every run. */
+        uint32_t markers[21];
+        recomp_func_t funcs[21];
         for (int i = 0; i < 21; i++) markers[i] = MK_D3DVP + i;
 
         funcs[0]  = com_stub_3arg;    /* QueryInterface */
