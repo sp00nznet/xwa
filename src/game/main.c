@@ -1632,6 +1632,16 @@ void xwa_fblk(unsigned blk) {
     g_fbidx++;
 }
 
+/* Ring of distinct blocks inside the DirectPlay session create, so its polling wait shows up as a
+ * short repeating cycle instead of a single "last block" reading. */
+unsigned g_dpring[16];
+unsigned g_dpridx;
+void xwa_dpblk(unsigned blk) {
+    if (g_dpridx && g_dpring[(g_dpridx - 1u) & 15u] == blk) return;
+    g_dpring[g_dpridx & 15u] = blk;
+    g_dpridx++;
+}
+
 void xwa_drive_simtick(void) {
     extern void sub_004F6510(void);
     static int _in = 0;
