@@ -908,6 +908,12 @@ static void d3d11_flush_native(void) {
     }
     if (!g_d3d11_initialized || count < 3) return;
     if (count > MAX_VERTICES) count = MAX_VERTICES;
+    /* Count native geometry as 3D for this frame. g_3d_since_present was only ever bumped by
+     * d3d11_execute, the engine's execute-buffer path; when the picture comes from the native
+     * renderer instead, every frame looked empty to d3d11_present, which then ran
+     * draw_surface_quad() -- and that CLEARS the target and paints the 2D DirectDraw surface
+     * over the scene. The ships were drawn and immediately erased, every frame. */
+    g_3d_since_present += (uint32_t)count;
     {
         D3D11_MAPPED_SUBRESOURCE mapped;
         if (FAILED(ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_vb, 0,
@@ -1031,9 +1037,18 @@ void d3d11_present(void) {
     if (getenv("XWA_RTDUMP")) {
         static int _done = 0; static unsigned _drawn = 0;
         if (!_done) {
-            if (g_draw_calls > 0) _drawn++;
+            /* Count only frames that carry the geometry we are actually trying to photograph.
+             * "any draw call" fired on an engine 2D frame long before the native renderer had
+             * submitted anything, so the dump was the cleared target with the HUD text on it. */
+            {   static int want_native = -1;
+                if (want_native < 0) want_native = getenv("XWA_NATIVEDRAW") ? 1 : 0;
+                if (want_native ? (g_native_keep_n >= 3) : (g_3d_since_present > 0)) _drawn++; }
             unsigned _want = (unsigned)atoi(getenv("XWA_RTDUMP")); if (!_want) _want = 30;
-            if (_drawn >= _want) { _done = 1; d3d11_capture_bmp("rt_flight.bmp"); }
+            if (_drawn >= _want) { _done = 1;
+                fprintf(stderr, "[RTDUMP] capturing: 3d_verts=%u native_keep=%d draw_calls=%lu\n",
+                        g_3d_since_present, g_native_keep_n, (unsigned long)g_draw_calls);
+                fflush(stderr);
+                d3d11_capture_bmp("rt_flight.bmp"); }
         }
     }
 

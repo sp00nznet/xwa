@@ -91,6 +91,10 @@ case " $WANT " in *" 5 "*)
   grep -aq '0x51066D loader' "$LOGS/t5.log" && ok "world build reaches the loader at 0x51066D"       || bad "world build stopped before the loader"
   m=$(grep -ac 'meshes=' "$LOGS/t5.log")
   [ "$m" -gt 0 ] 2>/dev/null && ok "render list is non-empty" || bad "render list empty"
+  # The captured frame must contain the native geometry, not just the cleared target with the 2D
+  # HUD text on it -- that is what "no visible frame" looked like for a long time.
+  grep -a 'RTDUMP] capturing' "$LOGS/t5.log" | grep -qv 'native_keep=0' \
+      && ok "captured frame carries native geometry" || bad "captured frame has no native geometry"
 esac
 
 echo

@@ -299,6 +299,55 @@ static void nview_build(void)
 {
     double fx, fy, fz, rxv, ryv, l;
     ncam_read();
+    /* Frame the scene when the camera record is not usable. On the engine's own mission-load path
+     * the record at playerslot*0xBCF+0x8BA028 is still fill garbage (values around 0x80808080)
+     * until the player craft is created, and rendering from it puts every vertex off screen.
+     * A camera position that is not a plausible world coordinate can never be right, so fall back
+     * to the bounding sphere of the meshes that ARE sane and look at them from outside it.
+     * XWA_NOCAMFIT keeps the raw record, for when the record itself is what is being debugged. */
+    if (g_nmesh_n > 0 && !getenv("XWA_NOCAMFIT")) {
+        const double SANE = 2.0e7;
+        /* Also do this for the explicit spectator view: a valid camera record still points where
+         * the (not yet created) player craft would be, which on this path is nowhere near the
+         * mission's craft. XWA_NLOOKAT means "show me the ships", so stand next to them. */
+        if (getenv("XWA_NLOOKAT")
+            || fabs((double)g_np[3]) > SANE || fabs((double)g_np[4]) > SANE || fabs((double)g_np[5]) > SANE) {
+            double cx = 0, cy = 0, cz = 0, r = 0;
+            int q, n = 0;
+            for (q = 0; q < g_nmesh_n; q++) {
+                if (fabs((double)g_nmesh[q].p[0]) > SANE ||
+                    fabs((double)g_nmesh[q].p[1]) > SANE ||
+                    fabs((double)g_nmesh[q].p[2]) > SANE) continue;
+                cx += g_nmesh[q].p[0]; cy += g_nmesh[q].p[1]; cz += g_nmesh[q].p[2]; n++;
+            }
+            if (n) {
+                /* Stand next to one craft, not outside the whole formation. Backing off by the
+                 * bounding radius put the eye 300k units away, where a 200-unit fighter is well
+                 * under a pixel -- the frame came back as stars and nothing else. Pick the mesh
+                 * nearest the centroid, which is a real cluster member rather than an outlier,
+                 * and sit a fixed distance off it. XWA_NCAMDIST=<units> sets that distance. */
+                int pick = -1; double bd = 1e30;
+                cx /= n; cy /= n; cz /= n;
+                for (q = 0; q < g_nmesh_n; q++) {
+                    double dx = g_nmesh[q].p[0] - cx, dy = g_nmesh[q].p[1] - cy, dz = g_nmesh[q].p[2] - cz;
+                    double d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 > SANE * SANE) continue;
+                    if (d2 < bd) { bd = d2; pick = q; }
+                }
+                if (pick >= 0) { cx = g_nmesh[pick].p[0]; cy = g_nmesh[pick].p[1]; cz = g_nmesh[pick].p[2]; }
+                r = getenv("XWA_NCAMDIST") ? atof(getenv("XWA_NCAMDIST")) : 1200.0;
+                if (r < 50.0) r = 1200.0;
+                g_np[3] = (int)cx;
+                g_np[4] = (int)(cy - r);
+                g_np[5] = (int)(cz + r * 0.25);
+                g_np[6] = 1;
+                g_camrot[0] = g_camrot[1] = g_camrot[2] = 0;
+                { static int lg; if (lg < 3) { lg++;
+                    fprintf(stderr, "[NCAMFIT] standing off %d sane meshes at (%d,%d,%d), dist=%.0f\n",
+                            n, (int)cx, (int)cy, (int)cz, r); fflush(stderr); } }
+            }
+        }
+    }
     vex = g_np[3]; vey = g_np[4]; vez = g_np[5];
     if (getenv("XWA_NLOOKAT") && g_nmesh_n > 0) {
         /* Spectator view: aim at the centroid of everything cached, so the whole formation is in
@@ -858,8 +907,29 @@ void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch
         if (nroot >= 1u && nroot <= 64u && xwa_readable(img + 0x0Eu, nroot * 4u)) {
             pos[0] = px; pos[1] = py; pos[2] = pz;
             rot[0] = yaw; rot[1] = pitch; rot[2] = roll;
-            {   double dx = (double)(px - g_np[3]), dy = (double)(py - g_np[4]), dz = (double)(pz - g_np[5]);
-                if (dx*dx + dy*dy + dz*dz > 4.0e10) return;   /* junk flight-group coordinates */
+            {   /* Cull by distance from the camera. The default 200k units only rejects outright
+                 * junk coordinates; a real mission also carries craft tens of thousands of units
+                 * away, and letting them into the scene drags the XWA_NLOOKAT centroid off the
+                 * near action so nothing lands on screen. XWA_NMAXDIST=<units> tightens it. */
+                static double maxd2 = -1.0;
+                double dx = (double)(px - g_np[3]), dy = (double)(py - g_np[4]), dz = (double)(pz - g_np[5]);
+                const double SANE = 2.0e7;
+                if (maxd2 < 0.0) {
+                    const char* e = getenv("XWA_NMAXDIST");
+                    double d = e ? atof(e) : 200000.0;
+                    if (d < 1.0) d = 200000.0;
+                    maxd2 = d * d;
+                }
+                /* Culling against the camera is only meaningful when the camera is somewhere real.
+                 * Before the player craft exists the camera record is fill garbage, and measuring
+                 * from it threw away every genuine craft while keeping the junk slots nearest the
+                 * garbage value -- the exact opposite of what the cull is for. With no usable
+                 * camera, keep whatever has plausible coordinates and let nview_build frame it. */
+                if (fabs((double)g_np[3]) > SANE || fabs((double)g_np[4]) > SANE
+                                                 || fabs((double)g_np[5]) > SANE) {
+                    if (fabs((double)px) > SANE || fabs((double)py) > SANE
+                                                || fabs((double)pz) > SANE) return;
+                } else if (dx*dx + dy*dy + dz*dz > maxd2) return;
             }
             for (ri = 0; ri < nroot; ri++) {
                 uint32_t r = MEM32(img + 0x0Eu + ri * 4u);
@@ -3989,6 +4059,31 @@ void xwa_dump_surface(unsigned idx, const char* name)
     }
     fclose(f);
     fprintf(stderr, "[UISURF] wrote %s from surface #%u (%ux%u)\n", name, idx, w, h);
+    fflush(stderr);
+}
+
+/* XWA_WI=1: block trace for sub_0050FCB0 -- worldinit plus the flight frame body, 312 stamps.
+ * These used to print unconditionally and with a fixed 100k cap, which a single busy-wait loop
+ * early in worldinit (0x510247/0x510260/0x51026E) exhausts before the frame body is ever reached.
+ *   XWA_WIFROM=0xADDR  only stamp blocks at or above this address (skip the init prologue)
+ *   XWA_WIMAX=N        line cap (default 100000)
+ * Consecutive repeats of the same block are collapsed and reported as a count, so a spin costs
+ * one line instead of the whole budget. */
+void xwa_wi(unsigned blk)
+{
+    static int on = -1;
+    static unsigned from, cap, n, last, runlen;
+    if (on < 0) {
+        on   = getenv("XWA_WI") ? 1 : 0;
+        from = getenv("XWA_WIFROM") ? (unsigned)strtoul(getenv("XWA_WIFROM"), NULL, 0) : 0u;
+        cap  = getenv("XWA_WIMAX")  ? (unsigned)strtoul(getenv("XWA_WIMAX"),  NULL, 0) : 100000u;
+    }
+    if (!on || blk < from) return;
+    if (blk == last) { runlen++; return; }
+    if (runlen > 1u) fprintf(stderr, "[WI] %06X x%u\n", last, runlen);
+    last = blk; runlen = 1;
+    if (n++ >= cap) return;
+    fprintf(stderr, "[WI] %06X\n", blk);
     fflush(stderr);
 }
 
