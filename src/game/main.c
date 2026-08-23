@@ -2048,6 +2048,24 @@ void xwa_ui_driver(void) {
     /* XWA_UIDRAG="x1,y1,x2,y2" on XWA_UICLICKSCR: press at the source, travel to the target with
      * the button held, release there. Assignment lists in these menus are drag-and-drop, which a
      * click event cannot express. XWA_UIDRAGAT sets the frame it starts on. */
+    /* XWA_BARRSEL=<n>: the barracks screen dispatches on 0x78397C through a jump table
+     * (index = value-1): 1 = concourse, 2 = screen 0x571910, 3 = Combat Simulator,
+     * 4 = screen 0x5775E0 (which is one of the routines that pushes the LOADING screen).
+     * The demo driver navigates by forcing this rather than by clicking, which is why clicks on
+     * "Play Mission" do nothing -- these sprite rooms take a different input path entirely. */
+    if (getenv("XWA_BARRSEL") && cb == 0x0055FF30) {
+        static int logged = 0;
+        uint32_t v = (uint32_t)strtoul(getenv("XWA_BARRSEL"), NULL, 0);
+        /* The screen reads this from its FIRST call, and only consults the table once the
+         * transition phase reads complete -- 0x9F4B48/0x9F4B4C = 3, exactly as the driver's own
+         * barracks navigation does. Setting the selector alone does nothing. */
+        MEM32(0x78397C) = v;
+        MEM32(0x9F4B48) = 3;
+        MEM32(0x9F4B4C) = 3;
+        if (logged < 2) { logged++;
+            fprintf(stderr, "[BARRSEL] forcing 0x78397C=%u with phase 9F4B48/4C=3 (fip=%d)\n", v, fip);
+            fflush(stderr); }
+    }
     if (getenv("XWA_UIDRAG") && getenv("XWA_UICLICKSCR")) {
         uint32_t scr = (uint32_t)strtoul(getenv("XWA_UICLICKSCR"), NULL, 16);
         int at = getenv("XWA_UIDRAGAT") ? atoi(getenv("XWA_UIDRAGAT")) : 40;
