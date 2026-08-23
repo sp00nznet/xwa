@@ -3992,6 +3992,19 @@ void xwa_dump_surface(unsigned idx, const char* name)
     fflush(stderr);
 }
 
+/* XWA_MILE: ordered milestone trace. Which of worldinit's steps runs before which is the whole
+ * question when a record is still empty at a use site -- a per-site counter cannot answer it, and
+ * a full call trace is far too big. One line per stamp, in execution order, is enough. */
+void xwa_mile(const char* tag)
+{
+    static unsigned n;
+    static int on = -1;               /* stamped at function entry in hot paths -- resolve once */
+    if (on < 0) on = getenv("XWA_MILE") ? 1 : 0;
+    if (!on || ++n > 400u) return;
+    fprintf(stderr, "[MILE] %3u %s\n", n, tag);
+    fflush(stderr);
+}
+
 static void dump_trace_atexit(void) {
     /* Write trace to file using raw Win32 API (reliable even in exit context) */
     HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_atexit.log",
