@@ -229,6 +229,9 @@ unsigned g_bpath;
 int g_np[8];
 unsigned g_spawnfn[8];
 unsigned g_frameblk;
+void xwa_dump_surface(unsigned idx, const char* name);   /* defined below, used by the UI driver */
+int g_ui_mx = -1, g_ui_my = -1;
+int g_ui_click = 0;   /* UI driver cursor override, applied inside the game's own mouse update */
 int g_in_flight;
 int g_ui_snap_req;     /* set by the UI driver, serviced by the present path */       /* set once the flight object walk has run */
 unsigned g_loaderblk;
@@ -2018,8 +2021,10 @@ void xwa_ui_driver(void) {
             if (y < y1) {
                 MEM32(0x9F65ED) = (uint32_t)(x - 5);
                 MEM32(0x9F65F1) = (uint32_t)(y - 5);
+                g_ui_mx = x - 5; g_ui_my = y - 5;   /* survive the game's own cursor update */
                 if ((sweep_i % hold) == 0) {
                     MEM8(0x9F6884) = 1;
+                    g_ui_click = 1;                    /* survive the game's own click-flag clear */
                     sweep_lx = x; sweep_ly = y;
                     if ((idx % 40) == 0) {
                         fprintf(stderr, "[SWEEP] point %d -> (%d,%d)\n", idx, x, y);
@@ -2036,8 +2041,62 @@ void xwa_ui_driver(void) {
         }
     }
     static int fip = 0;            /* frames since the active screen last changed */
+    /* XWA_UICLICKS="x,y;x,y;..." on screen XWA_UICLICKSCR: click a scripted sequence of points,
+     * XWA_UICLICKGAP frames apart. Menus need several steps (assign the player to a flight group,
+     * then launch), which a single click cannot express. */
+    if (getenv("XWA_UICLICKS") && getenv("XWA_UICLICKSCR")) {
+        static int seq_i = 0;
+        uint32_t scr = (uint32_t)strtoul(getenv("XWA_UICLICKSCR"), NULL, 16);
+        int gap = getenv("XWA_UICLICKGAP") ? atoi(getenv("XWA_UICLICKGAP")) : 25;
+        if (gap < 2) gap = 2;
+        { static int dbg; if (dbg < 6) { dbg++;
+            fprintf(stderr, "[UICLICK] driver sees cb=0x%08X (want 0x%08X) fip=%d\n", cb, scr, fip);
+            fflush(stderr); } }
+        if (cb == scr && fip > 10 && ((fip - 10) % gap) == 0) {
+            const char* q = getenv("XWA_UICLICKS");
+            int n = 0, x = -1, y = -1;
+            while (*q) {                       /* walk to the seq_i'th "x,y" pair */
+                int vx = atoi(q);
+                const char* c = strchr(q, ',');
+                if (!c) break;
+                { int vy = atoi(c + 1);
+                  if (n == seq_i) { x = vx; y = vy; break; }
+                }
+                n++;
+                q = strchr(c, ';');
+                if (!q) break;
+                q++;
+            }
+            if (x >= 0 && y >= 0) {
+                g_ui_mx = x - 5; g_ui_my = y - 5;
+                MEM32(0x9F65ED) = (uint32_t)(x - 5);
+                MEM32(0x9F65F1) = (uint32_t)(y - 5);
+                MEM8(0x9F6884) = 1; g_ui_click = 1;
+                fprintf(stderr, "[UICLICK] step %d -> (%d,%d) at fip=%d\n", seq_i, x, y, fip);
+                fflush(stderr);
+                seq_i++;
+            }
+        }
+    }
     /* XWA_SNAPUI=N: dump the composited 2D screen N frames after the active screen last changed,
      * so a menu can actually be looked at (which control launches the mission, and where it is). */
+    /* XWA_UISURF=N: dump every registered surface N frames after the active screen last changed,
+     * so a menu can be inspected. Menus composite into DirectDraw surfaces, not the back buffer. */
+    if (getenv("XWA_UISURF")) {
+        static int done_at = -1;
+        int want = atoi(getenv("XWA_UISURF")); if (want <= 0) want = 60;
+        if (fip == want && done_at != (int)cb) {
+            unsigned i;
+            done_at = (int)cb;
+            fprintf(stderr, "[UISURF] screen 0x%08X at fip=%d: %u registered surfaces\n",
+                    cb, fip, g_surfreg_n);
+            for (i = 0; i < g_surfreg_n && i < 12u; i++) {
+                char nm[64];
+                sprintf(nm, "ui_%08X_surf%u.bmp", cb, i);
+                xwa_dump_surface(i, nm);
+            }
+        }
+    }
     if (getenv("XWA_SNAPUI")) {
         static int _snapped_for = -1;
         int want = atoi(getenv("XWA_SNAPUI")); if (want <= 0) want = 40;
@@ -3811,6 +3870,56 @@ static void cleanup_memory(void) {
  * ============================================================ */
 
 /* Dump ICALL trace on exit */
+/* Write one registered DirectDraw surface (16bpp RGB565) out as a 24bpp BMP.
+ *
+ * The surface scan/dump used to live only in the atexit handler, so it never fired for a menu: a
+ * timed-out run is killed and atexit never runs. Menus also never reach the D3D11 back buffer, so
+ * capturing there yields black -- this is the only way to actually LOOK at a menu screen. */
+void xwa_dump_surface(unsigned idx, const char* name)
+{
+    const uint32_t* e;
+    uint32_t w, h, pitch, rowb, img;
+    const uint8_t* base;
+    FILE* f;
+    if (idx >= g_surfreg_n) return;
+    e = (const uint32_t*)(uintptr_t)g_surfreg[idx][0];
+    if (!e || IsBadReadPtr(e, 20) || !e[0] || !e[1] || !e[2]) return;
+    w = e[1]; h = e[2]; pitch = e[4] ? e[4] : w * 2u;
+    if (!w || !h || w > 4096u || h > 4096u) return;
+    base = (const uint8_t*)(uintptr_t)e[0];
+    if (IsBadReadPtr(base, (size_t)pitch * h)) return;
+    rowb = ((w * 3u) + 3u) & ~3u;
+    img  = rowb * h;
+    f = fopen(name, "wb");
+    if (!f) return;
+    {   uint8_t hd[54]; uint32_t off = 54, fsz = 54 + img, v = 40;
+        uint16_t pl = 1, bc = 24;
+        memset(hd, 0, sizeof hd); hd[0] = 'B'; hd[1] = 'M';
+        memcpy(hd+2,&fsz,4); memcpy(hd+10,&off,4); memcpy(hd+14,&v,4);
+        memcpy(hd+18,&w,4);  memcpy(hd+22,&h,4);
+        memcpy(hd+26,&pl,2); memcpy(hd+28,&bc,2); memcpy(hd+34,&img,4);
+        fwrite(hd,1,54,f);
+    }
+    {   uint8_t* row = (uint8_t*)malloc(rowb);
+        uint32_t y, x;
+        for (y = 0; y < h && row; y++) {
+            const uint16_t* sp = (const uint16_t*)(base + (size_t)(h-1-y) * pitch);
+            memset(row, 0, rowb);
+            for (x = 0; x < w; x++) {
+                uint16_t c = sp[x];                      /* RGB565 */
+                row[x*3+0] = (uint8_t)(( c        & 0x1F) << 3);
+                row[x*3+1] = (uint8_t)(((c >> 5)  & 0x3F) << 2);
+                row[x*3+2] = (uint8_t)(((c >> 11) & 0x1F) << 3);
+            }
+            fwrite(row, 1, rowb, f);
+        }
+        free(row);
+    }
+    fclose(f);
+    fprintf(stderr, "[UISURF] wrote %s from surface #%u (%ux%u)\n", name, idx, w, h);
+    fflush(stderr);
+}
+
 static void dump_trace_atexit(void) {
     /* Write trace to file using raw Win32 API (reliable even in exit context) */
     HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_atexit.log",
