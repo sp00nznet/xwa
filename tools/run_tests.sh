@@ -9,6 +9,7 @@
 #   2. flight (hacks)      -- the force-launch config still reaches flight and draws craft.
 #   3. flight (engine path) -- the game's own barracks -> loading -> flight-init route still works.
 #   4. DirectPlay session   -- XWA_DPSP takes the host path so world-build is not blocked for 60s.
+#   5. engine path + render -- the game's own mission reaches flight and submits its own geometry.
 #
 # Usage:  tools/run_tests.sh [1|2|3 ...]      (default: all)
 #
@@ -21,7 +22,7 @@ GAME="$ROOT/../Star Wars X-Wing Alliance"
 EXE="$ROOT/build/Release/xwa_recomp.exe"
 DEC="$ROOT/config/xwingalliance_decrypted.exe"
 LOGS="${TMPDIR:-/tmp}"
-WANT="${*:-1 2 3 4}"
+WANT="${*:-1 2 3 4 5}"
 pass=0; fail=0
 
 taskkill //F //IM xwa_recomp.exe >/dev/null 2>&1
@@ -77,6 +78,19 @@ case " $WANT " in *" 4 "*)
   grep -aq 'sub_0049AFC0 returned 1' "$LOGS/t4.log" && ok "session create succeeds"       || bad "session create still fails (peer wait / timeout)"
   grep -aq '49B0BC' "$LOGS/t4.log" && ok "took the host path, no 60s peer wait"       || bad "did not take the host path"
   grep -aq 'WORLDBUILD] CALLED' "$LOGS/t4.log" && ok "world build runs past the session gate"       || bad "world build never ran"
+esac
+
+# ---- 5. the engine's own mission all the way to submitted geometry ------------------------------
+# Same route as [3], but carried through world build into flight with the renderer on. This is the
+# one that exercises real mission content: the .tie's own flight groups, not fabricated craft.
+case " $WANT " in *" 5 "*)
+  echo "[5] engine's own mission -> flight with geometry"
+  sh "$ROOT/tools/run_engine_flight.sh" "$LOGS/t5.log" XWA_MILE=1 >/dev/null 2>&1
+  nd=$(grep -ac NATIVEDRAW "$LOGS/t5.log")
+  [ "$nd" -gt 0 ] 2>/dev/null && ok "mission geometry submitted ($nd frames)" || bad "no geometry submitted"
+  grep -aq '0x51066D loader' "$LOGS/t5.log" && ok "world build reaches the loader at 0x51066D"       || bad "world build stopped before the loader"
+  m=$(grep -ac 'meshes=' "$LOGS/t5.log")
+  [ "$m" -gt 0 ] 2>/dev/null && ok "render list is non-empty" || bad "render list empty"
 esac
 
 echo
