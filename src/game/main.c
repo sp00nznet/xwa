@@ -237,6 +237,7 @@ int g_in_flight;
 int g_ui_snap_req;     /* set by the UI driver, serviced by the present path */       /* set once the flight object walk has run */
 unsigned g_loaderblk;
 unsigned g_simblk;
+unsigned g_dpblk, g_dpblkprev;   /* last blocks inside the DirectPlay session create */
 unsigned g_crloopblk;
 unsigned g_crloopprev;
 unsigned g_partsite;   /* call site that last asked for a partition */  /* block reached just before the create loop exits */  /* last block inside the craft-create loop */
