@@ -231,7 +231,8 @@ unsigned g_spawnfn[8];
 unsigned g_frameblk;
 void xwa_dump_surface(unsigned idx, const char* name);   /* defined below, used by the UI driver */
 int g_ui_mx = -1, g_ui_my = -1;
-int g_ui_click = 0;   /* UI driver cursor override, applied inside the game's own mouse update */
+int g_ui_click = 0;
+int g_ui_down = 0;     /* button held, for drag-and-drop menus */   /* UI driver cursor override, applied inside the game's own mouse update */
 int g_in_flight;
 int g_ui_snap_req;     /* set by the UI driver, serviced by the present path */       /* set once the flight object walk has run */
 unsigned g_loaderblk;
@@ -2024,7 +2025,7 @@ void xwa_ui_driver(void) {
                 g_ui_mx = x - 5; g_ui_my = y - 5;   /* survive the game's own cursor update */
                 if ((sweep_i % hold) == 0) {
                     MEM8(0x9F6884) = 1;
-                    g_ui_click = 1;                    /* survive the game's own click-flag clear */
+                    g_ui_click = 3;                    /* survive the game's own click-flag clear */
                     sweep_lx = x; sweep_ly = y;
                     if ((idx % 40) == 0) {
                         fprintf(stderr, "[SWEEP] point %d -> (%d,%d)\n", idx, x, y);
@@ -2044,6 +2045,42 @@ void xwa_ui_driver(void) {
     /* XWA_UICLICKS="x,y;x,y;..." on screen XWA_UICLICKSCR: click a scripted sequence of points,
      * XWA_UICLICKGAP frames apart. Menus need several steps (assign the player to a flight group,
      * then launch), which a single click cannot express. */
+    /* XWA_UIDRAG="x1,y1,x2,y2" on XWA_UICLICKSCR: press at the source, travel to the target with
+     * the button held, release there. Assignment lists in these menus are drag-and-drop, which a
+     * click event cannot express. XWA_UIDRAGAT sets the frame it starts on. */
+    if (getenv("XWA_UIDRAG") && getenv("XWA_UICLICKSCR")) {
+        uint32_t scr = (uint32_t)strtoul(getenv("XWA_UICLICKSCR"), NULL, 16);
+        int at = getenv("XWA_UIDRAGAT") ? atoi(getenv("XWA_UIDRAGAT")) : 40;
+        if (cb == scr && fip >= at && fip <= at + 24) {
+            int x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+            const char* q = getenv("XWA_UIDRAG");
+            const char* c;
+            x1 = atoi(q);
+            c = strchr(q, ','); if (!c) c = q; else c++;
+            y1 = atoi(c);
+            c = strchr(c, ','); if (c) c++; else c = q;
+            x2 = atoi(c);
+            c = strchr(c, ','); if (c) c++; else c = q;
+            y2 = atoi(c);
+            {   int t = fip - at;                    /* 0..24 */
+                int x, y;
+                if (t <= 2)        { x = x1; y = y1; g_ui_down = 1; }
+                else if (t <= 16)  { x = x1 + (x2 - x1) * (t - 2) / 14;
+                                     y = y1 + (y2 - y1) * (t - 2) / 14; g_ui_down = 1; }
+                else if (t <= 20)  { x = x2; y = y2; g_ui_down = 1; }
+                else               { x = x2; y = y2; g_ui_down = 0;
+                                     if (t == 21) { MEM8(0x9F6884) = 1; g_ui_click = 3; } }
+                g_ui_mx = x - 5; g_ui_my = y - 5;
+                MEM32(0x9F65ED) = (uint32_t)(x - 5);
+                MEM32(0x9F65F1) = (uint32_t)(y - 5);
+                if (t == 0 || t == 21) {
+                    fprintf(stderr, "[UIDRAG] %s at (%d,%d) fip=%d\n",
+                            t ? "release" : "press", x, y, fip);
+                    fflush(stderr);
+                }
+            }
+        }
+    }
     if (getenv("XWA_UICLICKS") && getenv("XWA_UICLICKSCR")) {
         static int seq_i = 0;
         uint32_t scr = (uint32_t)strtoul(getenv("XWA_UICLICKSCR"), NULL, 16);
@@ -2071,7 +2108,7 @@ void xwa_ui_driver(void) {
                 g_ui_mx = x - 5; g_ui_my = y - 5;
                 MEM32(0x9F65ED) = (uint32_t)(x - 5);
                 MEM32(0x9F65F1) = (uint32_t)(y - 5);
-                MEM8(0x9F6884) = 1; g_ui_click = 1;
+                MEM8(0x9F6884) = 1; g_ui_click = 3;
                 fprintf(stderr, "[UICLICK] step %d -> (%d,%d) at fip=%d\n", seq_i, x, y, fip);
                 fflush(stderr);
                 seq_i++;
@@ -2083,16 +2120,22 @@ void xwa_ui_driver(void) {
     /* XWA_UISURF=N: dump every registered surface N frames after the active screen last changed,
      * so a menu can be inspected. Menus composite into DirectDraw surfaces, not the back buffer. */
     if (getenv("XWA_UISURF")) {
-        static int done_at = -1;
-        int want = atoi(getenv("XWA_UISURF")); if (want <= 0) want = 60;
-        if (fip == want && done_at != (int)cb) {
+        /* XWA_UISURF="60,120,180": dump at each listed frame-after-screen-change, so a multi-step
+         * menu interaction can be watched step by step. Surface #2 is the composited screen. */
+        const char* q = getenv("XWA_UISURF");
+        int hit = 0;
+        while (*q) {
+            if (atoi(q) == fip) { hit = 1; break; }
+            q = strchr(q, ',');
+            if (!q) break;
+            q++;
+        }
+        if (hit) {
             unsigned i;
-            done_at = (int)cb;
-            fprintf(stderr, "[UISURF] screen 0x%08X at fip=%d: %u registered surfaces\n",
-                    cb, fip, g_surfreg_n);
+            fprintf(stderr, "[UISURF] screen 0x%08X at fip=%d: %u surfaces\n", cb, fip, g_surfreg_n);
             for (i = 0; i < g_surfreg_n && i < 12u; i++) {
-                char nm[64];
-                sprintf(nm, "ui_%08X_surf%u.bmp", cb, i);
+                char nm[80];
+                sprintf(nm, "ui_%08X_f%03d_surf%u.bmp", cb, fip, i);
                 xwa_dump_surface(i, nm);
             }
         }
