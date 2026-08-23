@@ -2386,7 +2386,7 @@ void xwa_ui_driver(void) {
                                                         * concourse<->barracks ping-pong vs the barracks routing). */
         MEM32(0x9F65ED) = 0;                           /* park mouse off all hot-spots */
         MEM32(0x9F65F1) = 0;
-    } else if (cb == 0x005397D0 && train) {            /* concourse -> Training door (sprite origin 536,174) */
+    } else if (cb == 0x005397D0 && train && !getenv("XWA_NONAV")) {            /* concourse -> Training door (sprite origin 536,174) */
         /* Clear the barracks transition gates so the concourse SETTLES (otherwise 9F4B48/9F4B4C==3
          * keeps firing a transition back to the barracks, oscillating concourse<->barracks and the
          * door never gets a stable frame to be clicked). */
@@ -2401,7 +2401,7 @@ void xwa_ui_driver(void) {
             fprintf(stderr, "[FLYDEMO] click Training door (561,210) at fip=%d\n", fip);
             fflush(stderr);
         }
-    } else if (cb == 0x005397D0) {                      /* concourse -> Combat Simulator door (35,174) */
+    } else if (cb == 0x005397D0 && !getenv("XWA_NONAV")) {   /* concourse -> Combat Simulator door */
         MEM32(0x9F65ED) = (uint32_t)(60 - 5);          /* (60,210) inside the combatdoor sprite */
         MEM32(0x9F65F1) = (uint32_t)(210 - 5);
         if (fip >= 15 && (fip % 40) == 15) {
@@ -2451,7 +2451,7 @@ void xwa_ui_driver(void) {
             fprintf(stderr, "[FLYDEMO] click combat-sim menu (507,338) at fip=%d\n", fip);
             fflush(stderr);
         }
-    } else if (cb == 0x0055FF30) {                       /* barracks / pilot proving-grounds (post create-pilot) */
+    } else if (cb == 0x0055FF30 && !getenv("XWA_NONAV")) {   /* barracks (post create-pilot) */
         /* The autopilot lands here after pilot creation, not the concourse. The barracks transitions to the
          * next screen via the reconstructed jump table at 0x560124 (gated on 78397C-selector + 9F4B48/9F4B4C==3
          * transition phase). Drive it to the concourse (78397C=1) so the combat-door click logic can run. */
