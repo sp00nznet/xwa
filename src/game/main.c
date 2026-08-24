@@ -4093,6 +4093,28 @@ void xwa_wi(unsigned blk)
 unsigned g_pcring[24], g_pcridx;
 void xwa_pcblk(unsigned blk) { g_pcring[g_pcridx] = blk; g_pcridx = (g_pcridx + 1u) % 24u; }
 
+/* XWA_PCRINGDUMP=<ms>: print the ring from a watchdog thread. A hang leaves the ring holding the
+ * spin, but nothing downstream ever runs to print it -- so print it from outside. */
+static DWORD WINAPI xwa_pcring_dump(LPVOID unused)
+{
+    unsigned ms = (unsigned)strtoul(getenv("XWA_PCRINGDUMP"), NULL, 0);
+    (void)unused;
+    if (ms < 1000u) ms = 1000u;
+    for (;;) {
+        unsigned q;
+        Sleep(ms);
+        fprintf(stderr, "[PCRING]");
+        for (q = 0; q < 24u; q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + q) % 24u]);
+        fprintf(stderr, "\n"); fflush(stderr);
+    }
+}
+void xwa_pcring_watch(void)
+{
+    if (getenv("XWA_PCRINGDUMP"))
+        CreateThread(NULL, 0, xwa_pcring_dump, NULL, 0, NULL);
+}
+
+
 /* Set only while XWA_PLAYERCRAFT is driving the seat, so hooks that must not disturb the engine's
  * own flight-group activation walk can tell the two apart. */
 int g_pc_seating = 0;
@@ -4761,6 +4783,7 @@ int main(int argc, char* argv[]) {
     fflush(stdout);
 
     /* Register trace dump for when program exits */
+    xwa_pcring_watch();
     atexit(dump_trace_atexit);
 
     /* FLS callback: called during process exit even if atexit doesn't run.

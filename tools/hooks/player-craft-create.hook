@@ -69,6 +69,26 @@
                 fflush(stderr);
                 if (_found != 0xFFFFu) MEM16(0x9E9708) = (uint16_t)_found;
             }
+            /* XWA_WALKSEAT: run the engine's own flight-group activation walk once here, instead
+             * of hand-driving the seat. sub_00417580 is what sets the walk flag 0x631854, steps the
+             * flight-group cursor 0x9E9708, seats each group's player via sub_0041A960, AND sets the
+             * pending player-action code at 0x7D4B6A near its tail (0x00418589) -- which
+             * sub_00434420 copies to 0x8053C0 at the top of sub_004F9320, where the switch at
+             * 0x004F95C3 needs 0x1B to reach the seat path. Worldinit only runs this walk before
+             * the player owned a group, so it had nothing to do. Wrapped in the same
+             * sub_0050D070/sub_0050D6A0 pair retail uses. */
+            if (getenv("XWA_WALKSEAT")) {
+                extern void sub_0050D070(void), sub_00417580(void), sub_0050D6A0(void);
+                uint32_t _sa2 = eax, _sc2 = ecx, _sd2 = edx;
+                RECOMP_CALL(sub_0050D070);
+                RECOMP_CALL(sub_00417580);
+                RECOMP_CALL(sub_0050D6A0);
+                eax = _sa2; ecx = _sc2; edx = _sd2;
+                fprintf(stderr, "[PLAYERCRAFT] after walk: action(7D4B6A)=0x%X +0x219=%u +0x15=%u +0x12=%u\n",
+                        (unsigned)MEM16(0x7D4B6A), (unsigned)MEM16(_pb + 0x8B96F9u),
+                        MEM8(_pb + 0x8B94F5u), MEM8(_pb + 0x8B94F2u));
+                fflush(stderr);
+            }
             /* sub_00462670 -- NOT sub_00462BE0, which starts above this call site and is a
              * different routine. This is the one that calls sub_0041A960 at 0x0046292D and then
              * writes the craft counter to rec+0x219 at 0x004629AD. It reads the player's object
@@ -122,6 +142,24 @@
                     (unsigned)MEM16(_pb + 0x8B96F9u), MEM8(_pb + 0x8B94F0u),
                     (unsigned)MEM16(_pb + 0x8BA069u), MEM32(_pb + 0x8B94E0u));
             fflush(stderr);
+            /* XWA_PLAYERACTION: the pending player-action code. sub_004F9320 starts by calling
+             * sub_00434420, which copies MEM16(0x7D4B6A) into 0x8053C0; the switch at 0x004F95C3
+             * then dispatches on (0x8053C0 - 0x1B) and only case 0 -- i.e. 0x1B -- reaches the
+             * branch that calls sub_00505FA0 -> sub_0047D320, the sole initial setter of the
+             * player's "is flying" flag +0x15. Left at 0 the subtraction underflows to 0xFFFFFFE5,
+             * fails the `ja 0xCD` bound, and the whole seat path is skipped. The engine sets this
+             * near the tail of the activation walk (0x00418589); that write does not happen on this
+             * path, so supply the code directly. */
+            {   unsigned _act = getenv("XWA_PLAYERACTION")
+                                ? (unsigned)strtoul(getenv("XWA_PLAYERACTION"), NULL, 0) : 0x1Bu;
+                /* OPT-IN ONLY. Supplying the code does get past the switch, but sub_004F9320 then
+                 * enters sub_0050C740 -> sub_00540B00 and hangs in a malloc/free spin below it, so
+                 * turning this on by default would trade "no craft" for "no flight at all". */
+                if (getenv("XWA_PLAYERACTION"))
+                    MEM16(0x7D4B6A) = (uint16_t)_act;
+                fprintf(stderr, "[PLAYERCRAFT] action(7D4B6A) <- 0x%X\n", _act);
+                fflush(stderr);
+            }
             PUSH32(esp, _pc);
             RECOMP_CALL(sub_004F9320);
             esp = esp + 4;
