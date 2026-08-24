@@ -10,6 +10,7 @@
 #   3. flight (engine path) -- the game's own barracks -> loading -> flight-init route still works.
 #   4. DirectPlay session   -- XWA_DPSP takes the host path so world-build is not blocked for 60s.
 #   5. engine path + render -- the game's own mission reaches flight and submits its own geometry.
+#   6. hooks                -- every tools/hooks/*.hook still anchors to real generated code.
 #
 # Usage:  tools/run_tests.sh [1|2|3 ...]      (default: all)
 #
@@ -22,7 +23,7 @@ GAME="$ROOT/../Star Wars X-Wing Alliance"
 EXE="$ROOT/build/Release/xwa_recomp.exe"
 DEC="$ROOT/config/xwingalliance_decrypted.exe"
 LOGS="${TMPDIR:-/tmp}"
-WANT="${*:-1 2 3 4 5}"
+WANT="${*:-1 2 3 4 5 6}"
 pass=0; fail=0
 
 taskkill //F //IM xwa_recomp.exe >/dev/null 2>&1
@@ -95,6 +96,21 @@ case " $WANT " in *" 5 "*)
   # HUD text on it -- that is what "no visible frame" looked like for a long time.
   grep -a 'RTDUMP] capturing' "$LOGS/t5.log" | grep -qv 'native_keep=0' \
       && ok "captured frame carries native geometry" || bad "captured frame has no native geometry"
+esac
+
+# ---- 6. the generated-code hooks still anchor ---------------------------------------------------
+# src/game/recomp/gen/ is gitignored and regenerated from the PE, so the hooks live in
+# tools/hooks/*.hook and are re-applied by tools/apply_hooks.py. They anchor to a line of generated
+# code; if the generator's output shifts, the anchor stops matching and the hook silently would not
+# come back. Fail loudly here instead.
+case " $WANT " in *" 6 "*)
+  echo "[6] generated-code hooks"
+  out=$(python -m tools.apply_hooks --check 2>&1)
+  echo "$out" | grep -qE 'ANCHOR|MISSING FILE' \
+      && bad "a hook anchor no longer matches -- re-derive it" \
+      || ok "all hook anchors resolve"
+  n=$(ls tools/hooks/*.hook 2>/dev/null | wc -l)
+  [ "$n" -gt 0 ] 2>/dev/null && ok "$n hook(s) present" || bad "no hooks found"
 esac
 
 echo

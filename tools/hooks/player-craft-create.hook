@@ -1,0 +1,138 @@
+# hook: player-craft-create
+# file: recomp_0002.c
+# mode: after
+# anchor:     RECOMP_CALL(sub_00457C20); /* 0x0051066D: call 0x457c20 */
+# --- body ---
+    /* XWA_PLAYERCRAFT: create the player's craft once, right after the loader.
+     *
+     * sub_004F9320 is the engine's own "put the player in a craft" routine, and its only engine
+     * caller is 0x004F805A in the sim tick, gated on rec+0x10 != MEM8(0x80DB60). The loader stamps
+     * rec+0x10 FROM 0x80DB60 at 0x0045862C -- "this record is current" -- so after it runs that gate
+     * can never fire again. The loader would have built the craft itself at 0x00457D62, but that is
+     * gated on rec+0x15 (0x8B94F5) != 0, and nothing on this path ever sets it: in retail the player
+     * has been in a craft since the concourse, and the .tie reset at 0x00415D5C does not clear +0x15.
+     * Reaching flight without those screens leaves it 0, so the loader skips the build AND stamps the
+     * record as current -- the craft is never made and never asked for again.
+     *
+     * Do it here rather than before the loader (which is what XWA_REALCREATE does, and why it dies):
+     * only after the loader has written the record's object index at 0x004585B2 and its target at
+     * 0x004585B8 does sub_004F9320 have anything to work from. Its two preconditions are
+     * MEM8(0x8053E4) != 1 and MEM32(0x7827E4) == 0. */
+    if (getenv("XWA_PLAYERCRAFT")) {
+        uint32_t _pc = MEM32(0x8C1CC8), _pb = _pc * 0xBCFu;
+        if (_pc < 8u && MEM8(_pb + 0x8B94F5u) == 0 && MEM32(_pb + 0x8B94E0u) != 0xFFFFu) {
+            extern void sub_004F9320(void);
+            uint32_t _sa = eax, _sc = ecx, _sd = edx;
+            if (MEM8(0x8053E4) == 1) MEM8(0x8053E4) = 0;
+            MEM32(0x7827E4) = 0;
+            fprintf(stderr, "[PLAYERCRAFT] creating: slot=%u obj=0x%X target=0x%X\n",
+                    _pc, MEM32(_pb + 0x8B94E0u), MEM32(_pb + 0x8BA034u));
+            /* Is the object index the loader handed us actually a live object? The mission's craft
+             * sit in slots 0..6; if the player's index lands in the region-1 junk range this is the
+             * partition mismatch, not a create bug. */
+            {   uint32_t _t = MEM32(0x7B33C4), _oi = MEM32(_pb + 0x8B94E0u), _o = _t + _oi * 0x27u;
+                fprintf(stderr, "[PLAYERCRAFT] obj[%u]: type=%u alive=%u cat=%u pos=(%d,%d,%d) ro=0x%X | 68BC08=0x%X\n",
+                        _oi, (unsigned)MEM16(_o), (unsigned)MEM16(_o + 2), MEM8(_o + 4),
+                        (int)MEM32(_o + 7), (int)MEM32(_o + 0xB), (int)MEM32(_o + 0xF),
+                        MEM32(_o + 0x23), MEM32(0x68BC08));
+                fprintf(stderr, "[PLAYERCRAFT] partition=%u base=%u count=%u walk=[%u,%u)\n",
+                        MEM32(0x8C1CD8), MEM32(0x917E40), MEM32(0x8BF380),
+                        MEM32(0x7CA3B4) & 0xFFFFu, MEM32(0x917E64));
+            }
+            fflush(stderr);
+            /* sub_00462BE0 is the engine's "seat the player in their craft": it calls
+             * sub_0041A960, which fills the record fields the create path then reads --
+             * +0x00 (object), +0x10 (region), +0x219 (0x8B96F9, the craft counter) and
+             * +0xB89. Worldinit already calls it at 0x005103B2, but that is BEFORE the
+             * loader writes the record's object index at 0x004585B2, so sub_0041A960
+             * returns 0xFFFF and fills nothing. Re-run it here, where its inputs exist.
+             * Without it sub_004F9320 reads +0x219 as 0, computes 0-1 = -1 at 0x004FA5CA
+             * and skips the whole create at 0x004FAC73. */
+            /* sub_0041A960 is only ever invoked with fg = 0xFFFF, and then falls back to
+             * MEM16(0x9E9708) -- which is the flight-group CURSOR the activation walk in
+             * sub_00417580 steps through, not a stored "player's flight group". Called from
+             * outside that walk it holds whatever the last iteration left. The .tie parse does
+             * record the mapping: 0x00415EAF / 0x00415F9A write the owning player index to
+             * MEM32(0x80EABE + fg*0xE42). Find the group that belongs to this player, point the
+             * cursor at it, then seat. */
+            {   uint32_t _fg, _found = 0xFFFFu, _n = MEM32(0x63185C);
+                if (_n == 0u || _n > 255u) _n = 0u;      /* no flight-group count -> do not guess */
+                for (_fg = 0; _fg < _n; _fg++) {
+                    uint32_t _a = 0x80EABEu + _fg * 0xE42u;
+                    if (!xwa_readable(_a, 4)) break;
+                    if (MEM32(_a) == _pc) { _found = _fg; break; }
+                }
+                /* Bound by the real group count: an unbounded scan matched at fg=32 on a mission
+                 * with 32 groups (0..31), i.e. a zero field past the end, not the player's group. */
+                fprintf(stderr, "[PLAYERCRAFT] player flight group = 0x%X of %u (cursor 0x9E9708 was 0x%X)\n",
+                        _found, _n, (unsigned)MEM16(0x9E9708));
+                fflush(stderr);
+                if (_found != 0xFFFFu) MEM16(0x9E9708) = (uint16_t)_found;
+            }
+            /* sub_00462670 -- NOT sub_00462BE0, which starts above this call site and is a
+             * different routine. This is the one that calls sub_0041A960 at 0x0046292D and then
+             * writes the craft counter to rec+0x219 at 0x004629AD. It reads the player's object
+             * index straight from MEM32(0x68BC08) at its first instruction, which the loader has
+             * just filled -- so it has to run after the loader, not at worldinit's 0x005103B2. */
+            /* sub_00462670 takes ONE argument, a craft type -- it has no `sub esp` prologue, so
+             * the [esp+0x14] it reads after four pushes is arg0, not a local. Called bare it read
+             * stack garbage (0x0000FFFF), failed the model lookup at 0x004627F0 and returned
+             * 0xFFFF without ever reaching sub_0041A960. Pass the player object's craft type,
+             * the way the engine does at 0x0045C88F. */
+            {   uint32_t _ct = MEM16(MEM32(0x7B33C4) + MEM32(0x68BC08) * 0x27u + 2u);
+                extern void sub_00462670(void);
+                /* sub_0041A960 indexes the owner table with the flight-group CURSOR at 0x9E9708,
+                 * not with anything derived from its argument. Outside the activation walk that
+                 * holds a stale value (0x20 was observed, past the 17-group table), so the lookup
+                 * lands on -1 and it bails at 0x0041ACF8 before writing rec+0x219. Point it at the
+                 * group the roster says is ours. */
+                if (getenv("XWA_ROSTER"))
+                    MEM16(0x9E9708) = MEM16(0xAF39BEu);
+                fprintf(stderr, "[PLAYERCRAFT] seating craft type %u (model 0x7CA6E0[%u]=%u)\n",
+                        _ct, _ct, (unsigned)MEM16(0x7CA6E0u + _ct * 2u));
+                fflush(stderr);
+                /* 0x631854 is the "inside the flight-group activation walk" flag: sub_00417580
+                 * sets it at 0x00417591 and clears it at 0x004186FC, and sub_0041A960 refuses to
+                 * write the player records unless it is set (0x0041AD13). Seating from outside the
+                 * walk is exactly the case it rejects, so bracket the call the way the walk does.
+                 * XWA_NOWALKFLAG leaves it alone. */
+                /* Roster entry +4 (0xAF39C2) is read with opposite polarity at the two stages:
+                 * the .tie parse only assigns group ownership when it is ZERO (0x00415F95), while
+                 * sub_0041A960's roster scan SKIPS the entry when it is zero (0x0041AD33) -- and
+                 * that scan's result is the record that gets +0x219 = 1 at 0x0041AD9D. Left at 0,
+                 * the scan finds nothing, record B stays -1, and only record A is written, which
+                 * always gets +0x219 = 0. Flip it after the parse and before seating. */
+                if (getenv("XWA_ROSTER")) MEM32(0xAF39C2u) = 1u;
+                {   uint8_t _saved = MEM8(0x631854);
+                    extern int g_pc_seating;
+                    if (!getenv("XWA_NOWALKFLAG")) MEM8(0x631854) = 1;
+                    g_pc_seating = 1;
+                    PUSH32(esp, _ct);
+                    RECOMP_CALL(sub_00462670);
+                    esp = esp + 4;
+                    g_pc_seating = 0;
+                    MEM8(0x631854) = _saved;
+                }
+            }
+            { extern unsigned g_pcring[24], g_pcridx; unsigned _q;
+              fprintf(stderr, "[PLAYERCRAFT] seat path:");
+              for (_q = 0; _q < 24u; _q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + _q) % 24u]);
+              fprintf(stderr, "\n"); fflush(stderr); }
+            fprintf(stderr, "[PLAYERCRAFT] after seat: +0x219=%u +0x10=%u +0xB89=%u obj=0x%X\n",
+                    (unsigned)MEM16(_pb + 0x8B96F9u), MEM8(_pb + 0x8B94F0u),
+                    (unsigned)MEM16(_pb + 0x8BA069u), MEM32(_pb + 0x8B94E0u));
+            fflush(stderr);
+            PUSH32(esp, _pc);
+            RECOMP_CALL(sub_004F9320);
+            esp = esp + 4;
+            eax = _sa; ecx = _sc; edx = _sd;
+            fprintf(stderr, "[PLAYERCRAFT] after: +0x15=%u +0x12=%u +0x11=%u obj=0x%X\n",
+                    MEM8(_pb + 0x8B94F5u), MEM8(_pb + 0x8B94F2u), MEM8(_pb + 0x8B94F1u),
+                    MEM32(_pb + 0x8B94E0u));
+            fflush(stderr);
+            { extern unsigned g_pcring[24], g_pcridx; unsigned _q;
+              fprintf(stderr, "[PLAYERCRAFT] exit path:");
+              for (_q = 0; _q < 24u; _q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + _q) % 24u]);
+              fprintf(stderr, "\n"); fflush(stderr); }
+        }
+    }

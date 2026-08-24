@@ -1,0 +1,11 @@
+# hook: dpsp-host-path
+# file: recomp_0001.c
+# mode: after
+# anchor:     esi = MEM32(esp + 0x50); /* 0x0049B088: mov esi, dword ptr [esp + 0x50] */
+# --- body ---
+    /* XWA_DPSP: sub_0049AFC0 picks its mode from two decimal strings in the launch-parameter block
+     * (esi = connection kind, ebp = player count). Reaching flight without the multiplayer setup
+     * screens leaves both at their .data default "0", which selects the peer path -- and that then
+     * waits 60s for handshake messages 0xD/0xE that no peer will ever send. 1/1 is host-with-one-
+     * player, the shape a single-player mission actually has. */
+    if (getenv("XWA_DPSP")) { esi = 1; ebp = 1; }

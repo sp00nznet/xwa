@@ -1,0 +1,13 @@
+# hook: seat-cursor
+# file: recomp_0000.c
+# mode: before
+# anchor:     eax = MEM32(esp + 0x48); /* 0x0041A963: mov eax, dword ptr [esp + 0x48] */
+# --- body ---
+    /* The roster scan at 0x0041AD2D matches an entry against the flight-group CURSOR at 0x9E9708,
+     * and its result is the record that gets +0x219 = 1. Inside the engine's activation walk the
+     * cursor is the group being activated; driven from outside it holds whatever the walk left
+     * (33 was observed against a roster entry naming group 0), so the scan matches nothing.
+     * Point it at the roster's group -- ONLY while XWA_PLAYERCRAFT is driving, so the real walk
+     * is untouched. */
+    { extern int g_pc_seating;
+      if (g_pc_seating && MEM32(0xAF39C6u) != 0u) MEM16(0x9E9708) = MEM16(0xAF39BEu); }

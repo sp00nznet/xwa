@@ -1,0 +1,38 @@
+# hook: roster-seed
+# file: recomp_0002.c
+# mode: before
+# anchor:     RECOMP_CALL(sub_00415760); /* 0x0051034A: call 0x415760 */
+# --- body ---
+    /* XWA_ROSTER: register the local player in the roster before the .tie parse reads it.
+     *
+     * The parse sets EVERY flight group's owner field to -1 at 0x00415EAF and only writes a real
+     * owner at 0x00415F9A, inside a block that walks the roster at 0xAF39BE (8 entries, stride
+     * 0x64: +0 = flight-group index (word), +8 = player id (dword)) and is gated on
+     * MEM32(0x7F5260) == 0. Our roster is all zeros -- sub_0049AFC0's single-player path only
+     * copies the two name strings and returns, it never registers a player -- so no group ever
+     * belongs to anyone, sub_0041A960 bails at 0x0041ACF8, rec+0x219 stays 0, and sub_004F9320
+     * skips the create. One roster entry is the whole difference.
+     *
+     * XWA_ROSTERFG picks the group (default 0: this mission's group 0 is Sabra, the player's
+     * craft, and it is a region-0 group). The id comes from the engine's own local-player-id
+     * accessor sub_0049E3D0 so later roster scans that match on it agree. */
+    if (getenv("XWA_ROSTER")) {
+        extern void sub_0049E3D0(void);
+        uint32_t _fg = getenv("XWA_ROSTERFG") ? (uint32_t)strtoul(getenv("XWA_ROSTERFG"), NULL, 0) : 0u;
+        uint32_t _sa = eax, _sc = ecx, _sd = edx, _id;
+        RECOMP_CALL(sub_0049E3D0);
+        _id = eax;
+        if (_id == 0u) _id = 1u;                    /* the scans test non-zero, so 0 is not usable */
+        eax = _sa; ecx = _sc; edx = _sd;
+        MEM16(0xAF39BEu) = (uint16_t)_fg;           /* entry 0: flight group */
+        MEM32(0xAF39C6u) = _id;                     /* entry 0: player id */
+        /* The parse does not use the id directly: at 0x00415F46 it calls sub_0049E3A0(id), which
+         * scans the player table at 0x9AFF90 (stride 0x28, 8 entries) and returns the slot -- or 8
+         * when the id is absent, and 0x00415F52 then skips the entry. A roster id that no player
+         * table knows about is therefore silently ignored, which is why seeding the roster alone
+         * left every owner at -1. Register the id in slot 0 as well. */
+        MEM32(0x9AFF90u) = _id;
+        fprintf(stderr, "[ROSTER] seeded entry 0: fg=%u id=0x%08X | 7F5260=%u (roster block needs 0)\n",
+                _fg, _id, MEM32(0x7F5260));
+        fflush(stderr);
+    }

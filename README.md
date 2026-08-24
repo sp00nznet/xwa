@@ -460,6 +460,20 @@ python tools/dump_memory.py --pid <PID> "path/to/xwingalliance.exe" config/xwing
 - **Registry**: `SOFTWARE\LucasArts Entertainment Company LLC\X-Wing Alliance\V2.0`
 - **Command line**: `XwingAlliance.exe %d skipintro`
 
+## Generated-code hooks
+
+`src/game/recomp/gen/` is produced from the PE and is gitignored, so the env-gated hooks added to
+it do not survive a regeneration. The ones worth keeping live in `tools/hooks/*.hook`, anchored to
+a line of generated code rather than a line number:
+
+```bash
+python -m tools.apply_hooks --check   # report status, change nothing
+python -m tools.apply_hooks           # re-apply anything missing
+```
+
+`tools/run_tests.sh 6` fails if an anchor stops matching, which is the signal that the generator's
+output moved and a hook needs re-deriving.
+
 ## License
 
 The code in this repository is released under the [MIT License](LICENSE).

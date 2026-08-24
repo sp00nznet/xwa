@@ -1,0 +1,13 @@
+# hook: roster-verify
+# file: recomp_0002.c
+# mode: after
+# anchor:     RECOMP_CALL(sub_00415760); /* 0x0051034A: call 0x415760 */
+# --- body ---
+    if (getenv("XWA_ROSTER")) { uint32_t _i, _n = MEM32(0x63185C); if (_n > 24u) _n = 24u;
+        fprintf(stderr, "[ROSTER] roster after parse:");
+        for (_i = 0; _i < 8u; _i++)
+            fprintf(stderr, " (fg=%u,id=%08X,+4=%08X)", (unsigned)MEM16(0xAF39BEu + _i*0x64u),
+                    MEM32(0xAF39C6u + _i*0x64u), MEM32(0xAF39C2u + _i*0x64u));
+        fprintf(stderr, "\n");
+        fprintf(stderr, "[ROSTER] owners after parse (0x80EABE + fg*0xE42), %u groups:", _n);
+        for (_i = 0; _i < _n; _i++) fprintf(stderr, " %d", (int)MEM32(0x80EABEu + _i * 0xE42u));

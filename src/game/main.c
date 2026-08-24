@@ -4093,6 +4093,10 @@ void xwa_wi(unsigned blk)
 unsigned g_pcring[24], g_pcridx;
 void xwa_pcblk(unsigned blk) { g_pcring[g_pcridx] = blk; g_pcridx = (g_pcridx + 1u) % 24u; }
 
+/* Set only while XWA_PLAYERCRAFT is driving the seat, so hooks that must not disturb the engine's
+ * own flight-group activation walk can tell the two apart. */
+int g_pc_seating = 0;
+
 /* XWA_MILE: ordered milestone trace. Which of worldinit's steps runs before which is the whole
  * question when a record is still empty at a use site -- a per-site counter cannot answer it, and
  * a full call trace is far too big. One line per stamp, in execution order, is enough. */

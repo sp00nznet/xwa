@@ -1,0 +1,38 @@
+# hook: partition-player
+# file: recomp_0002.c
+# mode: before
+# anchor:     RECOMP_CALL(sub_00457C20); /* 0x0051066D: call 0x457c20 */
+# --- body ---
+    /* XWA_PARTPLAYER: put the object table in the player's region BEFORE the loader allocates his
+     * craft slot.
+     *
+     * sub_004154A0(region) slices the 1140-entry object table by MEM32(0x8D9624) (3 for this
+     * mission, which matches retail). Retail flies in partition 0 -- base 0, walk [252,380), every
+     * live object in [0,252). We end in partition 2: base 760, walk [1012,1140). The loader then
+     * hands the player object index 790, which is fill garbage, and every downstream read off it
+     * fails -- that is why sub_004F9320 finds rec+0x219 == 0 and skips the create.
+     *
+     * The partition comes from rec+0x10, which the loader itself sets from MEM8(0x80DB60) at
+     * 0x0045862C, and 0x80DB60 is MEM32(0x8D9624)-1 = the LAST region index, not the player's.
+     * In retail rec+0x10 is overwritten with the real region by sub_0041A960 (0x0041AD78, from
+     * MEM8(0x8C1CD8)) when the player is actually seated -- which never happens here, so the
+     * default sticks. Seating needs the right partition and the partition needs seating; this
+     * breaks the loop from the outside, using the region the .tie gives the player's group (0 --
+     * groups 0..12 and 20..21 are region 0, 13..19 and 22..23 are region 1). */
+    if (getenv("XWA_PARTPLAYER")) {
+        extern void sub_004154A0(void);
+        uint32_t _r = getenv("XWA_PARTREGION") ? (uint32_t)strtoul(getenv("XWA_PARTREGION"), NULL, 0) : 0u;
+        uint32_t _sa = eax, _sc = ecx, _sd = edx;
+        fprintf(stderr, "[PARTPLAYER] before: partition=%u base=%u count=%u walk=[%u,%u) divisor(8D9624)=%u 80DB60=%u\n",
+                MEM32(0x8C1CD8), MEM32(0x917E40), MEM32(0x8BF380),
+                MEM32(0x7CA3B4) & 0xFFFFu, MEM32(0x917E64), MEM32(0x8D9624), MEM32(0x80DB60));
+        MEM32(0x80DB60) = _r;
+        PUSH32(esp, _r);
+        RECOMP_CALL(sub_004154A0);
+        esp = esp + 4;
+        eax = _sa; ecx = _sc; edx = _sd;
+        fprintf(stderr, "[PARTPLAYER] after:  partition=%u base=%u count=%u walk=[%u,%u)\n",
+                MEM32(0x8C1CD8), MEM32(0x917E40), MEM32(0x8BF380),
+                MEM32(0x7CA3B4) & 0xFFFFu, MEM32(0x917E64));
+        fflush(stderr);
+    }
