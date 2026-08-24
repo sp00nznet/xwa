@@ -4090,8 +4090,8 @@ void xwa_wi(unsigned blk)
 /* Block ring for sub_004F9320, the engine's "put the player in a craft" routine. It is 3400 lines
  * of generated C with 529 blocks; a linear trace drowns, but the last 24 blocks before it returns
  * name the exit path exactly. Same trick that found the DirectPlay wait loop. */
-unsigned g_pcring[24], g_pcridx;
-void xwa_pcblk(unsigned blk) { g_pcring[g_pcridx] = blk; g_pcridx = (g_pcridx + 1u) % 24u; }
+unsigned g_pcring[64], g_pcridx;
+void xwa_pcblk(unsigned blk) { g_pcring[g_pcridx] = blk; g_pcridx = (g_pcridx + 1u) % 64u; }
 
 /* XWA_PCRINGDUMP=<ms>: print the ring from a watchdog thread. A hang leaves the ring holding the
  * spin, but nothing downstream ever runs to print it -- so print it from outside. */
@@ -4104,7 +4104,7 @@ static DWORD WINAPI xwa_pcring_dump(LPVOID unused)
         unsigned q;
         Sleep(ms);
         fprintf(stderr, "[PCRING]");
-        for (q = 0; q < 24u; q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + q) % 24u]);
+        for (q = 0; q < 64u; q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + q) % 64u]);
         fprintf(stderr, "\n"); fflush(stderr);
     }
 }
