@@ -36,3 +36,18 @@
                 _fg, _id, MEM32(0x7F5260));
         fflush(stderr);
     }
+    /* XWA_MISSION=<path>: swap the mission the parse is about to read.
+     *
+     * The early Azzameen missions start you standing in the family hangar, which is why the
+     * player-craft create runs a full-screen transition (sub_0045C680 seats you AND opens the
+     * hangar). Later battles drop you straight into space with the fleet, so they should not need
+     * that screen. sub_0050A7E0 copies the path from MEM32(0x7732F0) into the 0x006002E8 buffer at
+     * 0x0050B1E3; overwrite the copy here, immediately before the parse reads it. */
+    if (getenv("XWA_MISSION")) {
+        const char* _m = getenv("XWA_MISSION");
+        uint32_t _i;
+        for (_i = 0; _i < 63u && _m[_i]; _i++) MEM8(0x006002E8u + _i) = (uint8_t)_m[_i];
+        MEM8(0x006002E8u + _i) = 0;
+        fprintf(stderr, "[MISSION] parsing '%s' instead\n", (const char*)(uintptr_t)0x006002E8u);
+        fflush(stderr);
+    }
