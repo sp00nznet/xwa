@@ -4105,13 +4105,19 @@ void xwa_pcblk(unsigned blk)
             on = e ? 1 : 0;
             want = e ? (unsigned)strtoul(e, NULL, 0) : 0u;
         }
+        /* Only sample while the player-craft call is actually running. malloc is called constantly
+         * from startup and the main loop, so "the first N hits" samples the wrong moment entirely
+         * -- which is exactly the mistake that produced a bogus "the chain has unwound" reading. */
+        {   extern int g_pc_incall;
+            if (on && want && !g_pc_incall) return;
+        }
         if (on && blk == want && hits < 3u) {
             extern uint32_t guest_func_for_host(uintptr_t host_addr);
             uintptr_t* sp = (uintptr_t*)_AddressOfReturnAddress();
             int i, found = 0;
             hits++;
             fprintf(stderr, "[PCWHO] %06X called from:", blk);
-            for (i = 0; i < 2048 && found < 28; i++) {
+            for (i = 0; i < 262144 && found < 40; i++) {
                 uintptr_t v = 0;
                 __try { v = sp[i]; } __except(1) { break; }
                 { uint32_t gv = guest_func_for_host(v);
@@ -4154,6 +4160,7 @@ void xwa_pcring_watch(void)
 /* Set only while XWA_PLAYERCRAFT is driving the seat, so hooks that must not disturb the engine's
  * own flight-group activation walk can tell the two apart. */
 int g_pc_seating = 0;
+int g_pc_incall = 0;   /* set while XWA_PLAYERCRAFT is inside sub_004F9320 */
 
 /* XWA_MILE: ordered milestone trace. Which of worldinit's steps runs before which is the whole
  * question when a record is still empty at a use site -- a per-site counter cannot answer it, and
