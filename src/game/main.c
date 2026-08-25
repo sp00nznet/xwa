@@ -4091,11 +4091,11 @@ void xwa_wi(unsigned blk)
 /* Block ring for sub_004F9320, the engine's "put the player in a craft" routine. It is 3400 lines
  * of generated C with 529 blocks; a linear trace drowns, but the last 24 blocks before it returns
  * name the exit path exactly. Same trick that found the DirectPlay wait loop. */
-unsigned g_pcring[64], g_pcridx;
+unsigned g_pcring[512], g_pcridx;
 void xwa_pcblk(unsigned blk)
 {
     g_pcring[g_pcridx] = blk;
-    g_pcridx = (g_pcridx + 1u) % 64u;
+    g_pcridx = (g_pcridx + 1u) % 512u;
     /* XWA_PCWHO=0xADDR: when this block is reached, walk the HOST stack and name the guest
      * functions on it. A block ring says what is spinning; it cannot say who is driving the spin
      * when the driver's own blocks are not stamped. Same walk the VEH handler does on a fault. */
@@ -4111,19 +4111,27 @@ void xwa_pcblk(unsigned blk)
         {   extern int g_pc_incall;
             if (on && want && !g_pc_incall) return;
         }
-        if (on && blk == want && hits < 3u) {
+        /* Sample the FIRST hit and then deep into the loop -- the first one only shows how the
+         * loop was entered, not what it is doing once it settles. */
+        if (on && blk == want && (++hits == 1u || hits == 2000u || hits == 40000u)) {
             extern uint32_t guest_func_for_host(uintptr_t host_addr);
             uintptr_t* sp = (uintptr_t*)_AddressOfReturnAddress();
             int i, found = 0;
-            hits++;
-            fprintf(stderr, "[PCWHO] %06X called from:", blk);
+            fprintf(stderr, "[PCWHO] hit #%u, called from:", hits);
             for (i = 0; i < 262144 && found < 40; i++) {
                 uintptr_t v = 0;
                 __try { v = sp[i]; } __except(1) { break; }
                 { uint32_t gv = guest_func_for_host(v);
                   if (gv) { fprintf(stderr, " sub_%08X", gv); found++; } }
             }
-            fprintf(stderr, "\n"); fflush(stderr);
+            fprintf(stderr, "\n");
+            {   /* the block ring at the same instant, so the stack and the trace agree */
+                unsigned q;
+                fprintf(stderr, "[PCWHO] ring:");
+                for (q = 0; q < 512u; q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + q) % 512u]);
+                fprintf(stderr, "\n");
+            }
+            fflush(stderr);
         }
     }
 }
@@ -4138,6 +4146,9 @@ static DWORD WINAPI xwa_pcring_dump(LPVOID unused)
     for (;;) {
         unsigned q;
         Sleep(ms);
+        /* Only dump while the player-craft call is running, otherwise the ring shows the main loop
+         * -- which is what made an ordinary per-frame malloc/free look like the spin. */
+        { extern int g_pc_incall; if (!g_pc_incall) continue; }
         {   /* The player record, so a hang can be told apart from "the craft exists and the game
              * simply moved on to another screen". */
             uint32_t pb = MEM32(0x8C1CC8) * 0xBCFu;
@@ -4146,7 +4157,7 @@ static DWORD WINAPI xwa_pcring_dump(LPVOID unused)
                     (unsigned)MEM16(pb + 0x8B96F9u), MEM8(pb + 0x8B94F1u));
         }
         fprintf(stderr, "[PCRING]");
-        for (q = 0; q < 64u; q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + q) % 64u]);
+        for (q = 0; q < 512u; q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + q) % 512u]);
         fprintf(stderr, "\n"); fflush(stderr);
     }
 }
@@ -4160,7 +4171,8 @@ void xwa_pcring_watch(void)
 /* Set only while XWA_PLAYERCRAFT is driving the seat, so hooks that must not disturb the engine's
  * own flight-group activation walk can tell the two apart. */
 int g_pc_seating = 0;
-int g_pc_incall = 0;   /* set while XWA_PLAYERCRAFT is inside sub_004F9320 */
+int g_pc_incall = 0;
+uint32_t g_scr_cb = 0;   /* screen callback most recently dispatched by sub_0053FD00 */   /* set while XWA_PLAYERCRAFT is inside sub_004F9320 */
 
 /* XWA_MILE: ordered milestone trace. Which of worldinit's steps runs before which is the whole
  * question when a record is still empty at a use site -- a per-site counter cannot answer it, and
