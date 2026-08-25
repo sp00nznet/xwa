@@ -7,6 +7,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <intrin.h>
 #include <mmsystem.h>   /* timeBeginPeriod */
 #include <winternl.h>  /* NtCurrentTeb() */
 #include <stdio.h>
@@ -4091,7 +4092,35 @@ void xwa_wi(unsigned blk)
  * of generated C with 529 blocks; a linear trace drowns, but the last 24 blocks before it returns
  * name the exit path exactly. Same trick that found the DirectPlay wait loop. */
 unsigned g_pcring[64], g_pcridx;
-void xwa_pcblk(unsigned blk) { g_pcring[g_pcridx] = blk; g_pcridx = (g_pcridx + 1u) % 64u; }
+void xwa_pcblk(unsigned blk)
+{
+    g_pcring[g_pcridx] = blk;
+    g_pcridx = (g_pcridx + 1u) % 64u;
+    /* XWA_PCWHO=0xADDR: when this block is reached, walk the HOST stack and name the guest
+     * functions on it. A block ring says what is spinning; it cannot say who is driving the spin
+     * when the driver's own blocks are not stamped. Same walk the VEH handler does on a fault. */
+    {   static int on = -1; static unsigned want, hits;
+        if (on < 0) {
+            const char* e = getenv("XWA_PCWHO");
+            on = e ? 1 : 0;
+            want = e ? (unsigned)strtoul(e, NULL, 0) : 0u;
+        }
+        if (on && blk == want && hits < 3u) {
+            extern uint32_t guest_func_for_host(uintptr_t host_addr);
+            uintptr_t* sp = (uintptr_t*)_AddressOfReturnAddress();
+            int i, found = 0;
+            hits++;
+            fprintf(stderr, "[PCWHO] %06X called from:", blk);
+            for (i = 0; i < 2048 && found < 28; i++) {
+                uintptr_t v = 0;
+                __try { v = sp[i]; } __except(1) { break; }
+                { uint32_t gv = guest_func_for_host(v);
+                  if (gv) { fprintf(stderr, " sub_%08X", gv); found++; } }
+            }
+            fprintf(stderr, "\n"); fflush(stderr);
+        }
+    }
+}
 
 /* XWA_PCRINGDUMP=<ms>: print the ring from a watchdog thread. A hang leaves the ring holding the
  * spin, but nothing downstream ever runs to print it -- so print it from outside. */
@@ -4103,6 +4132,13 @@ static DWORD WINAPI xwa_pcring_dump(LPVOID unused)
     for (;;) {
         unsigned q;
         Sleep(ms);
+        {   /* The player record, so a hang can be told apart from "the craft exists and the game
+             * simply moved on to another screen". */
+            uint32_t pb = MEM32(0x8C1CC8) * 0xBCFu;
+            fprintf(stderr, "[PCRING] player: obj=0x%X +0x15(flying)=%u +0x12=%u +0x219=%u +0x11=%u\n",
+                    MEM32(pb + 0x8B94E0u), MEM8(pb + 0x8B94F5u), MEM8(pb + 0x8B94F2u),
+                    (unsigned)MEM16(pb + 0x8B96F9u), MEM8(pb + 0x8B94F1u));
+        }
         fprintf(stderr, "[PCRING]");
         for (q = 0; q < 64u; q++) fprintf(stderr, " %06X", g_pcring[(g_pcridx + q) % 64u]);
         fprintf(stderr, "\n"); fflush(stderr);
