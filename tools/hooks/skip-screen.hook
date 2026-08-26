@@ -1,0 +1,29 @@
+# hook: skip-screen
+# file: recomp_0003.c
+# mode: after
+# anchor:     esi = eax; /* 0x0053FF35: mov esi, eax */
+# --- body ---
+    /* XWA_SKIPSCREEN=0xCB[,frames]: tell one modal screen it is finished.
+     *
+     * sub_0053FD00 is the screen dispatcher: each pass it calls the active screen's callback at
+     * 0xA1C8D5 and takes the result in esi; sub_00541890 (0x005418E6) loops on it until it returns
+     * 1. The player-craft create reaches here through sub_004F9320 -> sub_0050C740 -> sub_00528150,
+     * which runs the hangar screen (callback 0x0051D100) modally -- and that screen ends when the
+     * player takes off, i.e. on input this port never delivers, so the create never returns.
+     * Report "done" for the named callback after a few frames so the launch can finish. */
+    if (getenv("XWA_SKIPSCREEN")) {
+        static unsigned want, after, seen; static int parsed;
+        extern uint32_t g_scr_cb;
+        uint32_t _cb = g_scr_cb;
+        if (!parsed) { const char* e = getenv("XWA_SKIPSCREEN"); const char* c;
+            parsed = 1; want = (unsigned)strtoul(e, NULL, 0);
+            c = strchr(e, ','); after = c ? (unsigned)strtoul(c + 1, NULL, 0) : 8u; }
+        if (want && _cb == want) {
+            if (++seen >= after) {
+                if (seen == after) { fprintf(stderr,
+                    "[SKIPSCREEN] cb 0x%X reported done after %u frames\n", _cb, seen);
+                    fflush(stderr); }
+                esi = 1;
+            }
+        }
+    }

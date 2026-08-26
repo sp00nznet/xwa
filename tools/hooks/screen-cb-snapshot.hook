@@ -1,0 +1,6 @@
+# hook: screen-cb-snapshot
+# file: recomp_0003.c
+# mode: before
+# anchor:     RECOMP_ICALL(MEM32(eax + 0xA1C8D5)); /* 0x0053FF2F: call dword ptr [eax + 0xa1c8d5] */
+# --- body ---
+    { extern uint32_t g_scr_cb; g_scr_cb = MEM32(eax + 0xA1C8D5); }   /* the callback about to run; eax is clobbered by the call */
