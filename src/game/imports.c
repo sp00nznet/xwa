@@ -1946,7 +1946,17 @@ static void bridge_SetCursorPos_005A9274(void) { /* USER32.dll:SetCursorPos (2 a
     if (!fn) fn = (STDFN2)GetProcAddress(LoadLibraryA("USER32.dll"), "SetCursorPos");
     uint32_t a0 = MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);
-    if (fn) g_eax = fn(a0, a1);
+    /* The game warps the pointer to re-centre it. SetCursorPos moves the REAL pointer, so a
+     * background/scripted run yanks it out from under whoever is using the machine. Only obey it
+     * while the game window is the foreground window; XWA_REALMOUSE=1 always obeys. */
+    {   extern HWND g_game_hwnd;
+        static int _force = -1;
+        if (_force < 0) _force = getenv("XWA_REALMOUSE") ? 1 : 0;
+        if (fn && (_force || (g_game_hwnd && GetForegroundWindow() == g_game_hwnd)))
+            g_eax = fn(a0, a1);
+        else
+            g_eax = 1;
+    }
     g_esp += 12;
 }
 

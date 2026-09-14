@@ -2129,7 +2129,16 @@ static void didev_GetDeviceState(void) {
          * DIK scancodes = hardware scan codes. 0x80 = pressed. */
         init_vk_to_dik_table();
         BYTE vk_state[256];
-        if (GetKeyboardState(vk_state)) {
+        /* Same focus rule as the mouse below: do not read the real keyboard while the game window
+         * is in the background, or whatever the person at the machine types leaks into the game.
+         * The synthetic XWA_SENDKEY path further down is unaffected -- it writes the state array
+         * itself, which is what a scripted run needs. XWA_REALMOUSE=1 also restores this. */
+        int kbd_owns_input;
+        {   static int _kf = -1;
+            if (_kf < 0) _kf = getenv("XWA_REALMOUSE") ? 1 : 0;
+            kbd_owns_input = _kf || (g_game_hwnd && GetForegroundWindow() == g_game_hwnd);
+        }
+        if (kbd_owns_input && GetKeyboardState(vk_state)) {
             uint8_t* di_state = (uint8_t*)(uintptr_t)lpvData;
             for (int vk = 0; vk < 256; vk++) {
                 if (vk_state[vk] & 0x80) {
@@ -2157,27 +2166,40 @@ static void didev_GetDeviceState(void) {
             }
           } }
     } else if (dev_type == DIDEV_TYPE_MOUSE && cbData >= 16) {
-        /* DIMOUSESTATE: lX(4), lY(4), lZ(4), rgbButtons[4] */
-        POINT cur;
-        GetCursorPos(&cur);
-        LONG dx = 0, dy = 0;
-        if (g_mouse_tracking) {
-            dx = cur.x - g_mouse_last_pos.x;
-            dy = cur.y - g_mouse_last_pos.y;
+        /* DIMOUSESTATE: lX(4), lY(4), lZ(4), rgbButtons[4]
+         *
+         * GetCursorPos and GetAsyncKeyState are MACHINE-WIDE: they report the physical pointer and
+         * buttons whether or not this window has focus. A scripted run in a background window was
+         * therefore fed whatever the person at the keyboard was doing -- their mouse motion became
+         * view/menu movement and their clicks became game clicks, which derails the automated
+         * frontend navigation and looks exactly like a nondeterministic engine bug. Only sample the
+         * real device while the game window is actually the foreground window; otherwise report a
+         * still, unclicked mouse. XWA_REALMOUSE=1 restores the old always-sample behaviour. */
+        int owns_input;
+        {   static int _force = -1;
+            if (_force < 0) _force = getenv("XWA_REALMOUSE") ? 1 : 0;
+            owns_input = _force || (g_game_hwnd && GetForegroundWindow() == g_game_hwnd);
         }
-        g_mouse_last_pos = cur;
-        g_mouse_tracking = 1;
-
-        /* Write DIMOUSESTATE */
         int32_t* state = (int32_t*)(uintptr_t)lpvData;
-        state[0] = (int32_t)dx;       /* lX - relative X */
-        state[1] = (int32_t)dy;       /* lY - relative Y */
-        state[2] = 0;                 /* lZ - wheel (TODO) */
-        /* rgbButtons[4] at offset 12 */
         uint8_t* buttons = (uint8_t*)(uintptr_t)(lpvData + 12);
-        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) buttons[0] = 0x80;
-        if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) buttons[1] = 0x80;
-        if (GetAsyncKeyState(VK_MBUTTON) & 0x8000) buttons[2] = 0x80;
+        state[0] = 0; state[1] = 0; state[2] = 0;
+        if (!owns_input) {
+            /* Drop the tracking origin too, so regaining focus does not deliver one huge delta
+             * built from wherever the pointer wandered while we were in the background. */
+            g_mouse_tracking = 0;
+        } else {
+            POINT cur;
+            GetCursorPos(&cur);
+            if (g_mouse_tracking) {
+                state[0] = (int32_t)(cur.x - g_mouse_last_pos.x);   /* lX - relative X */
+                state[1] = (int32_t)(cur.y - g_mouse_last_pos.y);   /* lY - relative Y */
+            }
+            g_mouse_last_pos = cur;
+            g_mouse_tracking = 1;
+            if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) buttons[0] = 0x80;
+            if (GetAsyncKeyState(VK_RBUTTON) & 0x8000) buttons[1] = 0x80;
+            if (GetAsyncKeyState(VK_MBUTTON) & 0x8000) buttons[2] = 0x80;
+        }
     }
     /* For joystick/unknown: leave zeroed (centered, no buttons) */
 
