@@ -1,0 +1,31 @@
+# hook: player-fg-craft
+# file: recomp_0000.c
+# mode: before
+# anchor:     SET_LO8(edx, MEM8(esi + 0x28)); /* 0x00415F97: mov dl, byte ptr [esi + 0x28] */
+# --- body ---
+    /* World-build's roster pass (0x00415F20..0x00415FD3) walks the 8-entry roster at 0xAF39BE and,
+     * for each entry that owns a flight group, stamps the PLAYER'S OWN LOADOUT over that group's
+     * fields -- craft type FG+0x6B from roster+0x24, plus warheads/beam/count from +0x28/+0x2C/
+     * +0x30/+0x34/+0x38. In retail the roster entry was filled in by the concourse/hangar, so this
+     * writes the craft you actually chose. This port seeds the roster itself (roster-seed.hook) and
+     * leaves those loadout bytes at 0, so the pass wrote craft type 0 over the mission's own value:
+     * 1b0m1fw's player group is "Sabra", craft 38 (Corellian Transport), and it came out 0 -- which
+     * the craft table renders and names as the X-wing. Every OTHER group kept its .tie type, which
+     * is why only the player's ship was wrong.
+     *
+     * Copy the group's parsed values INTO the roster entry first, so the engine's own copy back is
+     * an identity and the mission decides the player's craft -- which is what a campaign mission
+     * does. Only fires when the entry carries no craft at all (type 0 is not a real species; the
+     * table is 1-based), so a real skirmish/MP loadout is left alone. XWA_NOFGCRAFT disables. */
+    if (!getenv("XWA_NOFGCRAFT") && MEM8(esi + 0x24) == 0) {
+        MEM8(esi + 0x24) = MEM8(ecx + 0x80DCEB);   /* craft type   */
+        MEM8(esi + 0x28) = MEM8(ecx + 0x80DCEE);
+        MEM8(esi + 0x2C) = MEM8(ecx + 0x80DCEF);
+        MEM8(esi + 0x30) = MEM8(ecx + 0x80EA47);
+        MEM8(esi + 0x34) = MEM8(ecx + 0x80DCEC);   /* craft count  */
+        MEM8(esi + 0x38) = MEM8(ecx + 0x80DCFA);
+        { static int _c; if (_c < 2) { _c++;
+            fprintf(stderr, "[FGCRAFT] roster entry had no craft; taking the mission's: FG type=%u count=%u\n",
+                    MEM8(ecx + 0x80DCEB), MEM8(ecx + 0x80DCEC));
+            fflush(stderr); } }
+    }

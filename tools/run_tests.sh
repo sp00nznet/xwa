@@ -23,10 +23,12 @@ GAME="$ROOT/../Star Wars X-Wing Alliance"
 EXE="$ROOT/build/Release/xwa_recomp.exe"
 DEC="$ROOT/config/xwingalliance_decrypted.exe"
 LOGS="${TMPDIR:-/tmp}"
-WANT="${*:-1 2 3 4 5 6}"
+WANT="${*:-1 2 3 4 5 6 7}"
 pass=0; fail=0
 
 taskkill //F //IM xwa_recomp.exe >/dev/null 2>&1
+# taskkill /F has been observed timing out on a thrashing process; kill by PID as a fallback.
+ps -W 2>/dev/null | grep -i xwa_recomp | awk '{print $1}' | while read _p; do kill -9 "$_p" 2>/dev/null; done
 [ -f "$EXE" ] || { echo "no build at $EXE -- run cmake --build build --config Release"; exit 1; }
 
 ok()   { echo "  PASS  $1"; pass=$((pass+1)); }
@@ -78,7 +80,11 @@ case " $WANT " in *" 4 "*)
   ( cd "$GAME" && XWA_DPSP=1 XWA_DPSESS=1 XWA_AUTOPILOT=1 XWA_PILOT=Test XWA_FLYDEMO=1 XWA_NONAV=1       XWA_BARRSEL=4 XWA_NOLST=1 XWA_NATIVESCANF=1 XWA_D3DCAPS=1 XWA_PUMPFIX=1 XWA_RENDERINIT=1       XWA_WAITEXIT=1 XWA_WAITAFTER=120 timeout 150 "$EXE" "$DEC" > "$LOGS/t4.log" 2>&1 )
   grep -aq 'sub_0049AFC0 returned 1' "$LOGS/t4.log" && ok "session create succeeds"       || bad "session create still fails (peer wait / timeout)"
   grep -aq '49B0BC' "$LOGS/t4.log" && ok "took the host path, no 60s peer wait"       || bad "did not take the host path"
-  grep -aq 'WORLDBUILD] CALLED' "$LOGS/t4.log" && ok "world build runs past the session gate"       || bad "world build never ran"
+  # Assert on sub_0050A7E0's own progress markers, not the exit summary's [WORLDBUILD] line:
+  # that line is gated on g_wbmark, which only the call site at 0x005714D2 sets, so it goes quiet
+  # whenever world build is reached by another route -- reporting "never ran" for a run that ran
+  # it fine. L_0050B2FE is world build's last block before world-init, i.e. well past the gate.
+  grep -aq 'reached L_0050B2FE' "$LOGS/t4.log" && ok "world build runs past the session gate"       || bad "world build never reached world-init"
 esac
 
 # ---- 5. the engine's own mission all the way to submitted geometry ------------------------------
@@ -96,6 +102,28 @@ case " $WANT " in *" 5 "*)
   # HUD text on it -- that is what "no visible frame" looked like for a long time.
   grep -a 'RTDUMP] capturing' "$LOGS/t5.log" | grep -qv 'native_keep=0' \
       && ok "captured frame carries native geometry" || bad "captured frame has no native geometry"
+esac
+
+# ---- 7. the player actually gets a craft, i.e. real spaceflight -----------------------------
+# The whole point of the campaign path: sub_0041EF60 ("build player craft record + OPT") has to
+# RUN. It is gated at 0x00457D09 on rec+0x15 being non-zero -- state the concourse leaves and this
+# port, entering off the barracks screen, never had. Without it the mission world flies with no
+# player craft in it, which looked like flight but is not the player flying.
+case " $WANT " in *" 7 "*)
+  echo "[7] player craft built (real spaceflight)"
+  # Retry until the marker under test appears, not merely until geometry shows up: flight entry
+  # is flaky (~1 in 3) and a run can render while stalling in the frontend dialog at 0x559B50.
+  ENGINE_UNTIL='past sub_41EF60' ENGINE_TRIES=8     sh "$ROOT/tools/run_engine_flight.sh" "$LOGS/t7.log" XWA_SEATPLAYER=1 >/dev/null 2>&1
+  # sub_0041EF60 has two exits and the naming is the opposite of the obvious one: 0x0041F1B0
+  # returns 1 from the "nothing to build" path, the FULL build runs on to 0x0041F9E3 and returns 0.
+  # Assert the exit block, not the return value.
+  grep -aq 'past sub_41EF60 eax=0x0 lastblk=0x41F9E3' "$LOGS/t7.log" && ok "sub_0041EF60 ran the full player-craft build" || bad "player craft never built"
+  # ... and that it built the craft the MISSION gives the player (1b0m1fw: Sabra, type 38,
+  # Corellian Transport). The seeded roster used to stamp craft type 0 over it, which the game
+  # then flew and named as an X-wing.
+  grep -aq 'FGCRAFT] .*FG type=38' "$LOGS/t7.log" && ok "player flies the mission's craft (type 38)" || bad "player craft type is not the mission's"
+  cr=$(grep -ac 'SEH CRASH' "$LOGS/t7.log")
+  [ "$cr" = "0" ] && ok "no crash with a player craft in the world" || bad "$cr crash(es)"
 esac
 
 # ---- 6. the generated-code hooks still anchor ---------------------------------------------------

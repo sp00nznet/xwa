@@ -984,6 +984,56 @@ void xwa_native_flush(void)
                             "obj=(%d,%d,%d) cam=(%d,%d,%d) rot=(%d,%d,%d) camrot=(%d,%d,%d)\n",
                     g_nmesh_n, n, x0, x1, y0, y1, g_np[0], g_np[1], g_np[2], g_np[3], g_np[4], g_np[5],
                     g_nrot[0], g_nrot[1], g_nrot[2], g_camrot[0], g_camrot[1], g_camrot[2]);
+            /* XWA_MODELDBG: for every craft the MISSION asks for, report whether the engine has a
+             * model for it. Mission flight groups live at 0x80DC80 (stride 0xE42, craft type at
+             * +0x6B); type -> craft-def index is MEM16(type*24 + 0x5FB252), the def record is
+             * 0x5BB4B2 + def*0x3DB with its OPT name at +0, per-type model data is
+             * 0x8D9760 + type*0x194 and the type -> model registry is MEM16(0x7CA6E0 + type*2). */
+            if (dumped == 1 && getenv("XWA_MODELDBG")) {
+                uint32_t k, n2 = (uint32_t)MEM16(0x7B4C00u);
+                int ld = 0, d2;
+                fprintf(stderr, "[MODELDBG] mission FGs=%u\n", n2);
+                for (k = 0; k < n2 && k < 32u; k++) {
+                    uint32_t r = 0x80DC80u + k * 0xE42u, t = MEM8(r + 0x6B), di, j;
+                    char nm[32];
+                    if (!t) continue;
+                    di = (t < 0x22Du) ? MEM16(t * 24u + 0x5FB252u) : 0xFFFFu;
+                    nm[0] = 0;
+                    if (di < 0xC0u) { for (j = 0; j < 28u; j++) { uint8_t c = MEM8(0x5BB4B2u + di * 0x3DBu + j);
+                        nm[j] = (c >= 32 && c < 127) ? (char)c : 0; if (!c) break; } nm[28] = 0; }
+                    fprintf(stderr, "[MODELDBG]  fg%02u type=%3u def=%u name=%s modeldata=0x%X reg=%u\n",
+                            k, t, di, nm, MEM32(0x8D9760u + t * 0x194u), (unsigned)MEM16(0x7CA6E0u + t * 2u));
+                }
+                for (d2 = 0; d2 < 0xC0; d2++) { uint8_t c0 = MEM8(0x5BB4B2u + (uint32_t)d2 * 0x3DBu);
+                    if (c0 >= 32 && c0 < 127) { char dn[32]; uint32_t q;
+                        for (q = 0; q < 28u; q++) { uint8_t c = MEM8(0x5BB4B2u + (uint32_t)d2 * 0x3DBu + q);
+                            dn[q] = (c >= 32 && c < 127) ? (char)c : 0; if (!c) break; } dn[28] = 0;
+                        fprintf(stderr, "[MODELDBG]  def%03d = %s\n", d2, dn); ld++; } }
+                {   uint32_t tbl = MEM32(0x7B33C4u), c2 = MEM32(0x63185Cu), q2;
+                    fprintf(stderr, "[MODELDBG] runtime FG table 0x%08X count=%u\n", tbl, c2);
+                    for (q2 = 0; q2 < c2 && q2 < 24u; q2++) {
+                        uint32_t e = tbl + q2 * 0x27u;
+                        fprintf(stderr, "[MODELDBG]  rt%02u +0=%u +2=%u +4=%u +5=%u reg(+2)=%u\n",
+                            q2, (unsigned)MEM16(e), (unsigned)MEM16(e + 2), MEM8(e + 4), MEM8(e + 5),
+                            (unsigned)MEM16(0x7CA6E0u + (uint32_t)MEM16(e + 2) * 2u));
+                    } }
+                /* Hangar scene: sub_004554F0 picks the map at 0x00455A8E -- 0x9C6754 becomes 308
+                 * (Hangar.opt interior) when MEM8(0xB07C6B) is 0, else 179 (FamilyBase exterior) --
+                 * loads its model through sub_00456FA0 and gives it a runtime group in 0x68BCC4. */
+                {   uint32_t hty = (uint32_t)MEM16(0x9C6754u), hfg = MEM32(0x68BCC4u);
+                    uint32_t t3 = MEM32(0x7B33C4u);
+                    fprintf(stderr, "[MODELDBG] hangar: map type=%u (0xB07C6B=%u) fg=%u reg=%u\n",
+                            hty, MEM8(0xB07C6Bu), hfg,
+                            (hty < 0x400u) ? (unsigned)MEM16(0x7CA6E0u + hty * 2u) : 0u);
+                    if (t3 && hfg < 0x400u) {
+                        uint32_t e3 = t3 + hfg * 0x27u;
+                        fprintf(stderr, "[MODELDBG] hangar fg%u: +0=%u +2=%u +4=%u +5=%u ro(+0x23)=0x%X\n",
+                                hfg, (unsigned)MEM16(e3), (unsigned)MEM16(e3 + 2), MEM8(e3 + 4), MEM8(e3 + 5),
+                                MEM32(e3 + 0x23));
+                    } }
+                fprintf(stderr, "[MODELDBG] craft-defs with a name: %d of 192\n", ld);
+                fflush(stderr);
+            }
             if (dumped == 1 && getenv("XWA_CAMPROBE")) {
                 /* the camera position lives at playerslot*0xBCF + 0x8BA028; its orientation should
                  * be a few fields away -- print the neighbourhood as int16 angle candidates */
@@ -1198,7 +1248,7 @@ static DWORD WINAPI watchdog_loop_thread(LPVOID p) {
         Sleep(4000);
         uint32_t calls = g_total_calls, icalls = g_icall_count, tidx = g_trace_ring_idx;
         uint32_t delta = calls - last_calls;
-        HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_watchdog.log",
+        HANDLE h = CreateFileA("xwa_watchdog.log",
             GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             char buf[256]; DWORD wr;
@@ -1451,7 +1501,7 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     }
 
     /* Write crash dump using raw Win32 API only - no CRT at all */
-    HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_crash.log",
+    HANDLE h = CreateFileA("xwa_crash.log",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         char buf[256];
@@ -4189,7 +4239,7 @@ void xwa_mile(const char* tag)
 
 static void dump_trace_atexit(void) {
     /* Write trace to file using raw Win32 API (reliable even in exit context) */
-    HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_atexit.log",
+    HANDLE h = CreateFileA("xwa_atexit.log",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         char buf[256];
@@ -4425,7 +4475,7 @@ static DWORD WINAPI watchdog_thread(LPVOID param) {
     Sleep(timeout_ms);
 
     /* Use raw Win32 CreateFile to avoid CRT locking issues */
-    HANDLE hFile = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_watchdog.log",
+    HANDLE hFile = CreateFileA("xwa_watchdog.log",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile != INVALID_HANDLE_VALUE) {
         char buf[512];
@@ -4534,7 +4584,7 @@ static void NTAPI hook_NtTerminateProcess(HANDLE hProcess, NTSTATUS_T exitStatus
     WORD nframes = CaptureStackBackTrace(0, 48, bt, NULL);
 
     /* Write diagnostics to file using raw Win32 API */
-    HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_terminate.log",
+    HANDLE h = CreateFileA("xwa_terminate.log",
         GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h != INVALID_HANDLE_VALUE) {
         char buf[512];
@@ -4677,7 +4727,7 @@ int main(int argc, char* argv[]) {
     /* Hang watchdog (opt-in): periodically dumps the trace ring so a hang is diagnosable. */
     if (getenv("XWA_WATCHDOG")) {
         CreateThread(NULL, 0, watchdog_loop_thread, NULL, 0, NULL);
-        printf("[*] hang watchdog started -> D:\\recomp\\pc\\xwa\\xwa_watchdog.log\n");
+        printf("[*] hang watchdog started -> xwa_watchdog.log\n");
     }
 
     /* Install VEH crash handler */
@@ -4908,7 +4958,7 @@ int main(int argc, char* argv[]) {
             /* Dump trace ring on any unhandled exception */
             char buf[512];
             DWORD written;
-            HANDLE h = CreateFileA("D:\\recomp\\pc\\xwa\\xwa_seh_crash.log",
+            HANDLE h = CreateFileA("xwa_seh_crash.log",
                 GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
             if (h != INVALID_HANDLE_VALUE) {
                 int len = snprintf(buf, sizeof(buf),

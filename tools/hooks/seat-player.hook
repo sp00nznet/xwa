@@ -1,0 +1,21 @@
+# hook: seat-player
+# file: recomp_0000.c
+# mode: before
+# anchor:     /* cmp MEM8(eax + 0x8B94F5), LO8(ebx) */ /* 0x00457D09: cmp byte ptr [eax + 0x8b94f5], bl */
+# --- body ---
+    /* The gate below is `cmp [rec+0x15], bl` with ebx zeroed at 0x00457C27, i.e. "if rec+0x15 == 0,
+     * skip the whole player-craft build". In retail the player has been sitting in a craft since
+     * the concourse, so +0x15 is non-zero by the time a mission loads and the build at 0x00457D62
+     * (sub_0041EF60, "build player craft record + OPT") runs. This port enters a mission straight
+     * off the barracks screen, so +0x15 was still 0 and sub_0041EF60 had never once executed --
+     * which is why the mission world flew with no player craft in it.
+     *
+     * Supply the state the concourse would have left, the same way the roster entry is supplied
+     * (see roster-seed.hook). It only fires when the field is 0, so a run that DID come through
+     * the concourse is untouched. XWA_NOSEAT disables; XWA_SEATPLAYER makes it announce itself. */
+    if (!getenv("XWA_NOSEAT") && MEM8(eax + 0x8B94F5u) == 0) {
+        static int _s; if (getenv("XWA_SEATPLAYER") && _s < 2) { _s++;
+            fprintf(stderr, "[SEATPLAYER] rec+0x15 was 0 -> 1 so the loader builds the player craft\n");
+            fflush(stderr); }
+        MEM8(eax + 0x8B94F5u) = 1;
+    }

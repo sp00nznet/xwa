@@ -3,9 +3,16 @@
 # mode: after
 # anchor:     esi = MEM32(esp + 0x50); /* 0x0049B088: mov esi, dword ptr [esp + 0x50] */
 # --- body ---
-    /* XWA_DPSP: sub_0049AFC0 picks its mode from two decimal strings in the launch-parameter block
-     * (esi = connection kind, ebp = player count). Reaching flight without the multiplayer setup
-     * screens leaves both at their .data default "0", which selects the peer path -- and that then
-     * waits 60s for handshake messages 0xD/0xE that no peer will ever send. 1/1 is host-with-one-
-     * player, the shape a single-player mission actually has. */
-    if (getenv("XWA_DPSP")) { esi = 1; ebp = 1; }
+    /* sub_0049AFC0 picks its mode from two decimal strings in the launch-parameter block
+     * (esi = connection kind, ebp = player count), and takes the host path only when both are 1.
+     * Only the multiplayer setup screens ever write those strings; a single-player campaign
+     * launch leaves both at their .data default "0", which selects the PEER path -- which waits
+     * 60s for handshake messages 0xD/0xE that no peer will ever send, then returns 0. The caller,
+     * world build sub_0050A7E0, treats that 0 as fatal: it cleans up at 0x0049B9D0 and returns 0
+     * at 0x0050ABE7, and the engine aborts the mission to the DEBRIEF screen instead of flying it.
+     *
+     * XWA runs single player through a local DirectPlay session, so host-with-one-player is the
+     * shape a single-player mission actually has. Apply it only when both fields are still the
+     * untouched default, so a real multiplayer setup is left exactly as configured.
+     * XWA_DPSP forces it regardless; XWA_NODPSP disables it. */
+    if (!getenv("XWA_NODPSP") && (getenv("XWA_DPSP") || (esi == 0 && ebp == 0))) { esi = 1; ebp = 1; }

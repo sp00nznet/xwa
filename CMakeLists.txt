@@ -37,6 +37,16 @@ if(MSVC)
     # guest instruction in a comment -- so a crash points straight at the guest opcode.
     # Does not change codegen (/Zi is debug info only) and costs nothing at runtime.
     set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /Oi /Zi")
+
+    # /MP: compile each translation unit in its own cl.exe process.
+    # MSBuild hands EVERY source file of a project to ONE cl.exe invocation, so a single
+    # compiler process accumulates state across all of them -- and the generated tree is
+    # ~38 MB of C (recomp_0000.c alone is 12 MB). That process runs out of heap partway
+    # through, reported as "fatal error C1002: compiler is out of heap space in pass 2" at
+    # a DIFFERENT line each run, which reads like a code bug and is not one. It also is not
+    # fixed by the x64-hosted toolset: the machine had 80 GB free when this first bit.
+    # /FS serializes PDB writes, which /Zi needs once several processes are compiling at once.
+    add_compile_options(/MP /FS)
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
     #set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
 endif()

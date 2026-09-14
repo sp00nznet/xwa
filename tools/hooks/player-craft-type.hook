@@ -1,0 +1,36 @@
+# hook: player-craft-type
+# file: recomp_0000.c
+# mode: before
+# anchor:     SET_LO16(eax, MEM16(eax + 0x8B94EE)); /* 0x00457D28: mov ax, word ptr [eax + 0x8b94ee] */
+# --- body ---
+    /* rec+0x8B94EE is the player's ENGINE craft type -- the number the model/def tables are keyed
+     * on, NOT the .tie's species number. Retail fills it in sub_0041A960 ("seat the player in a
+     * flight group") from that group's runtime entry +2; this port never seats the player, so it
+     * arrived here as 0 and the loader built the player an object with no craft type and no model,
+     * while every OTHER mission craft came out right.
+     *
+     * Two numbering systems, and mixing them is the trap:
+     *   .tie / SHIPLIST.TXT species  -- FG+0x6B in the mission array at 0x80DC80 (stride 0xE42).
+     *                                   1b0m1fw's player group is 38, "Corellian Trans".
+     *   engine craft type            -- runtime FG +2, craft-def index (0x5BB4B2, stride 0x3DB) is
+     *                                   type-1, model registry is MEM16(0x7CA6E0 + type*2).
+     *                                   38 maps to 58, "CorellianTransport2".
+     * The engine's own converter is the word table at 0x5B0F70 (0x22D entries, species -> type),
+     * which world-build scans at 0x00404490 when it builds a runtime group. Use the same table.
+     *
+     * Only fires when the field is still 0, so a run that really did seat the player is untouched.
+     * XWA_NOPCTYPE disables. */
+    if (!getenv("XWA_NOPCTYPE") && MEM16(eax + 0x8B94EE) == 0) {
+        uint32_t _fg = MEM32(eax + 0x8B94E0);
+        if (_fg < (uint32_t)MEM16(0x7B4C00u)) {
+            uint32_t _sp = MEM8(0x80DC80u + _fg * 0xE42u + 0x6B);
+            uint32_t _ct = (_sp && _sp < 0x22Du) ? (uint32_t)MEM16(0x5B0F70u + _sp * 2u) : 0u;
+            if (_ct) {
+                MEM16(eax + 0x8B94EE) = (uint16_t)_ct;
+                { static int _lg; if (_lg < 2) { _lg++;
+                    fprintf(stderr, "[PCTYPE] player FG %u species %u -> engine craft type %u\n",
+                            _fg, _sp, _ct);
+                    fflush(stderr); } }
+            }
+        }
+    }

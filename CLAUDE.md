@@ -27,9 +27,16 @@ Static recompilation of Star Wars: X-Wing Alliance (1999) from its original Win3
 
 ## Build Commands
 ```bash
-cmake -B build -G "Visual Studio 17 2022" -A Win32
+cmake -B build -G "Visual Studio 17 2022" -A Win32 -T host=x64
 cmake --build build --config Release
 ```
+`-T host=x64` and `/MP` (in CMakeLists.txt) are BOTH required: MSBuild compiles every source
+file of a project in one `cl.exe`, and ~38 MB of generated C exhausts it -- `fatal error C1002:
+compiler is out of heap space in pass 2`, naming a different (innocent) line each run. After a
+failure of that kind, reconfigure into a CLEAN build directory. See README for the full note.
+
+A failed compile deletes its `.obj`, but a successful link happily reuses a stale one -- check
+`build/xwa_recomp.dir/Release/*.obj` timestamps when behaviour and source disagree.
 
 ## Code Generation
 ```bash
