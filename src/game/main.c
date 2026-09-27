@@ -989,20 +989,43 @@ void xwa_native_flush(void)
              * +0x6B); type -> craft-def index is MEM16(type*24 + 0x5FB252), the def record is
              * 0x5BB4B2 + def*0x3DB with its OPT name at +0, per-type model data is
              * 0x8D9760 + type*0x194 and the type -> model registry is MEM16(0x7CA6E0 + type*2). */
+            /* XWA_HANGARDBG: the hangar/launch sequence is a state machine on 0x68BBA0, driven
+             * per frame by sub_0045B0D0 from the flight loop. 0x8053E5 gates the whole hangar
+             * branch at 0x0045B11D, 0x9C6754 is the hangar map craft type (0x134 = Hangar.opt,
+             * 0xB3 = FamilyBase exterior) and 0x9C6750/0x68BBB8 are the docked / mission-over
+             * flags. Print the tuple only when it changes, so a run shows the transitions rather
+             * than one frame's worth of numbers. */
+            if (getenv("XWA_HANGARDBG")) {
+                static uint32_t last = 0xFFFFFFFFu; static int n;
+                uint32_t now = (MEM32(0x68BBA0) & 0xFFu)
+                             | ((MEM32(0x9C6750) & 0xFFu) << 8)
+                             | ((uint32_t)MEM16(0x9C6754) << 16);
+                if (now != last && n < 60) { last = now; n++;
+                    fprintf(stderr, "[HANGAR] state(68BBA0)=%u docked(9C6750)=%u map(9C6754)=0x%X "
+                                    "active(8053E5)=%u entries(AF138E)=%u end(68BBB8)=%u\n",
+                            MEM32(0x68BBA0), MEM32(0x9C6750), (unsigned)MEM16(0x9C6754),
+                            MEM8(0x8053E5), MEM32(0xAF138E), MEM32(0x68BBB8));
+                    fflush(stderr); }
+            }
             if (dumped == 1 && getenv("XWA_MODELDBG")) {
                 uint32_t k, n2 = (uint32_t)MEM16(0x7B4C00u);
                 int ld = 0, d2;
                 fprintf(stderr, "[MODELDBG] mission FGs=%u\n", n2);
                 for (k = 0; k < n2 && k < 32u; k++) {
-                    uint32_t r = 0x80DC80u + k * 0xE42u, t = MEM8(r + 0x6B), di, j;
+                    uint32_t r = 0x80DC80u + k * 0xE42u, sp = MEM8(r + 0x6B), t, di, j;
                     char nm[32];
-                    if (!t) continue;
-                    di = (t < 0x22Du) ? MEM16(t * 24u + 0x5FB252u) : 0xFFFFu;
+                    if (!sp) continue;
+                    /* +0x6B is the .tie SPECIES. Everything downstream (craft-def, model data, the
+                     * model registry) is keyed on the ENGINE TYPE, and the engine's own converter is
+                     * the word table at 0x5B0F70. Reading those tables with the species instead --
+                     * which this dump used to do -- reports "no model" for craft that have one. */
+                    t = (sp < 0x22Du) ? (uint32_t)MEM16(0x5B0F70u + sp * 2u) : 0u;
+                    di = (t && t < 0x22Du) ? MEM16(t * 24u + 0x5FB252u) : 0xFFFFu;
                     nm[0] = 0;
                     if (di < 0xC0u) { for (j = 0; j < 28u; j++) { uint8_t c = MEM8(0x5BB4B2u + di * 0x3DBu + j);
                         nm[j] = (c >= 32 && c < 127) ? (char)c : 0; if (!c) break; } nm[28] = 0; }
-                    fprintf(stderr, "[MODELDBG]  fg%02u type=%3u def=%u name=%s modeldata=0x%X reg=%u\n",
-                            k, t, di, nm, MEM32(0x8D9760u + t * 0x194u), (unsigned)MEM16(0x7CA6E0u + t * 2u));
+                    fprintf(stderr, "[MODELDBG]  fg%02u species=%3u type=%3u def=%u name=%s modeldata=0x%X reg=%u\n",
+                            k, sp, t, di, nm, MEM32(0x8D9760u + t * 0x194u), (unsigned)MEM16(0x7CA6E0u + t * 2u));
                 }
                 for (d2 = 0; d2 < 0xC0; d2++) { uint8_t c0 = MEM8(0x5BB4B2u + (uint32_t)d2 * 0x3DBu);
                     if (c0 >= 32 && c0 < 127) { char dn[32]; uint32_t q;

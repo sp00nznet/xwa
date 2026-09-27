@@ -1,0 +1,32 @@
+# hook: hangar-active
+# file: recomp_0002.c
+# mode: after
+# anchor:     MEM8(0x8053E5) = (uint8_t)(LO8(ecx)); /* 0x0050FE61: mov byte ptr [0x8053e5], cl */
+# --- body ---
+    /* XWA_HANGARON=1: force the hangar-branch gate on.
+     *
+     * `MEM8(0x8053E5)` is recomputed every flight frame here, as `sete` on a comparison whose left
+     * side is MEM32(0xAE2A8A) (the flight mode, 4 at flight). It gates the ENTIRE hangar branch of
+     * the per-frame hangar/launch driver `sub_0045B0D0` at 0x0045B11D -- with it 0, the driver
+     * jumps straight to L_0045B587 and the hangar state machine on 0x68BBA0 never advances. That
+     * is measurably what happens on the campaign path: `[HANGAR] state=0 docked=1 map=0x134
+     * active=0`, and synthetic ENTER presses into the live hangar menu change nothing.
+     *
+     * RESOLVED, and the answer is that the engine is RIGHT to compute 0: `ebx = 1` at 0x0050FCD9
+     * is the only write to ebx in this function, so the compare is
+     *     MEM8(0x8053E5) = (MEM32(0xAE2A8A) == 1)
+     * and 0xAE2A8A is the flight MODE, which is 4 = campaign (see the XWA_FORCEFLIGHT note "real
+     * game: AE2A8A=4 at flight" and the SKIRMISH-BUILD note in sub_005438B0: mode 3 = skirmish,
+     * "the concourse uses sub_547800(4) for campaign"). So the guarded branch is MODE-1 code, not
+     * the campaign's hangar, and forcing it runs mode-1 logic against mode-4 state: the run dies
+     * with 0xC0000005 in a sub_00452440 -> sub_0059AEC0 loop and renders no frames.
+     *
+     * Kept ONLY as the record of that experiment -- do not enable it expecting a launch, and do
+     * not make it default-on. The campaign's hangar menu is handled somewhere else; start from
+     * the STRINGS.TXT token !HANGAR_MENU_CRAFT_MENU! instead. */
+    if (getenv("XWA_HANGARON") && MEM8(0x8053E5) == 0) {
+        MEM8(0x8053E5) = 1;
+        { static int _lg; if (_lg < 2) { _lg++;
+            fprintf(stderr, "[HANGARON] forced 0x8053E5 = 1 (AE2A8A=%u)\n", MEM32(0xAE2A8A));
+            fflush(stderr); } }
+    }

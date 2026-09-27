@@ -22,19 +22,27 @@ cd "$(dirname "$0")/../../Star Wars X-Wing Alliance" || exit 1
 TRIES="${ENGINE_TRIES:-6}"
 WAIT="${ENGINE_WAIT:-150}"
 TMO="${ENGINE_TIMEOUT:-200}"
+# Spectator camera. ENGINE_SPEC= (empty) renders from the PLAYER's own record instead,
+# which is the view the campaign goal actually cares about.
+SPEC="${ENGINE_SPEC-XWA_NLOOKAT=1 XWA_NCAMDIST=400}"
 i=0
 while [ "$i" -lt "$TRIES" ]; do i=$((i+1))
   rm -f rt_flight.bmp
-  env "$@" \
+  # A hung run from a previous invocation starves the machine: the next launch then exits
+  # cleanly during startup after ~680 log lines and looks exactly like a fresh regression.
+  taskkill /F /IM xwa_recomp.exe >/dev/null 2>&1
+  ps -W 2>/dev/null | grep -i xwa_recomp | awk '{print $1}' | while read p; do kill -9 "$p" 2>/dev/null; done
+  env \
     XWA_BARRSEL=4 XWA_NONAV=1 XWA_AUTOPILOT=1 XWA_PILOT=Test XWA_FLYDEMO=1 \
     XWA_DPSP=1 XWA_DPOBJ=1 \
     XWA_ROGUARD=1 XWA_NAMEGUARD=1 XWA_STRGUARD=1 \
     XWA_NATIVEDRAW=1 XWA_ALLOBJ=1 XWA_LOADALL=1 XWA_TBLGUARD=1 XWA_MKCTX=1 XWA_RENDERFN=1 \
     XWA_RUNSCENE=1 XWA_KEEP3D=1 XWA_3DFLAG=1 XWA_ZEROFILL=1 XWA_FGFILL=1 \
-    XWA_NLOOKAT=1 XWA_NCAMDIST=400 XWA_RTDUMP=25 \
+    $SPEC XWA_RTDUMP="${ENGINE_RTDUMP:-25}" \
     XWA_NOLST=1 XWA_NATIVESCANF=1 XWA_D3DCAPS=1 XWA_RENDERINIT=1 XWA_PUMPFIX=1 \
     XWA_WAITEXIT=1 XWA_WAITAFTER=150 \
-    timeout 200 ../recomp/build/Release/xwa_recomp.exe \
+    "$@" \
+    timeout "$TMO" ../recomp/build/Release/xwa_recomp.exe \
       ../recomp/config/xwingalliance_decrypted.exe > "$LOG" 2>&1
   n=$(grep -ac NATIVEDRAW "$LOG")
   # ENGINE_UNTIL=<pattern>: keep retrying until the log contains it. Flight entry is flaky and a

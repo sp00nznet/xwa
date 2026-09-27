@@ -1670,6 +1670,12 @@ static int xwa_winkey_down(uint32_t vk) {
     want = (uint32_t)strtoul(k, NULL, 0);
     if (vk != want) return 0;
     n++;
+    /* XWA_KEYINFLIGHT=1: hold the counter at zero until the flight loop is running, so
+     * XWA_WINKEYAFTER counts flight frames. Without it the synthetic key also fires in the
+     * frontend screens, which answers dialogs the automation is still navigating. */
+    { extern int g_in_flight; static int gif = -1;
+      if (gif < 0) gif = getenv("XWA_KEYINFLIGHT") ? 1 : 0;
+      if (gif && !g_in_flight) { n = 0; return 0; } }
     after = getenv("XWA_WINKEYAFTER") ? (unsigned)strtoul(getenv("XWA_WINKEYAFTER"), NULL, 0) : 200u;
     every = getenv("XWA_WINKEYEVERY") ? (unsigned)strtoul(getenv("XWA_WINKEYEVERY"), NULL, 0) : 60u;
     if (every < 2u) every = 2u;
@@ -1683,12 +1689,18 @@ static int xwa_winkey_down(uint32_t vk) {
     }
 }
 
-static void bridge_GetAsyncKeyState_005A9220(void) { /* USER32.dll:GetAsyncKeyState (1 args) */
+static void bridge_GetAsyncKeyState_005A9220(void) {
+    { extern int g_in_flight; static unsigned c, cf;
+      if (getenv("XWA_INPUTDBG")) { c++; if (g_in_flight) cf++;
+        if (c == 1 || cf == 1 || (cf && (cf % 500) == 0))
+          { fprintf(stderr, "[INPUTDBG] GetAsyncKeyState calls=%u inflight=%u\n", c, cf); fflush(stderr); } } }
+ /* USER32.dll:GetAsyncKeyState (1 args) */
     BRIDGE_TRACE("USER32.dll:GetAsyncKeyState");
     static STDFN1 fn = NULL;
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "GetAsyncKeyState");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
+    if (xwa_winkey_down(a0)) g_eax = 0x8001u;      /* high bit = currently down */
     g_esp += 8;
 }
 
@@ -1745,11 +1757,15 @@ static void bridge_PostQuitMessage_005A9238(void) { /* USER32.dll:PostQuitMessag
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "PostQuitMessage");
     uint32_t a0 = MEM32(g_esp + 4);
     if (fn) g_eax = fn(a0);
-    if (xwa_winkey_down(a0)) g_eax = 0x8001u;      /* high bit = currently down */
     g_esp += 8;
 }
 
-static void bridge_GetKeyboardState_005A923C(void) { /* USER32.dll:GetKeyboardState (1 args) */
+static void bridge_GetKeyboardState_005A923C(void) {
+    { extern int g_in_flight; static unsigned c, cf;
+      if (getenv("XWA_INPUTDBG")) { c++; if (g_in_flight) cf++;
+        if (c == 1 || cf == 1 || (cf && (cf % 500) == 0))
+          { fprintf(stderr, "[INPUTDBG] GetKeyboardState calls=%u inflight=%u\n", c, cf); fflush(stderr); } } }
+ /* USER32.dll:GetKeyboardState (1 args) */
     BRIDGE_TRACE("USER32.dll:GetKeyboardState");
     static STDFN1 fn = NULL;
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("USER32.dll"), "GetKeyboardState");

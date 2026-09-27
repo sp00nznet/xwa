@@ -1,0 +1,40 @@
+# hook: player-runtime-fg-type
+# file: recomp_0000.c
+# mode: after
+# anchor:     eax = MEM32(0x68BB98); /* 0x00458081: mov eax, dword ptr [0x68bb98] */
+# --- body ---
+    /* 0x68BB98 is the PLAYER's runtime flight-group index; the runtime groups live at
+     * MEM32(0x7B33C4), stride 0x27, with the engine craft type at +2. Every other group in the
+     * mission gets its +2 from world-build, but the player's stays 0 in this port: retail fills it
+     * when the concourse seats the player in his flight group, which never runs here. A group with
+     * type 0 has no craft-def, no model registry entry and no OPT, so the player's own ship is the
+     * one craft in the mission with nothing to draw -- and the hangar/launch code keys off the same
+     * field.
+     *
+     * The player's RECORD already carries the right engine type at +0x8B94EE (mission species run
+     * through the 0x5B0F70 converter -- see player-craft-type.hook), so copy it across rather than
+     * re-deriving it. Only fires when the group's type is still 0, so a run that really did seat
+     * the player is untouched. XWA_NOPCFGTYPE disables.
+     *
+     * Do NOT instead scan the table for the entry whose +5 matches the player's flight group: when
+     * the player's FG is 0 that also matches every all-zero entry past the end of the table and
+     * stamps the wrong one. 0x68BB98 is the engine's own answer to the same question. */
+    if (!getenv("XWA_NOPCFGTYPE")) {
+        uint32_t _tbl = MEM32(0x7B33C4u), _fgi = eax & 0xFFFFu;
+        uint32_t _pc  = MEM32(0x8C1CC8u) * 0xBCFu;
+        uint32_t _ty  = MEM16(_pc + 0x8B94EEu);
+        { static int _d; if (_d < 2) { _d++;
+            fprintf(stderr, "[PCFGTYPE] tbl=0x%X fg=%u recType=%u cur+2=%u\n", _tbl, _fgi, _ty,
+                    (_tbl && _fgi < 0x400u) ? (unsigned)MEM16(_tbl + _fgi * 0x27u + 2) : 0xFFFFu);
+            fflush(stderr); } }
+        if (_tbl && _fgi < 0x400u && _ty) {
+            uint32_t _e = _tbl + _fgi * 0x27u;
+            if (MEM16(_e + 2) == 0) {
+                MEM16(_e + 2) = (uint16_t)_ty;
+                { static int _lg; if (_lg < 2) { _lg++;
+                    fprintf(stderr, "[PCFGTYPE] player runtime FG %u: craft type 0 -> %u (reg=%u)\n",
+                            _fgi, _ty, (unsigned)MEM16(0x7CA6E0u + _ty * 2u));
+                    fflush(stderr); } }
+            }
+        }
+    }

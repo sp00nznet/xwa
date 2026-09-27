@@ -2155,6 +2155,9 @@ static void didev_GetDeviceState(void) {
         { const char* _k = getenv("XWA_SENDKEY");
           if (_k) {
             static uint32_t _n; _n++;
+            { extern int g_in_flight; static int _gif = -1;
+              if (_gif < 0) _gif = getenv("XWA_KEYINFLIGHT") ? 1 : 0;
+              if (_gif && !g_in_flight) _n = 0; }
             const char* _a = getenv("XWA_KEYAFTER"); const char* _e = getenv("XWA_KEYEVERY");
             uint32_t _after = _a ? (uint32_t)strtoul(_a,NULL,0) : 400u;
             uint32_t _every = _e ? (uint32_t)strtoul(_e,NULL,0) : 120u;
@@ -2208,6 +2211,11 @@ static void didev_GetDeviceState(void) {
 }
 
 static void didev_GetDeviceData(void) {
+    { extern int g_in_flight; static unsigned c, cf;
+      if (getenv("XWA_INPUTDBG")) { c++; if (g_in_flight) cf++;
+        if (c == 1 || cf == 1 || (cf && (cf % 500) == 0))
+          { fprintf(stderr, "[INPUTDBG] DI_GetDeviceData calls=%u inflight=%u\n", c, cf); fflush(stderr); } } }
+
     /* this=esp+4, cbObjData=esp+8, rgdod=esp+12, pdwItems=esp+16, flags=esp+20 */
     uint32_t pdwItems = MEM32(g_esp + 16);
     /* No data available.
@@ -2227,6 +2235,9 @@ static void didev_GetDeviceData(void) {
     { const char* _k = getenv("XWA_SENDKEY");
       if (_k) {
         static uint32_t _n, _seq; _n++;
+        { extern int g_in_flight; static int _gif = -1;
+          if (_gif < 0) _gif = getenv("XWA_KEYINFLIGHT") ? 1 : 0;
+          if (_gif && !g_in_flight) _n = 0; }
         const char* _a = getenv("XWA_KEYAFTER"); const char* _e = getenv("XWA_KEYEVERY");
         uint32_t _after = _a ? (uint32_t)strtoul(_a,NULL,0) : 400u;
         uint32_t _every = _e ? (uint32_t)strtoul(_e,NULL,0) : 120u;
