@@ -6,6 +6,10 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 ## [Unreleased]
 
 ### Added
+- `XWA_AUTOPLAY=1`: headless test harness that plays 1b0m1fw through the game's own pickup/dock/
+  hyperspace commands and in-flight messages (`tools/hooks/msg-tap.hook`). Gets through the hangar
+  launch and the first pickup.
+- Lifter patchers `tools/fix_carry.py`, `tools/fix_shiftflags.py`; host-chain sampling profiler.
 - netlab build and test: `tools/netlab_run.cmd` (the campaign mission load on a Windows test VM,
   per-experiment knobs from `xwa_knobs.cmd` in the game dir); CMake `GEN_OPT` and a static CRT so
   the clang-cl farm build runs on a machine without the VC++ redistributable.
@@ -26,6 +30,9 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 - README restructured to the house layout; deep-dive sections moved into `docs/`.
 
 ### Fixed
+- `XWA_RENDERFN` freed a bogus pointer (0x7828D0 = 1): heap corruption behind the old
+  `L_0048967D` crash. MKCTX/RENDERFN/RUNSCENE dropped from the netlab run.
+- Host FILE streams read through the game's CRT fgetc/fread; EOF bit mirrored for game code.
 - `fnstsw` was lifted as a comment, so every `fcom; fnstsw ax; test ah,N; jcc` float compare (595
   sites) branched on a stale AH. Lifter fixed; gen patched in place by `tools/fix_fnstsw.py`.
 - DirectInput buffered keyboard mock ignored `DIGDD_PEEK` and never carried real keys, so the

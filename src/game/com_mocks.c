@@ -2224,6 +2224,14 @@ static void didev_GetDeviceState(void) {
     g_esp += 16;
 }
 
+/* Buffered keyboard event queue (see didev_GetDeviceData). File scope so the XWA_AUTOPLAY
+ * harness can queue keys too (xwa_queue_key: press + release of one DIK scancode). */
+static uint8_t q_sc[64], q_dn[64]; static unsigned q_head, q_tail;
+void xwa_queue_key(uint32_t sc) {
+    if (q_tail - q_head < 62u) { q_sc[q_tail & 63] = (uint8_t)sc; q_dn[q_tail & 63] = 0x80; q_tail++;
+                                q_sc[q_tail & 63] = (uint8_t)sc; q_dn[q_tail & 63] = 0; q_tail++; }
+}
+
 static void didev_GetDeviceData(void) {
     { extern int g_in_flight; static unsigned c, cf;
       if (getenv("XWA_INPUTDBG")) { c++; if (g_in_flight) cf++;
@@ -2250,7 +2258,7 @@ static void didev_GetDeviceData(void) {
      *
      * XWA_SENDKEY=<scancode>: queue a press+release every XWA_KEYEVERY calls after XWA_KEYAFTER
      * calls (XWA_KEYINFLIGHT=1 counts flight calls only). DIK_RETURN = 0x1C. */
-    {   static uint8_t q_sc[64], q_dn[64]; static unsigned q_head, q_tail, seq;
+    {   static unsigned seq;
         static uint8_t prev[256];
         mock_com_obj_t* dev = (mock_com_obj_t*)(uintptr_t)MEM32(g_esp + 4);
         uint32_t rgdod = MEM32(g_esp + 12), cb = MEM32(g_esp + 8), flags = MEM32(g_esp + 20);

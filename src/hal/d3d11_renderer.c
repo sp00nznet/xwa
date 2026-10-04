@@ -1052,7 +1052,7 @@ void d3d11_present(void) {
         }
     }
 
-    { extern void xwa_status_tick(unsigned); xwa_status_tick(g_frame_count); }
+    { extern void xwa_status_tick(unsigned); xwa_status_tick(g_frame_count); } { extern void xwa_autoplay_tick(void); xwa_autoplay_tick(); }
 
     /* XWA_SHOTEVERY=N: save every Nth presented frame as shot_NNNNN.bmp (at most 40), so a
      * headless run on a test machine leaves a picture trail of where it got to. */

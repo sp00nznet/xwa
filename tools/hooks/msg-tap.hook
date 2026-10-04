@@ -1,0 +1,10 @@
+# hook: msg-tap
+# file: recomp_0001.c
+# mode: before
+# anchor:     eax = MEM32(0x7827E4); /* 0x00497D40: mov eax, dword ptr [0x7827e4] */
+# --- body ---
+    /* sub_00497D40(msgId, slot) posts an in-flight message (MSG_* in STRINGS.TXT, 0-based among the
+     * !MSG_ lines: 0x14E initiating pickup, 0x156 object secured, 0x162 object delivered, ...).
+     * Record the latest ids so the XWA_AUTOPLAY harness can follow the mission by the game's own
+     * feedback. Free of side effects on the game. */
+    { extern void xwa_msg_tap(uint32_t); xwa_msg_tap(MEM32(esp + 4)); }

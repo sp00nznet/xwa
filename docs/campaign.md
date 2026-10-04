@@ -60,7 +60,40 @@ hangar models load and draw. The `= HANGAR MENU =` is up and **ENTER now selects
   so a person could not use the menu either. `src/game/com_mocks.c` `didev_GetDeviceData` now keeps
   a queue that PEEK leaves in place, fed by real key edges (window focused) and `XWA_SENDKEY`.
 
-## Open problem: the crash after Launch
+## Where the mission stands (2026-10-04)
+
+Launch works: the player exits the family hangar into space in the YT-1300 cockpit. The
+`XWA_AUTOPLAY=1` test harness then plays the mission with the game's own mechanics (target, park
+in range, issue the game's pickup / dock commands, follow the in-flight message ids through the
+`msg-tap` hook): **C/C Xi 1 is picked up and secured** (messages 0x14E -> 0x12B -> 0x156).
+
+**Current blocker:** the wingman Selu (FG 3) gets the right order -- craft+0x84 = 0x12 (pickup),
+order target craft+0x60 = object 2 (Xi 2) -- and claims Xi 2 (`MSG_ALREADY_TARGETED` 0x216 if the
+player tries), but never moves. Its AI pickup handler (0x004A8520, from the order-handler table at
+0x5B7690) is never called for it. The mission's hyper buoy to Harlequin Station never arrives,
+most likely because its trigger waits on Xi 2. Leads: the time-sliced AI pass `sub_004B8A60`
+walks [MEM16(0x8D9628), MEM32(0x8BF368)) = [96,188) while region 0's craft are [0,96) (set by
+`sub_004154A0(region)`; may be legitimate -- a second per-region range).
+
+Mission flow, from the .tie text: pick up Xi 1 (Shift-P) -> target nav buoy, within 0.5 km, Space
+-> at Harlequin Station dock within 1 km (Shift-D, `sub_00506CB0`) -> pick up fuel cells -> hyper
+home -> deliver to the Azzameen base -> land.
+
+## Fixed on the way (2026-10-04)
+
+- `XWA_RENDERFN` wrote 1 into 0x7828D0 (the ALERTBOXBUFFER pointer, not a flag) -> free(1) ->
+  heap corruption: the long-standing "L_0048967D flake" and the contained exception at ~930K calls
+  in every run. `XWA_MKCTX`, `XWA_RENDERFN` and `XWA_RUNSCENE` are no longer needed and are out
+  of `tools/netlab_run.cmd`. `XWA_KEEP3D`/`XWA_3DFLAG` are still needed: without them the engine
+  takes the software rasterizer, which patches its own code (`MEM8(eax + 0x12345678)`).
+- Native fgetc/fread for host streams (`tools/hooks/native-fgetc.hook`, `native-fread.hook`), with
+  the MSVC6 `_IOEOF` bit (0x10 at +0xC) mirrored for game code that tests it directly -- UCRT's
+  EOF bit is 0x08 and 0x10 is `_IOERROR` there.
+- Lifter: carry flag publishing (`tools/fix_carry.py`, 1264 sites) and conditions after shifts
+  (`tools/fix_shiftflags.py`, 38 sites: `sar ebp,8; je` let sub_0040BD20 divide by zero).
+
+## Older: the batch-list crash after Launch (fixed)
+
 
 After Launch the run continues on a new path (`sub_004EFE00`) and faults in the render-batch flush,
 `sub_00448530 -> sub_004483C0 -> sub_00595191`. It is the same code as the long-standing

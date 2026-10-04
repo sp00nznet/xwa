@@ -236,6 +236,191 @@ int g_ui_mx = -1, g_ui_my = -1;
 int g_ui_click = 0;
 int g_ui_down = 0;     /* button held, for drag-and-drop menus */   /* UI driver cursor override, applied inside the game's own mouse update */
 int g_in_flight;
+unsigned g_simcalls;   /* sub_004F6510 (sim update) entries, for XWA_STATUS */
+
+/* XWA_AUTOPLAY=1: a TEST HARNESS that plays 1b0m1fw headlessly, the way XWA_AUTOPILOT types the
+ * pilot name. Nobody is at the controls on a test machine, so it drives the game's OWN mechanics and
+ * follows the game's OWN feedback (in-flight message ids, via the msg-tap hook):
+ *
+ *   PICKUP   target C/C Xi 1 (mission FG 1), park 1500 units off it (automatic pickup range is
+ *            0x2000 = 0.2 km, checked at 0x00507742) and issue sub_00507510(slot)  -> 0x156 secured
+ *   HYPER    target the hyper buoy whose flight group is named for the next stop, park 4000 units
+ *            off it (jump range 0.5 km) and press Space                           -> region changes
+ *   DELIVER  target the delivery object, park 20000 units off it (docking range 1 km) and issue
+ *            sub_00506CB0(slot) ("Shift-D")                                        -> 0x162 delivered
+ *   then pick up whatever this region offers (each object is tried until one says 0x14E
+ *   "initiating pickup"), hyper home, deliver to the Azzameen base, and return to the hangar.
+ *
+ * Player record = 0x8B94E0 + slot*0xBCF (slot = MEM32(0x8C1CC8)); target at rec+0x8B9505; region at
+ * rec+0x8B94F0. Objects = MEM32(0x7B33C4), stride 0x27: +2 engine type, +5 mission FG index,
+ * +7/+0xB/+0xF position; the current region's objects are [MEM32(0x8BF378), MEM32(0x7CA3B8)).
+ * Mission FGs at 0x80DC80 + fg*0xE42, name at +0. Runs once a second from d3d11_present; each guest
+ * call saves and restores the registers. Every step logs [AUTOPLAY]. */
+static uint32_t g_msg_ring[16]; static unsigned g_msg_n;
+void xwa_msg_tap(uint32_t id) {
+    g_msg_ring[g_msg_n++ & 15] = id;
+    if (getenv("XWA_AUTOPLAY")) { fprintf(stderr, "[AUTOPLAY] msg 0x%X\n", id); fflush(stderr); }
+}
+static int msg_seen_since(unsigned mark, uint32_t id) {
+    unsigned i;
+    for (i = mark; i != g_msg_n; i++) if (g_msg_ring[i & 15] == id) return 1;
+    return 0;
+}
+static void guest_call1(void (*fn)(void), uint32_t arg) {
+    uint32_t s_eax = g_eax, s_ecx = g_ecx, s_edx = g_edx, s_ebx = g_ebx, s_esi = g_esi, s_edi = g_edi, s_ebp = g_ebp;
+    g_esp -= 4; MEM32(g_esp) = arg;
+    g_esp -= 4; MEM32(g_esp) = 0xDEAD0000u;
+    fn();                               /* its `esp += 4; return` pops the dummy return address */
+    g_esp += 4;                         /* cdecl: caller pops the argument */
+    g_eax = s_eax; g_ecx = s_ecx; g_edx = s_edx; g_ebx = s_ebx; g_esi = s_esi; g_edi = s_edi; g_ebp = s_ebp;
+}
+static const char *fg_name(uint32_t fg) {
+    return (fg < 0x100u) ? (const char *)(uintptr_t)ADDR(0x80DC80u + fg * 0xE42u) : "";
+}
+/* first object in the current region matching a mission FG index (or any FG if fg < 0) and engine
+ * type (any if type < 0), whose FG name contains `name` (any if NULL); skips `skip` matches */
+static uint32_t find_obj(int fg, int type, const char *name, int skip) {
+    uint32_t tbl = MEM32(0x7B33C4), i, n = MEM32(0x7CA3B8);
+    if (n > 0x3000u) n = 0x3000u;
+    for (i = MEM32(0x8BF378); i < n; i++) {
+        uint32_t o = tbl + i * 0x27u;
+        if (!MEM16(o + 2)) continue;
+        if (fg >= 0 && MEM8(o + 5) != (uint32_t)fg) continue;
+        if (type >= 0 && MEM16(o + 2) != (uint32_t)type) continue;
+        if (name && !strstr(fg_name(MEM8(o + 5)), name)) continue;
+        if (skip-- > 0) continue;
+        return i;
+    }
+    return 0xFFFFu;
+}
+static void dump_region(void) {
+    uint32_t tbl = MEM32(0x7B33C4), i, n = MEM32(0x7CA3B8);
+    if (n > 0x3000u) n = 0x3000u;
+    fprintf(stderr, "[AUTOPLAY] region objects [%u,%u):", MEM32(0x8BF378), n);
+    for (i = MEM32(0x8BF378); i < n; i++) {
+        uint32_t o = tbl + i * 0x27u;
+        if (MEM16(o + 2)) fprintf(stderr, " %u:fg%u/t%u/%.12s", i, MEM8(o + 5), MEM16(o + 2), fg_name(MEM8(o + 5)));
+    }
+    fprintf(stderr, "\n"); fflush(stderr);
+}
+static void park_at(uint32_t pidx, uint32_t obj, int off) {
+    uint32_t tbl = MEM32(0x7B33C4), po = tbl + pidx * 0x27u, co = tbl + obj * 0x27u;
+    MEM32(po + 7) = MEM32(co + 7); MEM32(po + 0xB) = MEM32(co + 0xB) - off; MEM32(po + 0xF) = MEM32(co + 0xF);
+}
+void xwa_autoplay_tick(void) {
+    extern void sub_00507510(void), sub_00506CB0(void), sub_005079F0(void), xwa_queue_key(uint32_t);
+    enum { WAIT, PICK1, SWAP, HYPER1, DELIVER1, PICK2, HYPER2, DELIVER2, LAND, DONE };
+    static const char *const sname[] = { "WAIT", "PICK1", "SWAP", "HYPER1", "DELIVER1", "PICK2", "HYPER2", "DELIVER2", "LAND", "DONE" };
+    static int on = -1, st = WAIT, tries, skip; static DWORD last; static unsigned mark; static uint32_t region0;
+    uint32_t slot, rec, pidx, obj, region;
+    DWORD now = GetTickCount();
+    if (on < 0) on = getenv("XWA_AUTOPLAY") ? 1 : 0;
+    if (!on || now - last < 1500) return;
+    last = now;
+    if (!g_in_flight || !MEM32(0x7B33C4)) return;
+    slot = MEM32(0x8C1CC8); rec = slot * 0xBCFu;
+    pidx = MEM32(rec + 0x8B94E0); region = MEM8(rec + 0x8B94F0);
+    if (pidx == 0xFFFFu || pidx > 0x3000u) return;
+    if (MEM8(rec + 0x8B94F3)) return;                 /* a pickup / docking manoeuvre is flying */
+    {   /* Selu's craft struct (obj 3: [[obj+0x23]+0xDD]), first 0x180 bytes, printed when it changes */
+        static uint8_t prevc[0x180]; static int have; uint32_t t3 = MEM32(0x7B33C4) + (getenv("XWA_DIFFOBJ") ? (uint32_t)atoi(getenv("XWA_DIFFOBJ")) : 3u) * 0x27u, ro = MEM32(t3 + 0x23), cr;
+        extern int xwa_readable(uint32_t, uint32_t);
+        if (ro && xwa_readable(ro + 0xDD, 4) && (cr = MEM32(ro + 0xDD)) && xwa_readable(cr, 0x180)) {
+            int j; if (have && getenv("XWA_SELUDIFF")) { fprintf(stderr, "[AUTOPLAY] selu craft 0x%08X diff:", cr);
+                for (j = 0; j < 0x180; j++) if (MEM8(cr + j) != prevc[j]) fprintf(stderr, " +%X:%02X>%02X", j, prevc[j], MEM8(cr + j));
+                fprintf(stderr, "\n"); }
+            for (j = 0; j < 0x180; j++) prevc[j] = MEM8(cr + j); have = 1;
+            { static int kk; if ((kk++ % 8) == 0) { fprintf(stderr, "[AUTOPLAY] selu cmd=0x%02X tgt=%u CC=%04X D4=%04X DB=%04X 8E=%04X F0=%04X\n",
+                MEM8(cr + 0x84), MEM16(cr + 0x60), MEM16(cr + 0xCC), MEM16(cr + 0xD4), MEM16(cr + 0xDB), MEM16(cr + 0x8E), MEM16(cr + 0xF0)); fflush(stderr); } }
+            if (getenv("XWA_SELUSPEED") && MEM8(cr + 0x84) == 0x12 && !MEM16(cr + 0xD4)) {
+                MEM16(cr + 0xCC) = 0x4000; MEM16(cr + 0xD4) = 0x4000; MEM16(cr + 0xDB) = 0x4000;
+                fprintf(stderr, "[AUTOPLAY] SELUSPEED applied\n"); fflush(stderr); } } }
+    if (getenv("XWA_OBJDIFF")) {   /* object records 0 (player) and 3 (Selu): 0x27 bytes each */
+        static uint8_t pv[2][0x27]; static int hv; int a, j; uint32_t t = MEM32(0x7B33C4);
+        for (a = 0; a < 2; a++) { uint32_t o = t + (a ? 3u : pidx) * 0x27u;
+            if (hv) { fprintf(stderr, "[AUTOPLAY] obj%d diff:", a ? 3 : (int)pidx);
+                for (j = 0; j < 0x27; j++) if (MEM8(o + j) != pv[a][j]) fprintf(stderr, " +%X:%02X>%02X", j, pv[a][j], MEM8(o + j));
+                fprintf(stderr, "\n"); }
+            for (j = 0; j < 0x27; j++) pv[a][j] = MEM8(o + j); }
+        hv = 1; fflush(stderr); }
+    {   static int k; uint32_t t = MEM32(0x7B33C4);
+        if ((k++ % 8) == 0) { fprintf(stderr, "[AUTOPLAY] pos: player(%d,%d,%d) obj3(%d,%d,%d) obj2(%d,%d,%d) docked=%u\n",
+            (int32_t)MEM32(t + pidx*0x27u + 7), (int32_t)MEM32(t + pidx*0x27u + 0xB), (int32_t)MEM32(t + pidx*0x27u + 0xF),
+            (int32_t)MEM32(t + 3*0x27u + 7), (int32_t)MEM32(t + 3*0x27u + 0xB), (int32_t)MEM32(t + 3*0x27u + 0xF),
+            (int32_t)MEM32(t + 2*0x27u + 7), (int32_t)MEM32(t + 2*0x27u + 0xB), (int32_t)MEM32(t + 2*0x27u + 0xF), MEM32(0x9C6750)); fflush(stderr); } }
+#define NEXT(s) do { fprintf(stderr, "[AUTOPLAY] %s -> %s (region %u)\n", sname[st], sname[s], region); fflush(stderr); \
+                     st = (s); tries = 0; skip = 0; mark = g_msg_n; region0 = region; } while (0)
+#define GIVEUP(why) do { fprintf(stderr, "[AUTOPLAY] %s: giving up (%s)\n", sname[st], why); fflush(stderr); st = DONE; } while (0)
+    switch (st) {
+    case WAIT:
+        if (MEM32(0x68BBA0) >= 4) { NEXT(PICK1); break; }   /* the hangar launch has finished */
+        /* "> Launch <" is the hangar menu's default item: ENTER until the launch starts
+         * (9C6954 = launch requested). No keys after that -- nothing else should be pressed. */
+        if (MEM32(0x9C6750) && !MEM32(0x9C6954)) xwa_queue_key(0x1C);
+        break;
+    case PICK1: case PICK2:
+        if (msg_seen_since(mark, 0x156)) { NEXT(st == PICK1 ? (getenv("XWA_SWAP") ? SWAP : HYPER1) : HYPER2); break; }
+        if (msg_seen_since(mark, 0x151)) { NEXT(st == PICK1 ? HYPER1 : HYPER2); break; }   /* already carrying */
+        obj = (st == PICK1) ? find_obj(1, -1, NULL, 0) : find_obj(-1, -1, NULL, skip);
+        if (obj == 0xFFFFu) { GIVEUP("nothing left to try"); break; }
+        if (obj == pidx) { skip++; break; }
+        if (tries && st == PICK2 && !msg_seen_since(mark, 0x14E)) skip++;              /* not pickable */
+        MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 1500);
+        fprintf(stderr, "[AUTOPLAY] %s: target obj %u (fg %u '%s' type %u)\n", sname[st], obj,
+                MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5), fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
+                MEM16(MEM32(0x7B33C4) + obj * 0x27u + 2)); fflush(stderr);
+        mark = g_msg_n; guest_call1(sub_00507510, slot);
+        if (++tries > 40) GIVEUP("too many tries");
+        break;
+    case SWAP:
+        /* Experiment: the jump buoy may only arrive once BOTH canisters have been picked up (the
+         * wingman is meant to take Xi 2). Release Xi 1 (sub_005079F0, "Object released" 0x161),
+         * pick up Xi 2, then come back for Xi 1. */
+        if (tries == 0) { mark = g_msg_n; guest_call1(sub_005079F0, slot); tries = 1; break; }
+        if (tries == 1) { obj = find_obj(2, -1, NULL, 0); if (obj == 0xFFFFu) { GIVEUP("no Xi 2"); break; }
+            /* the wingman holds Xi 2 "targeted for pickup" (object +0x1F, -1 = free) but never flies
+             * to it; take the claim back so the player can do its job */
+            {   uint32_t so = find_obj(3, -1, NULL, 0), ro, cr;   /* Selu: its order targets Xi 2 */
+                if (so != 0xFFFFu && (ro = MEM32(MEM32(0x7B33C4) + so * 0x27u + 0x23)) && (cr = MEM32(ro + 0xDD)))
+                    MEM16(cr + 0x28 + 0x38) = 0xFFFF; }
+            MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 1500); mark = g_msg_n; guest_call1(sub_00507510, slot); tries = 2; break; }
+        if (tries == 2) { if (msg_seen_since(mark, 0x156)) { dump_region(); guest_call1(sub_005079F0, slot); tries = 3; } break; }
+        if (tries == 3) { obj = find_obj(1, -1, NULL, 0); MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 1500);
+            mark = g_msg_n; guest_call1(sub_00507510, slot); tries = 4; break; }
+        if (msg_seen_since(mark, 0x156)) { dump_region(); NEXT(HYPER1); }
+        break;
+    case HYPER1: case HYPER2:
+        if (getenv("XWA_THROTTLETEST") && tries < 6) xwa_queue_key(0x0E);   /* Backspace = full throttle */
+        if (region != region0) { NEXT(st == HYPER1 ? DELIVER1 : DELIVER2); break; }
+        obj = find_obj(-1, 218, st == HYPER1 ? "Harlequin" : "Home", 0);
+        if (obj == 0xFFFFu) { if (tries % 10 == 0) dump_region(); if (++tries > 60) GIVEUP("no hyper buoy appeared"); break; }
+        MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 4000);
+        fprintf(stderr, "[AUTOPLAY] %s: buoy obj %u '%s', pressing Space\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5))); fflush(stderr);
+        xwa_queue_key(0x39);
+        if (++tries > 30) GIVEUP("no jump");
+        break;
+    case DELIVER1: case DELIVER2:
+        if (msg_seen_since(mark, 0x162)) { NEXT(st == DELIVER1 ? PICK2 : LAND); break; }
+        obj = (st == DELIVER1) ? find_obj(13, -1, NULL, 0) : find_obj(4, -1, NULL, 0);
+        if (obj == 0xFFFFu) { dump_region(); GIVEUP("no delivery target in this region"); break; }
+        MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 20000);
+        fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s'\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5))); fflush(stderr);
+        mark = g_msg_n; guest_call1(sub_00506CB0, slot);
+        if (++tries > 30) GIVEUP("no delivery");
+        break;
+    case LAND:
+        /* "Hit [Space] to activate tractor beam and enter hangar" (0x117) appears near the base */
+        obj = find_obj(4, -1, NULL, 0);
+        if (obj != 0xFFFFu) { MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 3000 + tries * 500); }
+        if (msg_seen_since(mark, 0x117) || tries > 3) xwa_queue_key(0x39);
+        fprintf(stderr, "[AUTOPLAY] LAND: try %d hstate=%u docked=%u\n", tries, MEM32(0x68BBA0), MEM32(0x9C6750)); fflush(stderr);
+        if (++tries > 40) GIVEUP("could not land");
+        break;
+    default: break;
+    }
+#undef NEXT
+#undef GIVEUP
+}
 
 /* XWA_STATUS=N: every N presented frames (called from d3d11_present), one line of campaign state:
  * the screen, the hangar/launch flags, the player's camera position and the mission clock. Unlike
@@ -251,10 +436,10 @@ void xwa_status_tick(unsigned frame) {
     last = now;
     cam = MEM32(0x8C1CC8) * 0xBCFu + 0x8BA028u;
     fprintf(stderr, "[STATUS] f=%u inflight=%d hstate(68BBA0)=%u docked(9C6750)=%u map(9C6754)=0x%X "
-            "end(68BBB8)=%u 9C6954=%u 80B604=%u cam=(%d,%d,%d) calls=%u\n",
+            "end(68BBB8)=%u 9C6954=%u 80B604=%u cam=(%d,%d,%d) calls=%u sim=%u ai[8D9628..8BF368)=[%u,%u) cmd(7CA1CC)=0x%X region[8BF378..7CA3B8)=[%u,%u)\n",
             frame, g_in_flight, MEM32(0x68BBA0), MEM32(0x9C6750), (unsigned)MEM16(0x9C6754),
             MEM32(0x68BBB8), MEM32(0x9C6954), MEM32(0x80B604),
-            (int32_t)MEM32(cam), (int32_t)MEM32(cam + 4), (int32_t)MEM32(cam + 8), g_total_calls);
+            (int32_t)MEM32(cam), (int32_t)MEM32(cam + 4), (int32_t)MEM32(cam + 8), g_total_calls, g_simcalls, MEM16(0x8D9628), MEM32(0x8BF368), MEM32(0x7CA1CC), MEM32(0x8BF378), MEM32(0x7CA3B8));
     fflush(stderr);
 }
 
@@ -4598,6 +4783,11 @@ static void prof_dump(void) {
 
 static DWORD WINAPI profiler_thread(LPVOID param) {
     DWORD period = (DWORD)(uintptr_t)param;
+    /* this exe's image range, looked up here: doing it while the guest thread is suspended can
+     * deadlock on the loader lock (it did -- the profiler and the game both stopped) */
+    static uint32_t lo, hi;
+    { MODULEINFO mi; if (GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(NULL), &mi, sizeof mi)) {
+          lo = (uint32_t)(uintptr_t)mi.lpBaseOfDll; hi = lo + mi.SizeOfImage; } }
     extern uint32_t guest_func_for_host(uintptr_t host_addr);
     unsigned since_dump = 0;
     for (;;) {
@@ -4618,12 +4808,15 @@ static DWORD WINAPI profiler_thread(LPVOID param) {
                  * below it, which mislabels native runtime code; symbolize these offline instead
                  * (llvm-symbolizer --obj=build-farm/xwa_recomp.exe <addr>). */
                 const uint32_t* sp = (const uint32_t*)(uintptr_t)c.Esp; int k, nch = 1;
-                static uint32_t lo, hi; uint32_t ch[4] = { (uint32_t)c.Eip, 0, 0, 0 };
-                if (!lo) { MODULEINFO mi; if (GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(NULL), &mi, sizeof mi)) {
-                              lo = (uint32_t)(uintptr_t)mi.lpBaseOfDll; hi = lo + mi.SizeOfImage; } }
+                uint32_t ch[4] = { (uint32_t)c.Eip, 0, 0, 0 };
                 g_prof_host++;
-                for (k = 0; k < 2048 && nch < 4; k++)
+                {   MEMORY_BASIC_INFORMATION smb; int lim = 0;
+                    if (VirtualQuery((void*)sp, &smb, sizeof smb))
+                        lim = (int)(((uintptr_t)smb.BaseAddress + smb.RegionSize - (uintptr_t)sp) / 4);
+                    if (lim > 2048) lim = 2048;
+                for (k = 0; k < lim && nch < 4; k++)
                     if (sp[k] > lo && sp[k] < hi && sp[k] != ch[nch - 1]) ch[nch++] = sp[k];
+                }
                 prof_chain_record(ch);
             }
         }

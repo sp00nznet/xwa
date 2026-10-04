@@ -1,0 +1,18 @@
+# hook: native-fgetc
+# file: recomp_0004.c
+# mode: before
+# anchor:     PUSH32(esp, esi); /* 0x0059BA60: push esi */
+# --- body ---
+    /* sub_0059BA60 is the game's CRT fgetc. Files are opened by the native fopen replacement
+     * (sub_0052AD30), so the FILE* is a HOST stream: reading it through the lifted CRT walked an
+     * MSVC6 FILE layout over a UCRT structure and ended in _filbuf -> _read on an fd the game's
+     * handle table never saw. That only "worked" because the lifted _filbuf then OR-ed MSVC6's
+     * _IOEOF (0x10) into the struct, which is what the game's readers test directly
+     * (sub_004309E0: `test byte [fp+0xC], 0x10`). Read registered host streams with the host
+     * fgetc instead, and mirror EOF into that same bit: UCRT keeps its flags word at +0xC too, but
+     * its EOF bit is 0x08 (0x10 is _IOERROR there). The native fseek wrapper clears the bit. */
+    { FILE *_fp = (FILE*)(uintptr_t)MEM32(esp + 4);
+      if (recomp_fp_valid(_fp)) {
+          eax = (uint32_t)fgetc(_fp);
+          if (feof(_fp)) MEM32((uint32_t)(uintptr_t)_fp + 0xC) |= 0x10u;
+          esp += 4; return; } }

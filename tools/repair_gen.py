@@ -37,6 +37,12 @@ RELIFT = """
 
 # One-off hand corrections (exact text replacements in gen; skipped once applied).
 REPLACE = [
+    # XWA_RENDERFN wrote 1 into 0x7828D0 believing it a render-enable flag; it is the ALERTBOXBUFFER
+    # pointer, so sub_00511A90 later called free(1): heap corruption, the old L_0048967D crash.
+    ('        if (!MEM32(0x7828D0u)) MEM32(0x7828D0u) = 1;
+',
+     '        /* not 0x7828D0: that is the ALERTBOXBUFFER pointer, and 1 there made sub_00511A90 free(1) */
+'),
     # join point: the jge at 0x0044309B is reached from `cmp edi, ebx` @0x0044307D, not from the
     # textually preceding `cmp ebx, edi` @0x00443091 (audit: join_consumer_mismatched_setter)
     ('if (CMP_GE(ebx, edi)) goto L_004430AF; /* 0x0044309B: jge 0x4430af */',
@@ -56,7 +62,7 @@ def run(*args):
 def main():
     run(os.path.join('tools', 'relift_func.py'), *RELIFT)
     for tool in ('fix_dec_cond', 'fix_test_cond', 'fix_fpu_pop', 'fix_fnstsw', 'fix_jmptbl',
-                 'fix_postwrite', 'fix_clobbered_flags'):
+                 'fix_postwrite', 'fix_clobbered_flags', 'fix_carry', 'fix_shiftflags'):
         run(os.path.join('tools', tool + '.py'), *GEN)
     n = 0
     for p in GEN:

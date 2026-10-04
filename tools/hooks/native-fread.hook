@@ -1,0 +1,13 @@
+# hook: native-fread
+# file: recomp_0004.c
+# mode: before
+# anchor:     PUSH32(esp, ecx); /* 0x0059BAF0: push ecx */
+# --- body ---
+    /* sub_0059BAF0 is the game's CRT fread(buf, size, count, FILE*); same story as native-fgetc:
+     * the stream is a host FILE* from the native fopen, so read it with the host fread and mirror
+     * EOF into the MSVC6 _IOEOF bit (0x10 at +0xC) the game tests directly. */
+    { FILE *_fp = (FILE*)(uintptr_t)MEM32(esp + 0x10);
+      if (recomp_fp_valid(_fp)) {
+          eax = (uint32_t)fread((void*)ADDR(MEM32(esp + 4)), MEM32(esp + 8), MEM32(esp + 0xC), _fp);
+          if (feof(_fp)) MEM32((uint32_t)(uintptr_t)_fp + 0xC) |= 0x10u;
+          esp += 4; return; } }
