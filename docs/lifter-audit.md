@@ -4,8 +4,20 @@
 measured which upstream correctness fixes since 2026-09-12 are missing here, and how many sites in
 the compiled `gen/` each one affects. Scripts: `tools/audit/audit.py`, `tools/audit/relift_diff.py`.
 
-**Status:** #14 (fnstsw) is fixed -- lifter plus `tools/fix_fnstsw.py` patched all 595 sites in
-gen. Everything else in the tables below is still open. Plan: the Recommendation section.
+**Status (2026-10-04):** fixed in the lifter or patched into gen, all replayed by
+`tools/repair_gen.py`:
+- #14 fnstsw (595 sites, `tools/fix_fnstsw.py`);
+- post-write sub/add/and/or/xor conditions, including narrow signed ones (911 sites,
+  `tools/fix_postwrite.py`, self-tested against reference x86 flags);
+- cmp/test operands clobbered before the consumer -- `test esi,esi; pop esi; sete al` (26 sites,
+  `tools/fix_clobbered_flags.py`). This one made the CRT report a masked acos() domain error as
+  unhandled and raise 0xC0000090;
+- local jump tables lifted as indirect tail calls (`tools/fix_jmptbl.py`, the generator's switch
+  detector, and re-lifts), which left callers' esp off by the callee's pushes;
+- 37 functions whose func-split "merge" dropped code (sub_0040F230, the hangar-launch transfer,
+  was 7 instructions), re-lifted with explicit ends.
+Still open: CF publishing (neg/cmp/add/sub feeding sbb/adc), shifts, narrow cmp/test conditions
+outside the post-write class, join points (only 0x0044309B fixed by hand), the CRT routines.
 
 ## How the counts were made
 

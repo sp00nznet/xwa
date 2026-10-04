@@ -1,0 +1,20 @@
+# hook: null-material
+# file: recomp_0004.c
+# mode: before
+# anchor:     ecx = MEM32(eax + 0x74); /* 0x005953ED: mov ecx, dword ptr [eax + 0x74] */
+# --- body ---
+    /* sub_00595191 turns batched triangles into execute-buffer texture state changes; eax is the
+     * triangle's material (rec+0x10), and +0x74 its texture handle. The model renderer fills that
+     * from the mesh face group's texture pointer (sub_00442F70 @0x00443BDD) plus 0x10, so an
+     * unresolved texture arrives here as 0x10 and the read faults (READ 0x84). Seen right after
+     * the hangar Launch in 1b0m1fw -- some OPT loaded around launch has a face group whose texture
+     * reference was never resolved; later ones carry floats or raw OPT offsets (0x0026001C,
+     * 0xC1B6B9E1) -- textures are missing on several draw paths, not just this one. Retail never hands this NULL, so the root cause is upstream in
+     * the OPT texture resolution; until that is found, give the triangle an all-zero material
+     * (texture handle 0) instead of faulting. XWA_NOGUARD disables. */
+    { extern int xwa_readable(uint32_t, uint32_t);
+    if ((eax < 0x10000u || !xwa_readable(eax, 0x78)) && !getenv("XWA_NOGUARD")) {
+        static uint32_t zmat[64]; static int _n;
+        if (_n < 3) { _n++; fprintf(stderr, "[NULLMAT] material 0x%X at 0x005953ED -> zero material\n", eax); fflush(stderr); }
+        eax = (uint32_t)(uintptr_t)zmat; MEM32(ebp + (-0x8)) = eax;
+    } }

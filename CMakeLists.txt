@@ -114,6 +114,7 @@ target_link_libraries(xwa_recomp PRIVATE
     ole32
     winmm
     dbghelp
+    psapi
 
     # DirectX libraries for HAL
     d3d11

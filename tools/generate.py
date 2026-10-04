@@ -71,7 +71,11 @@ def detect_switches(instructions, code_data, code_start, func_start, func_end):
             byte_indir = None
         elif m in ('ja', 'jnbe'):
             anchor = last_cmp[2] if last_cmp is not None else (cmp_mem[5] if cmp_mem is not None else None)
-            if anchor is not None and (i - anchor) <= 2:
+            # MSVC may schedule flag-neutral loads between the bound check and its ja
+            # (sub_004D7880: cmp ebx,0x1a; mov al,..; mov ax,..; ja) -- allow up to four.
+            if anchor is not None and (i - anchor) <= 5 and all(
+                    instructions[k].mnemonic in ('mov', 'movzx', 'movsx', 'lea')
+                    for k in range(anchor + 1, i)):
                 default_target = ins.get_branch_target()
         elif m == 'mov' and len(ops) == 2 and ops[0].type == X86_OP_REG \
                 and ops[1].type == X86_OP_MEM and ops[1].size != 1 \

@@ -73,16 +73,18 @@ def main():
         for i in range(6):
             path = os.path.join(GEN, f'recomp_{i:04d}.c')
             if not os.path.exists(path): continue
-            src = open(path, encoding='utf-8', errors='replace').read()
+            src = open(path, encoding='latin-1', newline='').read()
             m = re.search(r'^void ' + re.escape(name) + r'\(void\) \{', src, re.M)
             if not m: continue
+            if '}' in src[m.end():src.find('\n', m.end())]:
+                print(f'0x{addr:08X}: one-line stub (merged by a func-split fix) -- not relifting'); patched = True; break
             # find matching closing brace at column 0
             end = src.find('\n}\n', m.start())
             if end < 0: end = src.find('\n}', m.start())
             end = src.find('}', end) + 1
             old = src[m.start():end]
             src2 = src[:m.start()] + new_code + src[end:]
-            open(path, 'w', encoding='utf-8').write(src2)
+            open(path, 'w', encoding='latin-1', newline='').write(src2)
             print(f'0x{addr:08X} ({name}) patched in recomp_{i:04d}.c  switches_reconstructed={nsw}')
             patched = True
             break

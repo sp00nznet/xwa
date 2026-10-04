@@ -1997,6 +1997,20 @@ static void d3dtex_Load(void) {
     uint32_t pSrc = MEM32(g_esp + 8);
     mock_com_obj_t* dst_tex = (mock_com_obj_t*)(uintptr_t)pThis;
     mock_com_obj_t* src_tex = (mock_com_obj_t*)(uintptr_t)pSrc;
+    /* Only act on our own texture mocks. After the hangar exit the game has been seen handing a
+     * stale texture record here (freed and reused heap), and reading its extra[] faulted. A real
+     * driver would reject a bad interface with DDERR_INVALIDOBJECT rather than copy from it. */
+    {   extern int xwa_readable(uint32_t, uint32_t);
+        if (!dst_tex || !src_tex || !xwa_readable(pThis, sizeof(mock_com_obj_t)) ||
+            !xwa_readable(pSrc, sizeof(mock_com_obj_t)) ||
+            dst_tex->tag != MOCK_TAG_D3D || src_tex->tag != MOCK_TAG_D3D) {
+            static int _n; if (_n < 3) { _n++;
+                fprintf(stderr, "[COM] IDirect3DTexture::Load: not a texture mock (this=0x%08X src=0x%08X) -> DDERR_INVALIDOBJECT\n", pThis, pSrc); fflush(stderr); }
+            g_eax = 0x88760082u;   /* DDERR_INVALIDOBJECT */
+            g_esp += 12;
+            return;
+        }
+    }
 
     if (dst_tex && src_tex) {
         mock_com_obj_t* dst_surf = (mock_com_obj_t*)(uintptr_t)dst_tex->extra[0];

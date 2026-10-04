@@ -1052,6 +1052,19 @@ void d3d11_present(void) {
         }
     }
 
+    { extern void xwa_status_tick(unsigned); xwa_status_tick(g_frame_count); }
+
+    /* XWA_SHOTEVERY=N: save every Nth presented frame as shot_NNNNN.bmp (at most 40), so a
+     * headless run on a test machine leaves a picture trail of where it got to. */
+    {   static int every = -1, taken;
+        if (every < 0) every = getenv("XWA_SHOTEVERY") ? atoi(getenv("XWA_SHOTEVERY")) : 0;
+        if (every > 0 && taken < 40 && g_frame_count && (g_frame_count % (unsigned)every) == 0) {
+            char nm[32]; taken++;
+            snprintf(nm, sizeof nm, "shot_%05u.bmp", g_frame_count);
+            d3d11_capture_bmp(nm);
+        }
+    }
+
     /* XWA_RENDCOUNT read from the PRESENT path. The other dump site is the flight-source blit,
      * which is capped at 12 prints and fires during loading -- long before the flight render
      * loop -- so it always reported zeros regardless of what the render pipeline did. */

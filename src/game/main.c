@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <dbghelp.h>
+#include <psapi.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -235,6 +236,69 @@ int g_ui_mx = -1, g_ui_my = -1;
 int g_ui_click = 0;
 int g_ui_down = 0;     /* button held, for drag-and-drop menus */   /* UI driver cursor override, applied inside the game's own mouse update */
 int g_in_flight;
+
+/* XWA_STATUS=N: every N presented frames (called from d3d11_present), one line of campaign state:
+ * the screen, the hangar/launch flags, the player's camera position and the mission clock. Unlike
+ * the native-draw dumps it keeps running for the whole flight, so a long headless run shows where
+ * the mission got to and whether the world is moving at all. */
+void xwa_status_tick(unsigned frame) {
+    /* XWA_STATUS=<ms>: rate-limited by wall clock, because the flight loop does not present
+     * through d3d11_present every frame -- it is also called from the flight object walk. */
+    static int every = -1; static DWORD last;
+    uint32_t cam; DWORD now = GetTickCount();
+    if (every < 0) every = getenv("XWA_STATUS") ? atoi(getenv("XWA_STATUS")) : 0;
+    if (every <= 0 || now - last < (DWORD)every) return;
+    last = now;
+    cam = MEM32(0x8C1CC8) * 0xBCFu + 0x8BA028u;
+    fprintf(stderr, "[STATUS] f=%u inflight=%d hstate(68BBA0)=%u docked(9C6750)=%u map(9C6754)=0x%X "
+            "end(68BBB8)=%u 9C6954=%u 80B604=%u cam=(%d,%d,%d) calls=%u\n",
+            frame, g_in_flight, MEM32(0x68BBA0), MEM32(0x9C6750), (unsigned)MEM16(0x9C6754),
+            MEM32(0x68BBB8), MEM32(0x9C6954), MEM32(0x80B604),
+            (int32_t)MEM32(cam), (int32_t)MEM32(cam + 4), (int32_t)MEM32(cam + 8), g_total_calls);
+    fflush(stderr);
+}
+
+/* XWA_BATCHCHK: validate the render-batch lists (heads 0x686B0C/10/14, free list 0x74C210) against
+ * the node pool. Nodes are 0x4E0C bytes, three per chunk; chunks are listed at 0x74C248 as
+ * {chunk, next}. The first caller that sees a bad pointer is printed once, with g_lastblk -- this
+ * is how the batch-list corruption behind the old L_0048967D crash gets located. */
+static int batch_node_ok(uint32_t p) {
+    uint32_t c, n = 0;
+    if (!p) return 1;
+    for (c = MEM32(0x74C248); c && n < 4096; c = MEM32(c + 4), n++) {
+        uint32_t base = MEM32(c);
+        if (p >= base && p < base + 0xEA24u) return ((p - base) % 0x4E0Cu) == 0;
+    }
+    return 0;
+}
+void xwa_batch_check(const char *where) {
+    static int on = -1, reported; static uint32_t last_bad;
+    static const uint32_t heads[4] = { 0x686B0C, 0x686B10, 0x686B14, 0x74C210 };
+    int h;
+    if (on < 0) on = getenv("XWA_BATCHCHK") ? 1 : 0;
+    if (!on || reported >= 40 || !MEM32(0x74C248)) return;
+    for (h = 0; h < 4; h++) {
+        uint32_t p = MEM32(heads[h]), prev = heads[h]; int n = 0;
+        while (p && n < 4096) {
+            if (!batch_node_ok(p)) {
+                if (p == last_bad) return;
+                last_bad = p; reported++;
+                fprintf(stderr, "[BATCHCHK] BAD at %s: list 0x%X node#%d ptr=0x%08X (from 0x%08X) "
+                        "lastblk=0x%08X\n", where, heads[h], n, p, prev, g_lastblk);
+                fflush(stderr);
+                return;
+            }
+            if (h < 3 && MEM32(p + 0x3000) > 384u) {
+                reported++;
+                fprintf(stderr, "[BATCHCHK] OVERFULL at %s: list 0x%X node 0x%08X vcount=%u icount=%u lastblk=0x%08X\n",
+                        where, heads[h], p, MEM32(p + 0x3000), MEM32(p + 0x4E04), g_lastblk);
+                fflush(stderr);
+                return;
+            }
+            prev = p; p = MEM32(p + 0x4E08); n++;
+        }
+    }
+}
 int g_ui_snap_req;     /* set by the UI driver, serviced by the present path */       /* set once the flight object walk has run */
 unsigned g_loaderblk;
 unsigned g_simblk;
@@ -1161,11 +1225,18 @@ char* xwa_getenv_cached(const char* name) {
 int xwa_readable(uint32_t addr, uint32_t len) {
     MEMORY_BASIC_INFORMATION mbi;
     uintptr_t a = (uintptr_t)ADDR(addr);
+    /* One-region cache: the native renderer asks this per vertex, and a VirtualQuery syscall
+     * each time made it the hottest thing in flight (~12 fps after the hangar launch).
+     * ponytail: re-validated every 4096 hits, so a region freed in between is trusted for at most
+     * that many calls; drop the cache if a guard ever faults on decommitted memory. */
+    static uintptr_t c_lo, c_hi; static unsigned c_uses;
     if (!addr) return 0;
+    if (a >= c_lo && a + len <= c_hi && ++c_uses < 4096u) return 1;
     if (!VirtualQuery((void*)a, &mbi, sizeof(mbi))) return 0;
     if (mbi.State != MEM_COMMIT) return 0;
     if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
-    return a + len <= (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    c_lo = (uintptr_t)mbi.BaseAddress; c_hi = c_lo + mbi.RegionSize; c_uses = 0;
+    return a + len <= c_hi;
 }
 
 
@@ -4484,7 +4555,31 @@ static void prof_record(uint32_t gva) {
     }
 }
 
+#define PROF_CHAINS 512
+static struct { uint32_t a[4]; unsigned hits; } g_pchain[PROF_CHAINS];
+static void prof_chain_record(const uint32_t *ch) {
+    unsigned h = (ch[0] ^ ch[1] * 31u ^ ch[2] * 131u ^ ch[3] * 1031u) * 2654435761u & (PROF_CHAINS - 1), i;
+    for (i = 0; i < PROF_CHAINS; i++) {
+        unsigned k = (h + i) & (PROF_CHAINS - 1);
+        if (g_pchain[k].hits && !memcmp(g_pchain[k].a, ch, 16)) { g_pchain[k].hits++; return; }
+        if (!g_pchain[k].hits) { memcpy(g_pchain[k].a, ch, 16); g_pchain[k].hits = 1; return; }
+    }
+}
+static void prof_chain_dump(void) {
+    int rank;
+    for (rank = 0; rank < 8; rank++) {
+        unsigned best = 0; int bi = -1, i;
+        for (i = 0; i < PROF_CHAINS; i++) if (g_pchain[i].hits > best) { best = g_pchain[i].hits; bi = i; }
+        if (bi < 0) break;
+        fprintf(stderr, "[PROFHOST] %6u  %08X <- %08X <- %08X <- %08X\n", best,
+                g_pchain[bi].a[0], g_pchain[bi].a[1], g_pchain[bi].a[2], g_pchain[bi].a[3]);
+        g_pchain[bi].hits = 0;
+    }
+    memset(g_pchain, 0, sizeof g_pchain);
+}
+
 static void prof_dump(void) {
+    prof_chain_dump();
     { extern unsigned g_rcount[8]; extern const char* const g_rcount_name[8];
       if (getenv("XWA_RENDCOUNT")) { fprintf(stderr, "[RENDCOUNT]");
         for (int i = 0; i < 8; i++) fprintf(stderr, "  %s=%u", g_rcount_name[i], g_rcount[i]);
@@ -4513,7 +4608,24 @@ static DWORD WINAPI profiler_thread(LPVOID param) {
         if (GetThreadContext(g_guest_thread, &c)) {
             uint32_t gva = guest_func_for_host((uintptr_t)c.Eip);
             g_prof_total++;
-            if (gva) prof_record(gva); else g_prof_host++;
+            if (gva) prof_record(gva);
+            else {
+                /* In host code (a bridge, the runtime, a system DLL): charge the sample to the
+                 * nearest lifted function on the stack, so a guest loop spinning on a mocked API
+                 * shows up as that loop rather than as "unattributed". Tagged with bit 31. */
+                /* Raw host chain: EIP plus the first three stack words that point into this exe's
+                 * code. guest_func_for_host() maps any host address to the nearest lifted function
+                 * below it, which mislabels native runtime code; symbolize these offline instead
+                 * (llvm-symbolizer --obj=build-farm/xwa_recomp.exe <addr>). */
+                const uint32_t* sp = (const uint32_t*)(uintptr_t)c.Esp; int k, nch = 1;
+                static uint32_t lo, hi; uint32_t ch[4] = { (uint32_t)c.Eip, 0, 0, 0 };
+                if (!lo) { MODULEINFO mi; if (GetModuleInformation(GetCurrentProcess(), GetModuleHandleA(NULL), &mi, sizeof mi)) {
+                              lo = (uint32_t)(uintptr_t)mi.lpBaseOfDll; hi = lo + mi.SizeOfImage; } }
+                g_prof_host++;
+                for (k = 0; k < 2048 && nch < 4; k++)
+                    if (sp[k] > lo && sp[k] < hi && sp[k] != ch[nch - 1]) ch[nch++] = sp[k];
+                prof_chain_record(ch);
+            }
         }
         ResumeThread(g_guest_thread);
         if (++since_dump >= (10000 / (period ? period : 1))) { since_dump = 0; prof_dump(); }
