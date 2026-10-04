@@ -40,20 +40,40 @@ Mixing these up produced several wrong conclusions.
 ## Where it stands
 
 Flies `1b0m1fw` as the YT-1300 with the game's own HUD and objectives; the station, canisters and
-hangar models load and draw. The `= HANGAR MENU =` is up (Launch, Return to Concourse, ...) and
-synthetic keys reach it (`XWA_KEYINFLIGHT=1 XWA_SENDKEY=0x1C XWA_KEYAFTER=2 XWA_KEYEVERY=8`), but
-nothing launches.
+hangar models load and draw. The `= HANGAR MENU =` is up and **ENTER now selects Launch**
+(2026-10-03): the hangar menu handler `sub_0045C680` takes its selection path.
 
-## Open problem: the hangar
+## The hangar menu, mapped (2026-10-03)
 
-- `sub_0045B0D0`'s state machine (`MEM32(0x68BBA0)`) is gated by `MEM8(0x8053E5) = (MEM32(0xAE2A8A) == 1)`.
-  `0xAE2A8A` is the flight mode and the campaign runs in mode 4, so that branch is **not** the
-  campaign hangar. Forcing it (`XWA_HANGARON`) crashes.
-- Worldinit only calls `sub_00457C20(0xFFFF)`, so the loader's mothership/hangar branch at
-  0x00457F36 never runs. The real caller is `sub_004FBA80` (0x004FE459), reached from
-  `sub_004F9320`, which enters a nested screen loop.
-- The player's runtime FG `+2` is 58 inside the loader and 0 by the first frame: something in
-  cockpit setup after 0x004581C4 frees the slot.
+- `sub_0045B0D0` (per-frame, from the flight loop) takes its `MEM16(0x9C6754) == 0x134` branch at
+  0x0045C18B: hangar scene `sub_0045D910`, menu draw `sub_00460490`, then the menu input handler
+  **`sub_0045C680`** at 0x0045C1C8. The `0x8053E5` gate earlier in the function is a different
+  (mode-1) branch, correctly skipped in campaign mode.
+- `sub_00460CB0(menu)` builds a menu; title pointers are a table at `0x9C6F80..0x9C6F9C`
+  (`0x9C6F88` = `= HANGAR MENU =`). Found with `XWA_MEMFIND`.
+- Keys come from the game's own kbhit/getch, `sub_0050B680` / `sub_0050B6F0`, which with
+  `0x5FFDAC` set read the DirectInput keyboard's **buffered** data: kbhit with `DIGDD_PEEK`, getch
+  without. Scancodes map to chars through the table at `0x5B2730` (0x1C -> 0x0D). The handler
+  dispatches on 0x0D (select) and 0x1B (escape).
+- **The bug that blocked it was ours:** the DirectInput mock ignored `DIGDD_PEEK`, so kbhit
+  consumed the press and getch returned 0. And real keys never reached the buffered path at all,
+  so a person could not use the menu either. `src/game/com_mocks.c` `didev_GetDeviceData` now keeps
+  a queue that PEEK leaves in place, fed by real key edges (window focused) and `XWA_SENDKEY`.
 
-Next: find the code that draws `!HANGAR_MENU_CRAFT_MENU!` (STRINGS.TXT) and work back to its input
-handler.
+## Open problem: the crash after Launch
+
+After Launch the run continues on a new path (`sub_004EFE00`) and faults in the render-batch flush,
+`sub_00448530 -> sub_004483C0 -> sub_00595191`. It is the same code as the long-standing
+`L_0048967D` flake (which hits roughly 1 run in 2-3 before Launch too):
+
+    READ addr=0x00004E03 -> guest function sub_004483C0
+
+Three batch lists hang off `0x686B0C/10/14`; nodes are 0x4E0C bytes from a free-list pool
+(`sub_004CC7E0` alloc, `sub_004CC8A0` free, `sub_004CC130` teardown): vertices at +0 (32 bytes
+each), count at +0x3000, index data from +0x3004, its count at +0x4E04, next at +0x4E08. A head or
+next pointer of -1 / garbage is what faults. Ruled out so far: the vertex capacity check (clamped to
+256 of the 384 that fit). Not yet checked: the index-data writer's bound, and teardown
+(`sub_004CC130`) running without the head reset (`sub_0044FCA0`).
+
+Older open items: `sub_004F9320`'s nested screen loop; the player's runtime FG `+2` cleared during
+cockpit setup.

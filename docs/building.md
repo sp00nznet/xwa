@@ -47,3 +47,11 @@ window looks exactly like the game crashing on the next screen.
 
 Test 2 (force-launch) and test 3 (`L_0048967D`) fail intermittently on unchanged builds. Two wrong
 conclusions came from single runs.
+
+## netlab: two traps
+
+- **Builds clean under MSVC is not builds clean under clang-cl.** The farm uses clang-cl + xwin;
+  it rejected an implicit declaration (`com_ensure_d3d_device`) that MSVC let through as `int`.
+- **`netlab snap` sees no window on testbox** (`netlab: no window for xwa_recomp`): it runs over
+  SSH in session 0 and `Get-Process` there cannot see the desktop session's window handles. Use the
+  game's own `XWA_RTDUMP` frame dump, or the log, until that is fixed in netlab.

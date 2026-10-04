@@ -82,6 +82,17 @@ add_executable(xwa_recomp
     ${GENERATED_SOURCES}
 )
 
+# Static CRT: the netlab test VMs have no VC++ redistributable, and a missing DLL exits
+# 0xC0000135 before a single test runs.
+set_property(TARGET xwa_recomp PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# GEN_OPT: optimisation for the generated C only. clang-cl's /O2 loop unswitching is quadratic on
+# the lift's huge functions (kotor, Rise of Legends); the netlab recipe passes /O1.
+set(GEN_OPT "" CACHE STRING "extra optimisation flag for the generated C, e.g. /O1")
+if(GEN_OPT)
+    set_source_files_properties(${GENERATED_SOURCES} PROPERTIES COMPILE_OPTIONS "${GEN_OPT}")
+endif()
+
 target_include_directories(xwa_recomp PRIVATE
     src/game
     src/game/recomp

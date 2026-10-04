@@ -2227,36 +2227,62 @@ static void didev_GetDeviceData(void) {
      * DIERR_NOTACQUIRED is both negative and truthful for a mock device that is never
      * really acquired, and it is NOT DIERR_INPUTLOST (0x8007001E), which the caller handles
      * by re-acquiring and looping again. */
-    /* XWA_SENDKEY=<scancode>: deliver a synthetic key so screens that block on a menu
-     * ("Use CURSOR KEYS and ENTER to navigate the menu" on the mission briefing) can be
-     * answered headlessly. DIDEVICEOBJECTDATA = {dwOfs, dwData, dwTimeStamp, dwSequence}.
-     * dwData 0x80 = pressed, 0x00 = released. Emits a press/release pair every
-     * XWA_KEYEVERY polls after XWA_KEYAFTER polls. DIK_RETURN = 0x1C. */
-    { const char* _k = getenv("XWA_SENDKEY");
-      if (_k) {
-        static uint32_t _n, _seq; _n++;
-        { extern int g_in_flight; static int _gif = -1;
-          if (_gif < 0) _gif = getenv("XWA_KEYINFLIGHT") ? 1 : 0;
-          if (_gif && !g_in_flight) _n = 0; }
-        const char* _a = getenv("XWA_KEYAFTER"); const char* _e = getenv("XWA_KEYEVERY");
-        uint32_t _after = _a ? (uint32_t)strtoul(_a,NULL,0) : 400u;
-        uint32_t _every = _e ? (uint32_t)strtoul(_e,NULL,0) : 120u;
-        uint32_t _sc = (uint32_t)strtoul(_k, NULL, 0);
-        uint32_t _rgdod = MEM32(g_esp + 12), _cb = MEM32(g_esp + 8);
-        if (_n > _after && _rgdod && _cb >= 16 && pdwItems && MEM32(pdwItems) >= 1) {
-            uint32_t _ph = (_n - _after) % _every;
-            if (_ph == 0 || _ph == 1) {
-                MEM32(_rgdod + 0) = _sc;
-                MEM32(_rgdod + 4) = (_ph == 0) ? 0x80u : 0x00u;
-                MEM32(_rgdod + 8) = 0;
-                MEM32(_rgdod + 12) = ++_seq;
-                MEM32(pdwItems) = 1;
-                if (_seq <= 6) { fprintf(stderr, "[KEY] scancode 0x%02X %s (poll %u)\n",
-                                 _sc, (_ph==0)?"DOWN":"UP", _n); fflush(stderr); }
-                g_eax = 0; g_esp += 24; return;
+    /* Buffered keyboard events, kept in a queue so DIGDD_PEEK (flags bit 0) can look without
+     * consuming. The game's kbhit (sub_0042B520) PEEKs and its getch (sub_0042B740) then reads the
+     * same event -- this is how the in-flight hangar menu (sub_0045C680) gets ENTER. Without a
+     * queue, kbhit swallowed the press and getch returned 0, so no menu item could be picked by a
+     * script OR by a person: real keys never reached this path at all before.
+     * DIDEVICEOBJECTDATA = {dwOfs (DIK scancode), dwData (0x80 down / 0 up), dwTimeStamp, dwSequence}.
+     *
+     * XWA_SENDKEY=<scancode>: queue a press+release every XWA_KEYEVERY calls after XWA_KEYAFTER
+     * calls (XWA_KEYINFLIGHT=1 counts flight calls only). DIK_RETURN = 0x1C. */
+    {   static uint8_t q_sc[64], q_dn[64]; static unsigned q_head, q_tail, seq;
+        static uint8_t prev[256];
+        mock_com_obj_t* dev = (mock_com_obj_t*)(uintptr_t)MEM32(g_esp + 4);
+        uint32_t rgdod = MEM32(g_esp + 12), cb = MEM32(g_esp + 8), flags = MEM32(g_esp + 20);
+        #define Q_PUSH(sc, dn) do { if (q_tail - q_head < 64u) { q_sc[q_tail & 63] = (uint8_t)(sc); \
+                                    q_dn[q_tail & 63] = (uint8_t)(dn); q_tail++; } } while (0)
+        if (dev->extra[2] == DIDEV_TYPE_KEYBOARD) {
+            /* Real key edges, under the same focus rule as GetDeviceState. */
+            static int _kf = -1; BYTE vk_state[256]; uint8_t now[256]; int vk, k;
+            if (_kf < 0) _kf = getenv("XWA_REALMOUSE") ? 1 : 0;
+            memset(now, 0, sizeof now);
+            if ((_kf || (g_game_hwnd && GetForegroundWindow() == g_game_hwnd)) && GetKeyboardState(vk_state)) {
+                init_vk_to_dik_table();
+                for (vk = 0; vk < 256; vk++)
+                    if ((vk_state[vk] & 0x80) && g_vk_to_dik[vk]) now[g_vk_to_dik[vk]] = 0x80;
             }
+            for (k = 1; k < 256; k++) if (now[k] != prev[k]) Q_PUSH(k, now[k]);
+            memcpy(prev, now, sizeof prev);
         }
-      } }
+        {   const char* _k = getenv("XWA_SENDKEY");
+            if (_k) {
+                static uint32_t _n; _n++;
+                { extern int g_in_flight; static int _gif = -1;
+                  if (_gif < 0) _gif = getenv("XWA_KEYINFLIGHT") ? 1 : 0;
+                  if (_gif && !g_in_flight) _n = 0; }
+                const char* _a = getenv("XWA_KEYAFTER"); const char* _e = getenv("XWA_KEYEVERY");
+                uint32_t _after = _a ? (uint32_t)strtoul(_a,NULL,0) : 400u;
+                uint32_t _every = _e ? (uint32_t)strtoul(_e,NULL,0) : 120u;
+                if (_every < 2u) _every = 2u;
+                if (_n > _after && (_n - _after) % _every == 0) {
+                    uint32_t _sc = (uint32_t)strtoul(_k, NULL, 0) & 0xFFu;
+                    Q_PUSH(_sc, 0x80); Q_PUSH(_sc, 0);
+                    { static int _p; if (_p < 6) { _p++;
+                        fprintf(stderr, "[KEY] queued scancode 0x%02X press+release (call %u)\n", _sc, _n); fflush(stderr); } }
+                }
+            } }
+        #undef Q_PUSH
+        if (q_head != q_tail && rgdod && cb >= 16 && pdwItems && MEM32(pdwItems) >= 1) {
+            MEM32(rgdod + 0) = q_sc[q_head & 63];
+            MEM32(rgdod + 4) = q_dn[q_head & 63];
+            MEM32(rgdod + 8) = GetTickCount();
+            MEM32(rgdod + 12) = ++seq;
+            MEM32(pdwItems) = 1;
+            if (!(flags & 1u)) q_head++;   /* DIGDD_PEEK leaves it queued */
+            g_eax = 0; g_esp += 24; return;
+        }
+    }
     if (pdwItems) MEM32(pdwItems) = 0;
     g_eax = 0x8007001Cu;   /* DIERR_NOTACQUIRED */
     g_esp += 24;

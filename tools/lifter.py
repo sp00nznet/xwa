@@ -963,8 +963,12 @@ class Lifter:
             self._set_flag_state(lines, 'fcom', '_fpu_cmp')
 
         elif m == 'fnstsw' or m == 'fstsw':
-            lines.append(f"/* fnstsw - FPU status to ax */ {comment}")
-            # After fcom+fnstsw, the test ah pattern follows
+            # The status word's C0/C3 come from the last compare's _fpu_cmp. Emitting this as a
+            # comment left `fnstsw ax; test ah,N; jcc` (every MSVC float compare) testing a stale AH.
+            if ops and ops[0].type == X86_OP_MEM:
+                lines.append(f"MEM16({self._fmt_mem_addr(ops[0].mem)}) = (uint16_t)FPU_SW(_fpu_cmp); {comment}")
+            else:
+                lines.append(f"SET_LO16(eax, FPU_SW(_fpu_cmp)); {comment}")
 
         elif m == 'sahf':
             lines.append(f"/* sahf - load flags from ah */ {comment}")

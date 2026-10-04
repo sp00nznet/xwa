@@ -25,6 +25,8 @@ TMO="${ENGINE_TIMEOUT:-200}"
 # Spectator camera. ENGINE_SPEC= (empty) renders from the PLAYER's own record instead,
 # which is the view the campaign goal actually cares about.
 SPEC="${ENGINE_SPEC-XWA_NLOOKAT=1 XWA_NCAMDIST=400}"
+# ENGINE_WRAP: launcher prefix, e.g. "offstage.exe run --size 1920x1080 --", so the window lands on
+# a virtual monitor instead of the real screens when someone is at the console.
 i=0
 while [ "$i" -lt "$TRIES" ]; do i=$((i+1))
   rm -f rt_flight.bmp
@@ -42,7 +44,7 @@ while [ "$i" -lt "$TRIES" ]; do i=$((i+1))
     XWA_NOLST=1 XWA_NATIVESCANF=1 XWA_D3DCAPS=1 XWA_RENDERINIT=1 XWA_PUMPFIX=1 \
     XWA_WAITEXIT=1 XWA_WAITAFTER=150 \
     "$@" \
-    timeout "$TMO" ../recomp/build/Release/xwa_recomp.exe \
+    timeout "$TMO" $ENGINE_WRAP ../recomp/build/Release/xwa_recomp.exe \
       ../recomp/config/xwingalliance_decrypted.exe > "$LOG" 2>&1
   n=$(grep -ac NATIVEDRAW "$LOG")
   # ENGINE_UNTIL=<pattern>: keep retrying until the log contains it. Flight entry is flaky and a

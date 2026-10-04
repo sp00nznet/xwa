@@ -6,6 +6,11 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 ## [Unreleased]
 
 ### Added
+- netlab build and test: `tools/netlab_run.cmd` (the campaign mission load on a Windows test VM,
+  per-experiment knobs from `xwa_knobs.cmd` in the game dir); CMake `GEN_OPT` and a static CRT so
+  the clang-cl farm build runs on a machine without the VC++ redistributable.
+- `XWA_MEMFIND=<text>`: find a string in guest memory and the `.data` pointers to it.
+- `tools/fix_fnstsw.py`, `tools/audit/` and `docs/lifter-audit.md`.
 - Single-player campaign: mission `1b0m1fw` loads through the engine's own barracks -> loading ->
   flight route and flies the mission's own craft (YT-1300), with the real station and hangar models.
   Supplied state lives in `tools/hooks/` (DirectPlay host path, roster seed, player FG craft, player
@@ -21,6 +26,11 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 - README restructured to the house layout; deep-dive sections moved into `docs/`.
 
 ### Fixed
+- `fnstsw` was lifted as a comment, so every `fcom; fnstsw ax; test ah,N; jcc` float compare (595
+  sites) branched on a stale AH. Lifter fixed; gen patched in place by `tools/fix_fnstsw.py`.
+- DirectInput buffered keyboard mock ignored `DIGDD_PEEK` and never carried real keys, so the
+  in-flight hangar menu could not be driven by a script or a person. ENTER now selects Launch.
+- `com_ensure_d3d_device` was used before its declaration (clang-cl rejected the implicit `int`).
 - Native drawer read the object index (`+0`) as the craft type instead of `+2`, so every ship drew
   with the wrong model.
 - x87 pop-arithmetic in the lifter: `fOPp st(i)` ignored its index and `fsubp`/`fsubrp`,

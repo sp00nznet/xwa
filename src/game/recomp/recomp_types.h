@@ -132,6 +132,9 @@ extern const uint32_t recomp_dispatch_count;
 
 #define SET_LO8(r, v)   ((r) = ((r) & 0xFFFFFF00u) | ((uint32_t)(uint8_t)(v)))
 #define SET_HI8(r, v)   ((r) = ((r) & 0xFFFF00FFu) | (((uint32_t)(uint8_t)(v)) << 8))
+/* x87 status word from the last compare (-1 less, 0 equal, 1 greater): C0 = 0x0100, C3 = 0x4000.
+ * ponytail: no C2/unordered -- _fpu_cmp reads NaN as "equal"; TOP and exception bits read 0. */
+#define FPU_SW(c)       ((uint32_t)((c) < 0 ? 0x0100u : (c) == 0 ? 0x4000u : 0u))
 #define SET_LO16(r, v)  ((r) = ((r) & 0xFFFF0000u) | ((uint32_t)(uint16_t)(v)))
 
 /* ============================================================

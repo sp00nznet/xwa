@@ -60,3 +60,4 @@ config/functions.json*
 config/ghidra_func_bounds.csv
 config/pe_analysis.json
 docs/*_snapshot*.txt
+build-farm*/

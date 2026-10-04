@@ -143,6 +143,11 @@ cmake --build build --config Release
 Both `-T host=x64` and the `/MP` in CMakeLists.txt are required -- the generated tree is ~38 MB of C.
 Read [docs/building.md](docs/building.md) before debugging a build failure.
 
+On [recomp-netlab](https://github.com/sp00nznet/recomp-netlab) (recipe `projects/xwa.env`):
+`netlab build xwa` compiles on the clang-cl farm in about 35 s, and `netlab run xwa --on testbox`
+runs the campaign mission load on the test VM. The VM needs the game install, with
+`xwingalliance_decrypted.exe` copied in, at its `XWA_GAME`.
+
 ## Generated-code hooks
 
 `src/game/recomp/gen/` is produced from the PE and is gitignored, so the env-gated hooks added to
@@ -163,6 +168,7 @@ output moved and a hook needs re-deriving.
 - [docs/campaign.md](docs/campaign.md) -- the single-player campaign bring-up, current blocker
 - [docs/building.md](docs/building.md) -- build and test traps
 - [docs/bringup.md](docs/bringup.md) -- history: boot to flight
+- [docs/lifter-audit.md](docs/lifter-audit.md) -- known lifter bugs vs upstream pcrecomp, with site counts
 
 ## License
 

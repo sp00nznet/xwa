@@ -45,5 +45,6 @@ void com_mocks_init(void);
 void bridge_DirectDrawCreate_impl(void);
 void bridge_DirectInputCreateA_impl(void);
 void bridge_DirectSoundCreate_impl(void);
+uint32_t com_ensure_d3d_device(void);
 
 #endif /* COM_MOCKS_H */

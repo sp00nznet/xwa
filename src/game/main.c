@@ -1007,6 +1007,34 @@ void xwa_native_flush(void)
                             MEM8(0x8053E5), MEM32(0xAF138E), MEM32(0x68BBB8));
                     fflush(stderr); }
             }
+            /* XWA_MEMFIND=<text>: find where a string lives in guest memory, then every dword in
+             * guest .data that points at it -- the fast way from an on-screen string to the code
+             * that draws it (grep the generated C for the pointer's address). Walks committed
+             * readable regions with VirtualQuery, so heap copies are found too. */
+            if (dumped == 3 && getenv("XWA_MEMFIND")) {
+                const char *want = getenv("XWA_MEMFIND"); size_t wl = strlen(want);
+                MEMORY_BASIC_INFORMATION mbi; uint8_t *p = (uint8_t *)0x10000;
+                uint32_t hits[16]; int nh = 0, h;
+                while (nh < 16 && (uintptr_t)p < 0x7FFF0000u && VirtualQuery(p, &mbi, sizeof mbi)) {
+                    uint8_t *e = (uint8_t *)mbi.BaseAddress + mbi.RegionSize, *q;
+                    if (mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READWRITE|PAGE_READONLY|PAGE_EXECUTE_READWRITE))
+                        && !(mbi.Protect & PAGE_GUARD))
+                        for (q = p; q + wl <= e && nh < 16; q++)
+                            if (*q == (uint8_t)want[0] && !memcmp(q, want, wl)) hits[nh++] = (uint32_t)(uintptr_t)q;
+                    p = e;
+                }
+                for (h = 0; h < nh; h++) {
+                    uint32_t a;
+                    fprintf(stderr, "[MEMFIND] '%s' at 0x%08X\n", want, hits[h]);
+                    /* a table may point at the string, or at the start of its line a few bytes back */
+                    for (a = 0x5AE000u; a < 0xB10000u; a += 4) {
+                        uint32_t v = MEM32(a);
+                        if (v <= hits[h] && v + 32u > hits[h])
+                            fprintf(stderr, "[MEMFIND]   ptr at 0x%08X -> 0x%08X (+%u)\n", a, v, hits[h] - v);
+                    }
+                }
+                fflush(stderr);
+            }
             if (dumped == 1 && getenv("XWA_MODELDBG")) {
                 uint32_t k, n2 = (uint32_t)MEM16(0x7B4C00u);
                 int ld = 0, d2;
