@@ -337,7 +337,7 @@ void xwa_autoplay_tick(void) {
     extern void sub_00507510(void), sub_00506CB0(void), sub_005079F0(void), xwa_queue_key(uint32_t);
     enum { WAIT, PICK1, SWAP, HYPER1, DELIVER1, PICK2, HYPER2, DELIVER2, LAND, DONE };
     static const char *const sname[] = { "WAIT", "PICK1", "SWAP", "HYPER1", "DELIVER1", "PICK2", "HYPER2", "DELIVER2", "LAND", "DONE" };
-    static int on = -1, st = WAIT, tries, skip, trip; static DWORD last; static unsigned mark; static uint32_t region0;
+    static int on = -1, st = WAIT, tries, skip, trip, hangar, entered; static DWORD last; static unsigned mark; static uint32_t region0;
     uint32_t slot, rec, pidx, obj, region;
     DWORD now = GetTickCount();
     if (on < 0) on = getenv("XWA_AUTOPLAY") ? 1 : 0;
@@ -545,10 +545,17 @@ void xwa_autoplay_tick(void) {
             /* the hangar menu is now "= MISSION COMPLETED =", item 0 "Go to Debriefing" (STRINGS.TXT
              * MISSION_OVER_DEBRIEF); ENTER selects it, as it selected Launch on the way out */
             {   uint32_t team = MEM16(rec + 0x8B94EC);   /* the menu builder copies its title to 0x68BC40 */
-                fprintf(stderr, "[AUTOPLAY] LAND: in the hangar (hstate=6), map=0x%X, menu '%.40s', complete=%u%s\n", MEM16(0x9C6754),
-                        (const char *)ADDR(0x68BC40u), MEM8(0x807A60u + team * 3u), tries > 4 ? ", ENTER" : ""); fflush(stderr); }
-            if (tries > 4 && tries % 3 == 0) xwa_queue_key(0x1C);
+                fprintf(stderr, "[AUTOPLAY] LAND: in the hangar (hstate=6), map=0x%X, menu '%.40s', complete=%u, item %u, 80B604=%u 80DB68=%u%s\n", MEM16(0x9C6754),
+                        (const char *)ADDR(0x68BC40u), MEM8(0x807A60u + team * 3u), MEM32(0x68BC28), MEM32(0x80B604), MEM8(0x80DB68), tries > 4 ? ", ENTER" : ""); fflush(stderr);
+                /* mission-over menu: item 0 "Go to Debriefing" sets 0x80B604 = 1, item 2 "Refly" = 2
+                 * (sub_0045C680 @0x0045CF09); put the cursor on item 0 as a player would */
+                if (MEM8(0x807A60u + team * 3u) == 1 && !entered) MEM32(0x68BC28) = 0; }
+            hangar = 1;
+            if (tries > 4 && entered < 3 && tries % 4 == 0) { xwa_queue_key(0x1C); entered++; }   /* a few presses, logged by the [ENTER] probe */
             if (++tries > 80) GIVEUP("no debriefing"); break; }
+        if (hangar) {   /* left the hangar after ENTER: watch, never press Space (Space launches) */
+            fprintf(stderr, "[AUTOPLAY] LAND: after the hangar: hstate=%u 80B604=%u 68BBB8=%u\n", MEM32(0x68BBA0), MEM32(0x80B604), MEM32(0x68BBB8)); fflush(stderr);
+            if (++tries > 80) GIVEUP("stuck after the hangar"); break; }
         obj = find_obj(4, -1, NULL, 0);
         if (obj != 0xFFFFu && !msg_seen_since(mark, 0x117)) { MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 3000 + tries * 500); }
         if (msg_seen_since(mark, 0x117) || tries > 3) xwa_queue_key(0x39);
@@ -1632,6 +1639,20 @@ uint32_t g_call_depth_max = 0;
 uint32_t g_total_calls = 0;
 uint32_t g_total_icalls = 0;
 int g_heap_check_enabled = 0;
+/* A lifted callee that returns with esp below where the call left it lost its epilogue (or its
+ * return-slot pop): every call leaks guest stack, and callers' esp-relative locals drift -- the
+ * flight function read a leaked 0xDEAD0000 as its "reload the mission" flag. _chkstk-style helpers
+ * lower esp on purpose; those show up here too and are expected. Report each pair once. */
+uint32_t g_leak_va;   /* target of the indirect call being reported */
+void recomp_esp_leak(const char *callee, uint32_t bytes, const char *caller) {
+    static const char *seen_callee[256], *seen_caller[256]; static uint32_t seen_va[256]; static int n;
+    uint32_t va = (strcmp(callee, "icall") && strcmp(callee, "itail")) ? 0 : g_leak_va;
+    int i;
+    for (i = 0; i < n; i++) if (seen_callee[i] == callee && seen_caller[i] == caller && seen_va[i] == va) return;
+    if (n < 256) { seen_callee[n] = callee; seen_caller[n] = caller; seen_va[n] = va; n++; }
+    if (n <= 64) { fprintf(stderr, "[ESPLEAK] %s 0x%08X returned %u bytes below the call (in %s)\n", callee, va, bytes, caller); fflush(stderr); }
+}
+
 int recomp_heap_ok(void) {
     extern uint32_t g_last_heapalloc_heap;
     HANDLE gh = (HANDLE)(uintptr_t)g_last_heapalloc_heap;
@@ -2907,6 +2928,16 @@ void xwa_ui_driver(void) {
         last_cb = cb; fip = 0;
     }
     fip++;
+
+    /* XWA_AUTOPLAY, front end: the debriefing (screen 0x57ECE0) waits for the player. Press ESC,
+     * then ENTER, alternately until the screen changes; the room (barracks 0x55FF30) that follows
+     * takes XWA_BARRSEL and loads the next mission. */
+    if (cb == 0x0057ECE0 && fip > 300 && fip % 150 == 0 && getenv("XWA_AUTOPLAY")) {
+        extern void xwa_queue_key(uint32_t);
+        int esc = (fip / 150) % 2;
+        xwa_queue_key(esc ? 0x01 : 0x1C);
+        fprintf(stderr, "[AUTOPLAY] debriefing: pressing %s (fip=%d)\n", esc ? "ESC" : "ENTER", fip); fflush(stderr);
+    }
 
     /* XWA_TRAINLAUNCH: skip the flaky door-click entirely. Once the concourse is
      * settled, run the training door's own handler sequence directly (from

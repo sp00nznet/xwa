@@ -38,7 +38,8 @@ class Image:
         return self.pe.get_dword_at_rva(va - self.base)
 
 
-def extent(img, start):
+def extent(img, start, stops=frozenset()):
+    """`stops`: other functions' starts -- a jmp there is a tail call, not part of this one."""
     seen, work, prev = set(), [start], {}
     hi = start
     while work:
@@ -56,7 +57,7 @@ def extent(img, start):
                 op = i.operands[0]
                 if op.type == X86_OP_IMM:
                     t = op.imm
-                    if abs(t - start) < WINDOW:
+                    if abs(t - start) < WINDOW and (t == start or t not in stops):
                         work.append(t)
                 elif op.type == X86_OP_MEM and op.mem.scale == 4 and op.mem.base == 0 and op.mem.disp:
                     n = bound(img, prev.get(va))

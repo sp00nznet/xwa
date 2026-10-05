@@ -13,7 +13,8 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GEN = sorted(glob.glob(os.path.join(ROOT, 'src', 'game', 'recomp', 'gen', 'recomp_000*.c')))
+GEN = sorted(glob.glob(os.path.join(ROOT, 'src', 'game', 'recomp', 'gen', 'recomp_000*.c')) +
+             glob.glob(os.path.join(ROOT, 'src', 'game', 'recomp', 'gen', 'recomp_added.c')))
 PY = sys.executable
 
 # Functions whose gen body lost code: a func-split "merge" stubbed the pieces out but the owner was
@@ -32,8 +33,31 @@ RELIFT = """
 0x0058C657:0x0058C8A9 0x00592A19:0x00592C3B 0x005995F0:0x00599BAD 0x0059BFA0:0x0059C060 0x0059F450:0x005A0190
 """.split()
 
+# Functions functions.json never had: the AI order handlers (table 0x5B6F08[cmd]) and an AI script op
+# (0x5B76B8[op]) that the game reaches only through those tables. Missing, each dispatch went nowhere
+# AND leaked 4 bytes of guest stack (the target never popped the return slot) -- 6000 bytes over mission
+# 1, until the flight function read a leaked 0xDEAD0000 as its "reload the mission" flag. Lifted into
+# gen/recomp_added.c by `relift_func.py --new`, extents from tools/func_extent.py.
+ADD = """
+0x004AB8B0:0x004AB8D7 0x004ABA00:0x004ABA1D 0x004ABB00:0x004ABBE0 0x004ABCD0:0x004ABDA3 0x004ABE20:0x004ABE87
+0x004AC030:0x004AC416 0x004AC7B0:0x004AC7EC 0x004AC8E0:0x004AC900 0x004AC990:0x004AC9BD 0x004AC9C0:0x004ACDDF
+0x004ACE00:0x004ACE5D 0x004ADF90:0x004ADF9E 0x004AE1D0:0x004AE290 0x004AFE20:0x004B0182 0x004B0190:0x004B075C
+0x004B25D0:0x004B2606 0x004B2620:0x004B2665 0x004B2730:0x004B27F1 0x004B2820:0x004B28DE 0x004B2990:0x004B2993
+0x004B2A40:0x004B2D04 0x004B2D10:0x004B2D24 0x004B2EF0:0x004B30EF 0x004B3110:0x004B3124 0x004B3A40:0x004B3F0D
+0x004B4100:0x004B4174 0x004B4980:0x004B4EB0 0x004B5390:0x004B5908 0x004B5910:0x004B5921 0x004B86E0:0x004B8861
+0x004BA600:0x004BA603
+""".split()
+
 # One-off hand corrections (exact text replacements in gen; skipped once applied).
 REPLACE = [
+    # sub_004A1D80: an AI object can have a render object with no craft struct (ro+0xDD == 0) during the
+    # mission-end teardown; the original dereferences it. Skip the object and report it once.
+    ('    PUSH32(esp, eax); /* 0x004A1DE0: push eax */\n',
+     '    if (!eax) {   /* AI object with a render object but no craft struct: report once, skip it */\n        static uint8_t _seen[0x3000 / 8]; uint32_t _i = MEM32(esp + 0x10), _o = MEM32(0x7B33C4) + _i * 0x27u;\n        if (_i < 0x3000u && !(_seen[_i >> 3] & (1 << (_i & 7)))) { _seen[_i >> 3] |= 1 << (_i & 7);\n            fprintf(stderr, "[NULLCRAFT] obj %u type %u fg %u region %u cat %u has ro but no craft\\n", _i, MEM16(_o + 2), MEM8(_o + 5), MEM8(_o + 6), MEM8(_o + 4)); fflush(stderr); }\n        goto L_004A1ED1; }\n    PUSH32(esp, eax); /* 0x004A1DE0: push eax */\n'),
+    # sub_004554F0: after landing, a hangar object can have a render object with no craft record;
+    # give it a private zeroed one instead of reading through null.
+    ('    MEM32(0x910DFC) = eax; /* 0x00455C40: mov dword ptr [0x910dfc], eax */\n',
+     '    if (!eax) {   /* the hangar object has a render object but no craft record: report, use a private one */\n        extern uint32_t xwa_ro_slot(uint32_t); extern int xwa_readable(uint32_t, uint32_t); uint32_t _i = esi / 0x27u, _ro = MEM32(MEM32(0x7B33C4) + esi + 0x23);\n        static int _n; if (_n < 4) { _n++; fprintf(stderr, "[HANGARCRAFT] obj %u type %u ro 0x%08X has no craft (ro+0xDD=0); 80B604=%u\\n", _i,\n            MEM16(MEM32(0x7B33C4) + esi + 2), _ro, MEM32(0x80B604)); fflush(stderr); }\n        if (_ro && xwa_readable(_ro, 0xE5)) { eax = (uint32_t)(uintptr_t)calloc(1, 0x400); MEM32(_ro + 0xDD) = eax; } }\n    MEM32(0x910DFC) = eax; /* 0x00455C40: mov dword ptr [0x910dfc], eax */\n'),
     # XWA_RENDERFN wrote 1 into 0x7828D0 believing it a render-enable flag; it is the ALERTBOXBUFFER
     # pointer, so sub_00511A90 later called free(1): heap corruption, the old L_0048967D crash.
     ('        if (!MEM32(0x7828D0u)) MEM32(0x7828D0u) = 1;\n',
@@ -66,6 +90,8 @@ def run(*args):
 
 def main():
     run(os.path.join('tools', 'relift_func.py'), *RELIFT)
+    if not os.path.exists(os.path.join(ROOT, 'src', 'game', 'recomp', 'gen', 'recomp_added.c')):
+        run(os.path.join('tools', 'relift_func.py'), '--new', *ADD)
     for tool in ('fix_dec_cond', 'fix_test_cond', 'fix_fpu_pop', 'fix_fnstsw', 'fix_jmptbl',
                  'fix_postwrite', 'fix_clobbered_flags', 'fix_carry', 'fix_shiftflags', 'fix_narrowcmp'):
         run(os.path.join('tools', tool + '.py'), *GEN)
@@ -85,6 +111,14 @@ def main():
         t2 = re.sub(r'if \(g_(ab|dc|dr|em|ol|fr|st)_n < ([0-9]+) && ', r'if (g_blocktrace && g_\1_n < \2 && ', t)
         if t2 != t and 'extern int g_blocktrace;' not in t2:
             t2 = re.sub(r'(#include "recomp_funcs.h"\r?\n)', r'\1extern int g_blocktrace;\n', t2, count=1)
+        if t2 != t:
+            open(p, 'w', encoding='latin-1', newline='').write(t2)
+    # a tail `jmp __ftol` inlined as `return;` lost __ftol's `ret` popping our return slot: every call
+    # leaked 4 bytes of guest stack (tools: XWA recomp_esp_leak)
+    ftol = re.compile(r'(_ft >> 32\);)  return; \}( /\* 0x[0-9A-F]{8}: jmp 0x59a650 \*/)')
+    for p in GEN:
+        t = open(p, encoding='latin-1', newline='').read()
+        t2 = ftol.sub(r"\1 esp += 4; return; }\2 /* tail jmp: __ftol's ret pops our return slot */", t)
         if t2 != t:
             open(p, 'w', encoding='latin-1', newline='').write(t2)
     print(f'hand replacements applied: {n}')

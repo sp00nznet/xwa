@@ -88,8 +88,45 @@ def main():
             print(f'0x{addr:08X} ({name}) patched in recomp_{i:04d}.c  switches_reconstructed={nsw}')
             patched = True
             break
-        if not patched:
+        if not patched and add_new:
+            add_function(name, addr, new_code)
+            print(f'0x{addr:08X} ({name}) ADDED to {os.path.basename(ADDED)}  switches_reconstructed={nsw}')
+        elif not patched:
             print(f'0x{addr:08X}: function not found in any gen file')
 
+
+ADDED = os.path.join(GEN, 'recomp_added.c')   # functions functions.json never had (handler-table targets)
+
+
+def add_function(name, addr, code):
+    """Append a function functions.json missed: its body to recomp_added.c, a prototype to
+    recomp_funcs.h, and a dispatch entry (sorted -- recomp_lookup is a binary search)."""
+    if not os.path.exists(ADDED):
+        open(ADDED, 'w', encoding='latin-1', newline='').write(
+            '/* Functions functions.json missed, lifted by tools/relift_func.py --new */\n\n'
+            '#define RECOMP_GENERATED_CODE\n#include "recomp_types.h"\n#include "recomp_funcs.h"\n'
+            'extern void xwa_batch_check(const char*);\n#include <math.h>\n#include <string.h>\n\n')
+    open(ADDED, 'a', encoding='latin-1', newline='').write(code + '\n\n')
+    hdr = os.path.join(GEN, 'recomp_funcs.h')
+    h = open(hdr, encoding='latin-1', newline='').read()
+    proto = f'void {name}(void);  /* 0x{addr:08X} */\n'
+    if proto not in h:
+        i = h.rfind('void sub_')
+        i = h.find('\n', i) + 1
+        open(hdr, 'w', encoding='latin-1', newline='').write(h[:i] + proto + h[i:])
+    dp = os.path.join(GEN, 'recomp_dispatch.c')
+    d = open(dp, encoding='latin-1', newline='').read()
+    if f'{{ 0x{addr:08X}u, {name} }}' in d:
+        return
+    rows = list(re.finditer(r'^    \{ 0x([0-9A-F]{8})u, sub_[0-9A-F]{8} \},\n', d, re.M))
+    after = [r for r in rows if int(r[1], 16) > addr]
+    at = after[0].start() if after else rows[-1].end()
+    d = d[:at] + f'    {{ 0x{addr:08X}u, {name} }},\n' + d[at:]
+    d = re.sub(r'recomp_dispatch_count = (\d+);', lambda m: f'recomp_dispatch_count = {int(m[1]) + 1};', d)
+    open(dp, 'w', encoding='latin-1', newline='').write(d)
+
+
 if __name__ == '__main__':
+    add_new = '--new' in sys.argv
+    sys.argv = [a for a in sys.argv if a != '--new']
     main()

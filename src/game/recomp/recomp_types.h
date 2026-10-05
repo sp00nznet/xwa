@@ -345,6 +345,7 @@ extern uint32_t g_total_icalls;
 /* Heap check after every call (enabled by setting g_heap_check_enabled=1) */
 extern int g_heap_check_enabled;
 int recomp_heap_ok(void);   /* guest heap + process heap both valid (main.c) */
+void recomp_esp_leak(const char *callee, uint32_t bytes, const char *caller);   /* callee returned with esp below the call (main.c) */
 extern uint32_t g_heap_check_last_ok_call;
 extern uint32_t g_heap_check_last_ok_va;
 
@@ -363,13 +364,14 @@ extern uint32_t g_trace_ring_idx;
  * calling convention. This masks stack imbalance bugs in recompiled code
  * that would otherwise cause corrupted pop values to propagate. */
 #define RECOMP_CALL(func) do { \
-    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi, _save_ebp = g_ebp; \
+    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi, _save_ebp = g_ebp, _esp0 = esp; \
     PUSH32(esp, 0xDEAD0000u); /* dummy return address */ \
     g_call_depth++; \
     g_total_calls++; \
     if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
     TRACE_LOG("[CALL %u d%u] -> %s\n", g_total_calls, g_call_depth, #func); \
     func(); \
+    if (esp < _esp0) recomp_esp_leak(#func, _esp0 - esp, __func__); \
     if (g_ret_probe) { fprintf(stderr, "[MACRO] just after %s: g_eax=0x%08X\n", #func, g_eax); fflush(stderr); } \
     TRACE_LOG("[RET  %u d%u] <- %s\n", g_total_calls, g_call_depth, #func); \
     g_call_depth--; \
@@ -388,7 +390,7 @@ extern uint32_t g_trace_ring_idx;
  * Same callee-saved register protection as RECOMP_CALL. */
 #define RECOMP_ICALL(target_va) do { \
     uint32_t _va = (uint32_t)(target_va); \
-    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi, _save_ebp = g_ebp; \
+    uint32_t _save_ebx = g_ebx, _save_esi = g_esi, _save_edi = g_edi, _save_ebp = g_ebp, _esp0 = esp; \
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
@@ -402,6 +404,7 @@ extern uint32_t g_trace_ring_idx;
         if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
         TRACE_LOG("[ICALL %u d%u] -> 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         _fn(); \
+        if (esp < _esp0) { extern uint32_t g_leak_va; g_leak_va = _va; recomp_esp_leak("icall", _esp0 - esp, __func__); } \
         TRACE_LOG("[IRET  %u d%u] <- 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         g_call_depth--; \
         g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; g_ebp = _save_ebp; \
@@ -428,7 +431,7 @@ extern uint32_t g_trace_ring_idx;
 
 /* Indirect tail call (jmp through dispatch) */
 #define RECOMP_ITAIL(target_va) do { \
-    uint32_t _va = (uint32_t)(target_va); \
+    uint32_t _va = (uint32_t)(target_va), _esp0 = esp; \
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
@@ -441,6 +444,7 @@ extern uint32_t g_trace_ring_idx;
         if (g_call_depth > g_call_depth_max) g_call_depth_max = g_call_depth; \
         TRACE_LOG("[ITAIL %u d%u] -> 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         _fn(); \
+        if (esp < _esp0 + 4) { extern uint32_t g_leak_va; g_leak_va = _va; recomp_esp_leak("itail", _esp0 + 4 - esp, __func__); } \
         g_call_depth--; \
     } else if (!recomp_native_call(_va)) { \
         TRACE_LOG("ITAIL: unresolved VA 0x%08X\n", _va); \
