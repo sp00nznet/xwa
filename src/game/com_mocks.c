@@ -220,6 +220,11 @@ static LONG g_mouse_dy = 0;
 #define SURFACE_BUF_SIZE (640 * 480 * 2)
 #define SURFACE_GUARD    (4 * 1024 * 1024)
 #define SURFACE_SENTINEL 0xA5
+#define SURFACE_FRONT    (64 * 1024)
+#define MAX_TRACKED_SURF 4096
+static uint8_t* g_surf_ptr[MAX_TRACKED_SURF];
+static uint32_t g_surf_size[MAX_TRACKED_SURF];
+static int g_surf_n;
 static uint8_t* g_surface_buffer = NULL;
 static uint8_t* g_backbuf_buffer = NULL;
 
@@ -234,14 +239,33 @@ static uint8_t* alloc_surface_buf(uint32_t size) {
      * which HeapAlloc returned NULL and the game wrote through a null pixel pointer.
      * Scale the guard to the surface instead. */
     uint32_t guard = (size >= 256 * 1024) ? SURFACE_GUARD : (64 * 1024);
-    uint8_t* p = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)size + guard);
+    uint8_t* p = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)SURFACE_FRONT + size + guard);
     if (!p) {
         fprintf(stderr, "[COM] !! alloc_surface_buf FAILED for %u bytes (+%u guard)\n", size, guard);
         fflush(stderr);
         return NULL;
     }
+    /* front guard too: a blit that clips wrong writes BEFORE the pixels, which without it lands
+     * on the process heap's block header (com_check_surface_guards() reports it) */
+    memset(p, SURFACE_SENTINEL, SURFACE_FRONT);
+    p += SURFACE_FRONT;
     memset(p + size, SURFACE_SENTINEL, guard);
+    if (g_surf_n < MAX_TRACKED_SURF) { g_surf_ptr[g_surf_n] = p; g_surf_size[g_surf_n] = size; g_surf_n++; }
     return p;
+}
+
+void com_check_surface_guards(void) {
+    static int reported;
+    for (int i = 0; i < g_surf_n && reported < 8; i++) {
+        const uint8_t* f = g_surf_ptr[i] - SURFACE_FRONT;
+        uint32_t k = 0;
+        while (k < SURFACE_FRONT && f[k] == SURFACE_SENTINEL) k++;
+        if (k < SURFACE_FRONT) {
+            fprintf(stderr, "[SURFGUARD] surface #%d buf=%p size=%u: front guard overwritten from %u bytes before the pixels\n",
+                    i, (void*)g_surf_ptr[i], g_surf_size[i], SURFACE_FRONT - k);
+            fflush(stderr); memset((void*)f, SURFACE_SENTINEL, SURFACE_FRONT); reported++;
+        }
+    }
 }
 
 /* Global mock objects (for cross-reference) */

@@ -6,8 +6,9 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 ## [Unreleased]
 
 ### Added
-- Mission 1 now runs through the first pickup, the wingman's pickup and the hyperspace jump to
-  Harlequin Station (the wingman not following is the open blocker). See `docs/campaign.md`.
+- Mission 1 now runs through both pickups, the jump to Harlequin Station, the delivery there and
+  the fuel-cell pickup; the hyper buoy home (waiting on the wingman) is the open blocker. The
+  intermittent heap-corruption crash is fixed (`XWA_FGFILL` pool overrun). See `docs/campaign.md`.
 - `tools/func_extent.py` (real function extent by control-flow walk); `XWA_NOFREE`, `XWA_WATCHOBJ`,
   `XWA_WATCHPICK`, `XWA_FGDUMP` diagnostics.
 - `XWA_AUTOPLAY=1`: headless test harness that plays 1b0m1fw through the game's own pickup/dock/

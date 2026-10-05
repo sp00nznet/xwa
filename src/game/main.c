@@ -143,6 +143,16 @@ ptrdiff_t g_mem_base = 0;
  * non-zero depth instead of 640/0. */
 #define XWA_SCENE_STRIDE 0x100u
 #define XWA_SCENE_COUNT  1200u
+/* XWA_FGFILL's render objects for slots past the real pool: pool + i*0xE5 runs into the object
+ * table itself beyond entry ~1010 (pool 0x0F045E98, table 0x0F07E708 in a measured run), and the
+ * game writes ro fields -- corrupting the table and the heap behind it. One zeroed record each. */
+uint32_t xwa_ro_slot(uint32_t idx) {
+    static uint8_t* base = NULL;
+    if (!base) base = (uint8_t*)calloc(XWA_SCENE_COUNT, XWA_SCENE_STRIDE);
+    if (!base || idx >= XWA_SCENE_COUNT) return 0;
+    return (uint32_t)(uintptr_t)(base + (size_t)idx * XWA_SCENE_STRIDE);
+}
+
 uint32_t xwa_scene_slot(uint32_t idx) {
     static uint8_t* base = NULL;
     if (!base) {
@@ -310,6 +320,13 @@ static void park_at(uint32_t pidx, uint32_t obj, int off) {
     uint32_t tbl = MEM32(0x7B33C4), po = tbl + pidx * 0x27u, co = tbl + obj * 0x27u;
     MEM32(po + 7) = MEM32(co + 7); MEM32(po + 0xB) = MEM32(co + 0xB) - off; MEM32(po + 0xF) = MEM32(co + 0xF);
 }
+/* park `off` units from obj along axis dir (0..5 = -Y,+Y,-X,+X,-Z,+Z) */
+static void park_dir(uint32_t pidx, uint32_t obj, int off, int dir) {
+    uint32_t tbl = MEM32(0x7B33C4), po = tbl + pidx * 0x27u, co = tbl + obj * 0x27u;
+    static const signed char ax[6][3] = { {0,-1,0}, {0,1,0}, {-1,0,0}, {1,0,0}, {0,0,-1}, {0,0,1} };
+    MEM32(po + 7) = MEM32(co + 7) + ax[dir][0] * off; MEM32(po + 0xB) = MEM32(co + 0xB) + ax[dir][1] * off;
+    MEM32(po + 0xF) = MEM32(co + 0xF) + ax[dir][2] * off;
+}
 void xwa_autoplay_tick(void) {
     extern void sub_00507510(void), sub_00506CB0(void), sub_005079F0(void), xwa_queue_key(uint32_t);
     enum { WAIT, PICK1, SWAP, HYPER1, DELIVER1, PICK2, HYPER2, DELIVER2, LAND, DONE };
@@ -328,7 +345,7 @@ void xwa_autoplay_tick(void) {
         static int armed; extern void xwa_watch_set(uint32_t);
         if (!armed && getenv("XWA_WATCHGATE")) {   /* Selu's AI countdown, order block +0x32 */
             uint32_t ro3 = MEM32(MEM32(0x7B33C4) + 3 * 0x27u + 0x23);
-            if (ro3 && MEM32(ro3 + 0xDD)) { armed = 1; xwa_watch_set(MEM32(ro3 + 0xDD) + (getenv("XWA_WATCHCMD") ? 0x84 : 0x5A)); } }   /* +0x84: order cmd */
+            if (ro3 && MEM32(ro3 + 0xDD)) { armed = 1; xwa_watch_set(MEM32(ro3 + 0xDD) + (getenv("XWA_WATCHOFF") ? (uint32_t)strtoul(getenv("XWA_WATCHOFF"), NULL, 0) : 0x5Au)); } }   /* craft offset: 0x84 order cmd, 0x60 order target */
         if (!armed && getenv("XWA_WATCHOBJ")) {   /* n or n:off (field offset, default 7 = X) */
             const char *w = getenv("XWA_WATCHOBJ"), *c = strchr(w, ':');
             armed = 1; xwa_watch_set(MEM32(0x7B33C4) + (uint32_t)atoi(w) * 0x27u + (c ? (uint32_t)strtoul(c + 1, NULL, 0) : 7u)); } }
@@ -336,7 +353,16 @@ void xwa_autoplay_tick(void) {
         if ((k++ % 8) == 0) { fprintf(stderr, "[AUTOPLAY] pos: clock=%02u:%02u:%02u pidx=%u alt(96CC)=%u f5=%u f3=%u player(%d,%d,%d) obj3(%d,%d,%d) obj2(%d,%d,%d) docked=%u\n",
             MEM8(0x8053F7), MEM8(0x8053F8), MEM8(0x8053F9), pidx, MEM32(rec + 0x8B96CC), MEM8(rec + 0x8B94F5), MEM8(rec + 0x8B94F3), (int32_t)MEM32(t + pidx*0x27u + 7), (int32_t)MEM32(t + pidx*0x27u + 0xB), (int32_t)MEM32(t + pidx*0x27u + 0xF),
             (int32_t)MEM32(t + 3*0x27u + 7), (int32_t)MEM32(t + 3*0x27u + 0xB), (int32_t)MEM32(t + 3*0x27u + 0xF),
-            (int32_t)MEM32(t + 2*0x27u + 7), (int32_t)MEM32(t + 2*0x27u + 0xB), (int32_t)MEM32(t + 2*0x27u + 0xF), MEM32(0x9C6750)); fflush(stderr); } }
+            (int32_t)MEM32(t + 2*0x27u + 7), (int32_t)MEM32(t + 2*0x27u + 0xB), (int32_t)MEM32(t + 2*0x27u + 0xF), MEM32(0x9C6750));
+            {   /* Selu's AI: script id (order+0x2A, names at 0x7FFDA0 stride 0x55), runtime cmd, region */
+                uint32_t ro3 = MEM32(t + 3 * 0x27u + 0x23), cr3 = ro3 ? MEM32(ro3 + 0xDD) : 0;
+                uint32_t rop = MEM32(t + pidx * 0x27u + 0x23), crp = rop ? MEM32(rop + 0xDD) : 0;
+                fprintf(stderr, "[AUTOPLAY] fg pickup counters (0x7B703E+fg*0x172): fg1=%u fg2=%u | flag(0x7B7076) fg1=%u fg2=%u\n",
+                    MEM16(0x7B703Eu + 1 * 0x172u), MEM16(0x7B703Eu + 2 * 0x172u), MEM8(0x7B7076u + 1 * 0x172u), MEM8(0x7B7076u + 2 * 0x172u));
+                if (cr3) fprintf(stderr, "[AUTOPLAY] selu ai: script %u '%s' cmd 0x%02X tgt %u region %u | player order cmd 0x%02X tgt %u phase %u\n", MEM8(cr3 + 0x52),
+                    (const char*)ADDR(0x7FFDA0u + MEM8(cr3 + 0x52) * 0x55u), MEM8(cr3 + 0x84), MEM16(cr3 + 0x60), MEM8(t + 3 * 0x27u + 6),
+                    crp ? MEM8(crp + 0x84) : 0, crp ? MEM16(crp + 0x60) : 0, crp ? MEM8(crp + 0x85) : 0); }
+            fflush(stderr); } }
     if (getenv("XWA_AIOP")) {   /* Selu's AI gate: order block (craft+0x28) +0x32 countdown, +0x2E interval */
         uint32_t ro3 = MEM32(MEM32(0x7B33C4) + 3 * 0x27u + 0x23), cr3 = ro3 ? MEM32(ro3 + 0xDD) : 0;
         uint32_t ps3 = MEM32(MEM32(0x7B33C4) + 3 * 0x27u + 0x1F);
@@ -396,7 +422,10 @@ void xwa_autoplay_tick(void) {
                 (int32_t)MEM32(MEM32(0x7B33C4) + obj * 0x27u + 0xB), (int32_t)MEM32(MEM32(0x7B33C4) + obj * 0x27u + 0xF)); fflush(stderr);
         mark = g_msg_n; guest_call1(sub_00507510, slot);
         {   static int wp; extern void xwa_watch_set(uint32_t);   /* XWA_WATCHPICK: who moves the player next */
-            if (!wp && getenv("XWA_WATCHPICK")) { wp = 1; xwa_watch_set(MEM32(0x7B33C4) + pidx * 0x27u + 0xB); } }
+            if (!wp && getenv("XWA_WATCHPICK")) { wp = 1; xwa_watch_set(MEM32(0x7B33C4) + pidx * 0x27u + 0xB); }
+            if (!wp && getenv("XWA_WATCHPCMD")) {   /* the player's order cmd: who drops the pickup claim */
+                uint32_t rop = MEM32(MEM32(0x7B33C4) + pidx * 0x27u + 0x23);
+                if (rop && MEM32(rop + 0xDD)) { wp = 1; xwa_watch_set(MEM32(rop + 0xDD) + 0x84); } } }
         if (++tries > 40) GIVEUP("too many tries");
         break;
     case SWAP:
@@ -419,7 +448,12 @@ void xwa_autoplay_tick(void) {
     case HYPER1: case HYPER2:
         if (getenv("XWA_THROTTLETEST") && tries < 6) xwa_queue_key(0x0E);   /* Backspace = full throttle */
         if (region != region0) { NEXT(st == HYPER1 ? DELIVER1 : DELIVER2); break; }
-        obj = find_obj(-1, 218, st == HYPER1 ? "Harlequin" : "Home", 0);
+        obj = find_obj(-1, 218, st == HYPER1 ? "Harlequin" : NULL, st == HYPER1 ? 0 : (tries / 6) % 4);   /* HYPER2: rotate through the region's buoys */
+        if (tries % 20 == 0) {   /* every hyper buoy (type 218) in every region, to see what the mission spawned */
+            uint32_t i, tb = MEM32(0x7B33C4); fprintf(stderr, "[AUTOPLAY] buoys:");
+            for (i = 0; i < 2000; i++) { uint32_t o = tb + i * 0x27u; if (MEM16(o + 2) == 218)
+                fprintf(stderr, " %u:fg%u '%s' r%u", i, MEM8(o + 5), fg_name(MEM8(o + 5)), MEM8(o + 6)); }
+            fprintf(stderr, "\n"); fflush(stderr); }
         if (obj == 0xFFFFu) { if (tries % 10 == 0) dump_region(); if (++tries > 60) GIVEUP("no hyper buoy appeared"); break; }
         MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 4000);
         {   /* "follow Aeron": give Selu (obj 3, fg 3) time to jump first, as a flown approach would */
@@ -437,8 +471,12 @@ void xwa_autoplay_tick(void) {
         if (obj == 0xFFFFu) { dump_region(); GIVEUP("no delivery target in this region"); break; }
         if (!tries) { dump_region();
             if (getenv("XWA_FGDUMP")) {   /* Selu's flight group record (orders + triggers), for offline decoding */
-                FILE *fd = fopen("fg3.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x80DC80u + 3 * 0xE42u), 1, 0xE42, fd); fclose(fd); } } }
-        MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 20000);
+                FILE *fd = fopen("fg3.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x80DC80u + 3 * 0xE42u), 1, 0xE42, fd); fclose(fd); }
+                fd = fopen("fg13.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x80DC80u + 13 * 0xE42u), 1, 0xE42, fd); fclose(fd); }
+                fd = fopen("fg0.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x80DC80u), 1, 0xE42, fd); fclose(fd); }
+                fd = fopen("fgall.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x80DC80u), 1, 0xE42 * 32, fd); fclose(fd); }
+                fd = fopen("aiscripts.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x7FFDA0u), 1, 0x55 * 64, fd); fclose(fd); } } }   /* AI script names */
+        MEM16(rec + 0x8B9505) = (uint16_t)obj; park_dir(pidx, obj, 20000, (tries / 2) % 6);   /* the dock ray test needs a docking point in view */
         fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s' (selu obj3 region %u)\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
                 MEM8(MEM32(0x7B33C4) + 3 * 0x27u + 6)); fflush(stderr);
         mark = g_msg_n; guest_call1(sub_00506CB0, slot);
@@ -467,6 +505,21 @@ void xwa_status_tick(unsigned frame) {
      * through d3d11_present every frame -- it is also called from the flight object walk. */
     static int every = -1; static DWORD last;
     uint32_t cam; DWORD now = GetTickCount();
+    {   /* XWA_HEAPWATCH=1: validate the guest's heap and the process heap each tick; report the first
+         * tick that fails with the call count, so XWA_HEAPCHECKFROM=<calls> can arm per-call checks */
+        static int hw = -1, bad; static unsigned ok_calls; extern uint32_t g_last_heapalloc_heap;
+        if (hw < 0) hw = getenv("XWA_HEAPWATCH") != NULL;
+        if (hw) { extern void com_check_surface_guards(void); com_check_surface_guards(); }
+        if (hw && !bad) {
+            HANDLE gh = (HANDLE)(uintptr_t)g_last_heapalloc_heap;
+            int g_ok = !gh || HeapValidate(gh, 0, NULL), p_ok = HeapValidate(GetProcessHeap(), 0, NULL);
+            if (g_ok && p_ok) ok_calls = g_total_calls;
+            else { bad = 1; fprintf(stderr, "[HEAPWATCH] corrupt: guest heap %s, process heap %s; last ok at call %u, now call %u frame %u\n",
+                       g_ok ? "ok" : "BAD", p_ok ? "ok" : "BAD", ok_calls, g_total_calls, frame); fflush(stderr); } } }
+    {   extern int g_heap_check_enabled; static int from = -1;
+        if (from < 0) from = getenv("XWA_HEAPCHECKFROM") ? (int)strtoul(getenv("XWA_HEAPCHECKFROM"), NULL, 0) : 0;
+        if (from > 0 && g_total_calls >= (unsigned)from && !g_heap_check_enabled) { g_heap_check_enabled = 1; from = 0;
+            fprintf(stderr, "[HEAPWATCH] per-call heap checks on at call %u\n", g_total_calls); fflush(stderr); } }
     if (every < 0) every = getenv("XWA_STATUS") ? atoi(getenv("XWA_STATUS")) : 0;
     if (every <= 0 || now - last < (DWORD)every) return;
     last = now;
@@ -1514,6 +1567,11 @@ uint32_t g_call_depth_max = 0;
 uint32_t g_total_calls = 0;
 uint32_t g_total_icalls = 0;
 int g_heap_check_enabled = 0;
+int recomp_heap_ok(void) {
+    extern uint32_t g_last_heapalloc_heap;
+    HANDLE gh = (HANDLE)(uintptr_t)g_last_heapalloc_heap;
+    return (!gh || HeapValidate(gh, 0, NULL)) && HeapValidate(GetProcessHeap(), 0, NULL);
+}
 uint32_t g_heap_check_last_ok_call = 0;
 uint32_t g_heap_check_last_ok_va = 0;
 
@@ -1661,7 +1719,9 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
     if (code == XWA_WATCH_ARM_CODE) {
         CONTEXT* c = ep->ContextRecord;
         c->Dr0 = (DWORD)ADDR(g_watch_addr);
-        c->Dr7 = 0x000D0001u;   /* L0 enable | RW0=write | LEN0=4 bytes */
+        /* L0 enable | RW0=write | LEN0=4 bytes; an unaligned address gets LEN0=1 byte, since the CPU
+         * rounds a 4-byte watch down to the aligned dword and would report the neighbours' writes */
+        c->Dr7 = ((c->Dr0 & 3) || getenv("XWA_WATCHBYTE")) ? 0x00010001u : 0x000D0001u;
         c->Dr6 = 0;
         return EXCEPTION_CONTINUE_EXECUTION;
     }

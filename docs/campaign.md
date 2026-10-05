@@ -71,12 +71,16 @@ in range, issue the game's pickup / dock commands, follow the in-flight message 
    collision pass (`sub_00408DC0`) sees the craft touch the container and attaches it.
 2. **Selu flies to Xi 2 and picks it up**; the hyper buoy to Harlequin Station activates (0x163).
 3. **Hyperspace works**: Space at the buoy (0x79 -> 0x71) moves the player to region 1.
-4. **Blocker:** Harlequin Station answers "No delivery locations currently available" (0x15D). The
-   mission says to let Aeron deliver first, and Selu never arrives: after its pickup it flies past
-   the buoy, stops ~42000 units out and stays in region 0. Its FG orders (dumped from
-   `0x80DC80 + fg*0xE42`, order records 0x94 bytes from FG+0xCA, 4 per region) are region 0:
-   `0x11` pick up, `0x32` hyper to region 1, `0x39`, `0x28`; region 1: `0x28` (FG13, deliver)...
-   so the AI hyperspace exit never completes the region transfer.
+4. **Delivery at Harlequin Station works** (0x15C -> 0x162), and the fuel cells (FG14 "Pi") are
+   picked up and secured.
+5. **Blocker:** the hyper buoy home (FG23, region 1) never activates, and it most likely waits on
+   Aeron (her coolant pickup): the region-0 buoy activated right after Selu's pickup. Selu never
+   leaves region 0. After securing Xi 2 its pickup order (FG orders dumped from
+   `0x80DC80 + fg*0xE42`, records 0x94 bytes from FG+0xCA, 4 per region: region 0 `0x11` pick up
+   FG2 else FG1, `0x32` hyper to region 1, ...) falls back to FG1 and goes after Xi 1, which the
+   player carries; the order never completes, so `0x32` never runs. The cargo-attach routine
+   (`sub_004B65E0`) records the carrier at craft +0x185 and clears the carrier's order cmd; what
+   should stop Selu targeting a carried canister is still open.
 
 How the AI runs, for the next look: `sub_004A1D80` gates each craft on a countdown (order
 block +0x32 minus elapsed, reloaded from +0x2E); `sub_004A22C0` interprets a byte-code script
@@ -99,10 +103,21 @@ home -> deliver to the Azzameen base -> land.
   at 0x0040A15D, each half tail-jumping into the other. Both are re-lifted whole. Every `RELIFT`
   range was then re-measured with `tools/func_extent.py` (walks the control flow, switch tables
   included), which also caught AI script ops missing their epilogue (`sub_004B8F70`, `sub_004B9220`).
-- Intermittent ntdll heap crashes (0xC0000374, `L_0048967D`): guest code uses freed blocks (full
-  page heap catches a read of a freed texture record in `sub_005960BE`). `XWA_NOFREE=1` (on in
-  `tools/netlab_run.cmd`) leaks every guest block, and keeps realloc'd ones, until the stale
-  pointer is found.
+- Intermittent ntdll heap crashes (0xC0000374, `L_0048967D`, roughly every second run): the
+  gen-only `XWA_FGFILL` pass gave objects without a render object `pool + i*0xE5`, which runs past
+  the pool's allocation (in one run straight into the object table at entry ~1010); the game then
+  writes ro fields into whatever lives there. Slots past the pool now get their own zeroed record
+  (`xwa_ro_slot`, bounded by `xwa_guest_block_size`), recorded as a `REPLACE` in
+  `tools/repair_gen.py`. Also: `XWA_NOFREE=1` (on in `tools/netlab_run.cmd`) leaks guest blocks,
+  keeps realloc'd ones and pads 256 bytes in front, since the game also reads freed blocks and
+  bytes before a block (page heap catches both); the HeapSize bridge used the process heap for
+  guest-heap blocks; surface buffers have a front guard (`XWA_HEAPWATCH=1` checks both heaps and
+  the guards every tick).
+- Docking at Harlequin Station: "No delivery locations" (0x15D) is the dock command's mesh ray
+  test (`sub_004DE9B0`) finding every docking point behind the hull from where the player was
+  parked; approaching from another side gets "Object delivered" (0x162).
+- Join point at 0x004A393F (AI target filter `sub_004A36B0`) evaluated the wrong setter, like
+  0x0044309B; fixed by hand (the audit counts ~59 of these).
 - d3d11: the window-sized staging texture was updated from smaller surfaces with a NULL box, an
   over-read of the converted pixel buffer.
 - The mission clock (0x8053FA) was frozen until `tools/fix_narrowcmp.py` (signed compares on 8/16-bit

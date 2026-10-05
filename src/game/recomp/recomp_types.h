@@ -344,6 +344,7 @@ extern uint32_t g_total_icalls;
 
 /* Heap check after every call (enabled by setting g_heap_check_enabled=1) */
 extern int g_heap_check_enabled;
+int recomp_heap_ok(void);   /* guest heap + process heap both valid (main.c) */
 extern uint32_t g_heap_check_last_ok_call;
 extern uint32_t g_heap_check_last_ok_va;
 
@@ -373,7 +374,7 @@ extern uint32_t g_trace_ring_idx;
     TRACE_LOG("[RET  %u d%u] <- %s\n", g_total_calls, g_call_depth, #func); \
     g_call_depth--; \
     g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; g_ebp = _save_ebp; \
-    if (g_heap_check_enabled && !HeapValidate(GetProcessHeap(), 0, NULL)) { \
+    if (g_heap_check_enabled && !recomp_heap_ok()) { \
         fprintf(stderr, "[HEAP] CORRUPTION after CALL %s (call #%u)\n", #func, g_total_calls); \
         fprintf(stderr, "    Last OK: call #%u va 0x%08X\n", g_heap_check_last_ok_call, g_heap_check_last_ok_va); \
         g_heap_check_enabled = 0; \
@@ -404,7 +405,7 @@ extern uint32_t g_trace_ring_idx;
         TRACE_LOG("[IRET  %u d%u] <- 0x%08X\n", g_total_icalls, g_call_depth, _va); \
         g_call_depth--; \
         g_ebx = _save_ebx; g_esi = _save_esi; g_edi = _save_edi; g_ebp = _save_ebp; \
-        if (g_heap_check_enabled && !HeapValidate(GetProcessHeap(), 0, NULL)) { \
+        if (g_heap_check_enabled && !recomp_heap_ok()) { \
             fprintf(stderr, "[HEAP] CORRUPTION after ICALL 0x%08X in %s (icall #%u, call #%u)\n", _va, __func__, g_total_icalls, g_total_calls); \
             fprintf(stderr, "    Last OK: call #%u va 0x%08X\n", g_heap_check_last_ok_call, g_heap_check_last_ok_va); \
             g_heap_check_enabled = 0; \
@@ -470,7 +471,7 @@ __declspec(dllimport) void* __stdcall GetProcessHeap(void);
 __declspec(dllimport) int   __stdcall HeapValidate(void*, unsigned long, const void*);
 #endif
 static inline void recomp_heap_check(const char* where) {
-    if (!HeapValidate(GetProcessHeap(), 0, NULL))
+    if (!recomp_heap_ok())
         fprintf(stderr, "[HEAP] CORRUPTION detected at %s\n", where);
 }
 #else

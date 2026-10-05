@@ -1029,6 +1029,26 @@ uint32_t g_last_heapalloc_ret = 0;
 uint32_t g_last_heapfree_ptr = 0;
 uint32_t g_heapop_count = 0;
 
+/* XWA_NOFREE: guest blocks are never freed (the game uses freed blocks) and get HEAP_FRONT bytes of
+ * slack before the pointer it sees (it also reads before a block's start -- page heap's backward
+ * mode catches sub_00569BE0 doing it), so neither reaches a live heap header. */
+#define HEAP_FRONT 256u
+static int heap_nofree(void) { static int nf = -1; if (nf < 0) nf = getenv("XWA_NOFREE") != NULL; return nf; }
+
+/* Size the guest asked for when it allocated `p` from the heap it last used, or 0 if `p` is not
+ * the start of such a block (XWA_FGFILL bounds its render-object pool with this). */
+uint32_t xwa_guest_block_size(uint32_t p) {
+    HANDLE h = (HANDLE)(uintptr_t)g_last_heapalloc_heap;
+    SIZE_T n;
+    if (!h || !p) return 0;
+    if (heap_nofree()) {
+        n = HeapSize(h, 0, (void*)(uintptr_t)(p - HEAP_FRONT));
+        return n == (SIZE_T)-1 ? 0 : (uint32_t)(n - HEAP_FRONT - 256);
+    }
+    n = HeapSize(h, 0, (void*)(uintptr_t)p);
+    return n == (SIZE_T)-1 ? 0 : (uint32_t)(n - 256);
+}
+
 static void bridge_HeapAlloc_005A9148(void) { /* KERNEL32.dll:HeapAlloc (3 args) */
     BRIDGE_TRACE("KERNEL32.dll:HeapAlloc");
     uint32_t a0 = MEM32(g_esp + 4);   /* hHeap */
@@ -1043,7 +1063,11 @@ static void bridge_HeapAlloc_005A9148(void) { /* KERNEL32.dll:HeapAlloc (3 args)
      * is harmless on the real heap because a block is never flush against an unmapped page.
      * Our blocks can end exactly on a page boundary, turning that benign read into a fault.
      * 64 bytes of slack restores the original behaviour. */
-    g_eax = (uint32_t)(uintptr_t)HeapAlloc(hHeap, a1, a2 + 256);
+    if (heap_nofree()) {
+        uint8_t* p = (uint8_t*)HeapAlloc(hHeap, a1, a2 + 256 + HEAP_FRONT);
+        g_eax = p ? (uint32_t)(uintptr_t)(p + HEAP_FRONT) : 0;
+    } else
+        g_eax = (uint32_t)(uintptr_t)HeapAlloc(hHeap, a1, a2 + 256);
     g_last_heapalloc_ret = g_eax;
     g_esp += 16;
 }
@@ -1055,11 +1079,10 @@ static void bridge_HeapReAlloc_005A914C(void) { /* KERNEL32.dll:HeapReAlloc (4 a
     uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
     uint32_t a3 = MEM32(g_esp + 16);  /* dwBytes */
     HANDLE hHeap = (HANDLE)(uintptr_t)a0;
-    static int nf = -1; if (nf < 0) nf = getenv("XWA_NOFREE") != NULL;
-    if (nf && a2) {   /* XWA_NOFREE: a moving realloc frees the old block too -- keep it alive */
-        SIZE_T old = HeapSize(hHeap, 0, (void*)(uintptr_t)a2);
-        void* p = (a1 & HEAP_REALLOC_IN_PLACE_ONLY) ? NULL : HeapAlloc(hHeap, a1 & HEAP_ZERO_MEMORY, a3 + 256);
-        if (p && old != (SIZE_T)-1) memcpy(p, (void*)(uintptr_t)a2, old < a3 + 256 ? old : a3 + 256);
+    if (heap_nofree() && a2) {   /* a moving realloc frees the old block too -- keep it alive */
+        SIZE_T old = HeapSize(hHeap, 0, (void*)(uintptr_t)(a2 - HEAP_FRONT));
+        uint8_t* p = (a1 & HEAP_REALLOC_IN_PLACE_ONLY) ? NULL : (uint8_t*)HeapAlloc(hHeap, a1 & HEAP_ZERO_MEMORY, a3 + 256 + HEAP_FRONT);
+        if (p) { p += HEAP_FRONT; if (old != (SIZE_T)-1) { old -= HEAP_FRONT; memcpy(p, (void*)(uintptr_t)a2, old < a3 + 256 ? old : a3 + 256); } }
         g_eax = (uint32_t)(uintptr_t)p; g_esp += 20; return;
     }
     g_eax = (uint32_t)(uintptr_t)HeapReAlloc(hHeap, a1, (void*)(uintptr_t)a2, a3 + 256);  /* same padding as HeapAlloc */
@@ -1074,9 +1097,7 @@ static void bridge_HeapFree_005A9150(void) { /* KERNEL32.dll:HeapFree (3 args) *
     HANDLE hHeap = (HANDLE)(uintptr_t)a0;
     g_heapop_count++;
     g_last_heapfree_ptr = a2;
-    {   /* XWA_NOFREE: leak every guest block -- diagnoses use-after-free heap corruption */
-        static int nf = -1; if (nf < 0) nf = getenv("XWA_NOFREE") != NULL;
-        if (nf) { g_eax = 1; g_esp += 16; return; } }
+    if (heap_nofree()) { g_eax = 1; g_esp += 16; return; }   /* XWA_NOFREE: leak every guest block */
     if (a2) {
         /* #353b: a pointer inside the guest IMAGE (0x400000-0x600000) is never a heap block --
          * freeing one is always a bug, and HeapValidate has been observed returning TRUE for
@@ -1402,10 +1423,15 @@ static void bridge_TlsGetValue_005A91B4(void) { /* KERNEL32.dll:TlsGetValue (1 a
 
 static void bridge_HeapSize_005A91B8(void) { /* KERNEL32.dll:HeapSize (3 args) */
     BRIDGE_TRACE("KERNEL32.dll:HeapSize");
-    /* Always use our process heap */
+    /* the block's own heap (the guest's HeapCreate heap), not the process heap */
+    HANDLE hHeap = (HANDLE)(uintptr_t)MEM32(g_esp + 4);
     uint32_t a1 = MEM32(g_esp + 8);   /* dwFlags */
     uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
-    g_eax = (uint32_t)HeapSize(GetProcessHeap(), a1, (void*)(uintptr_t)a2);
+    if (heap_nofree()) {
+        SIZE_T n = HeapSize(hHeap, a1, (void*)(uintptr_t)(a2 - HEAP_FRONT));
+        g_eax = n == (SIZE_T)-1 ? (uint32_t)-1 : (uint32_t)(n - HEAP_FRONT - 256);
+    } else
+        g_eax = (uint32_t)HeapSize(hHeap, a1, (void*)(uintptr_t)a2);
     g_esp += 16;
 }
 
