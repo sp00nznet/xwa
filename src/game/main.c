@@ -64,6 +64,7 @@ uint32_t g_eax = 0, g_ecx = 0, g_edx = 0, g_esp = 0;
 uint32_t g_ebp = 0;
 int g_ret_probe = 0;
 volatile unsigned g_lastblk = 0;
+volatile int g_shot_req = 0;   /* set: the renderer saves the next presented frame (d3d11_renderer.c) */
 volatile unsigned g_fgbase = 0, g_fgtblptr = 0, g_fgrec = 0, g_fgro = 0;
 volatile unsigned g_obj = 0, g_objro = 0, g_objtag = 0;
 volatile unsigned g_cw[3] = {0,0,0};
@@ -1836,7 +1837,10 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
         extern uint32_t g_crash_host_offset;
         uint32_t gva = guest_func_for_host((uintptr_t)c->Eip);
         g_watch_hits++;
-        if (g_watch_hits <= 24) {
+        /* XWA_WATCHQUIET=<guest func>: an expected writer; past the first hits only the others are logged */
+        static int quiet = -1; static uint32_t qf;
+        if (quiet < 0) { quiet = getenv("XWA_WATCHQUIET") ? 1 : 0; if (quiet) qf = (uint32_t)strtoul(getenv("XWA_WATCHQUIET"), NULL, 0); }
+        if (g_watch_hits <= 24 || (quiet && gva != qf)) {
             fprintf(stderr, "[WATCH] #%u 0x%08X = 0x%08X   writer: sub_%08X (+0x%X host) eip=0x%08X\n",
                     g_watch_hits, g_watch_addr, MEM32(g_watch_addr), gva, g_crash_host_offset, (uint32_t)c->Eip);
             fflush(stderr);
@@ -2710,7 +2714,25 @@ void xwa_ui_driver(void) {
      * 4 = screen 0x5775E0 (which is one of the routines that pushes the LOADING screen).
      * The demo driver navigates by forcing this rather than by clicking, which is why clicks on
      * "Play Mission" do nothing -- these sprite rooms take a different input path entirely. */
-    if (getenv("XWA_BARRSEL") && cb == 0x0055FF30) {
+    /* XWA_AUTOPLAY: look at the room first (a picture at frame 80: the family room shows what the
+     * last mission earned), then let XWA_BARRSEL move on */
+    if (cb == 0x0055FF30 && getenv("XWA_AUTOPLAY") && fip == 80) {
+        extern volatile int g_shot_req; g_shot_req = 1;
+        /* after a flight the 2D front end no longer reaches the D3D render target, so also save the
+         * game's own 640x480 RGB565 frame buffer (pixel pointer cached at 0x6002BC) */
+        uint32_t px = MEM32(0x6002BC); char nm[40]; FILE *f;
+        static int nroom; snprintf(nm, sizeof nm, "shot_room%d.bmp", ++nroom);
+        if (px && xwa_readable(px, 640 * 480 * 2) && (f = fopen(nm, "wb"))) {
+            uint32_t hdr[13] = { 0, 0, 54, 40, 640, (uint32_t)-480, 0x00180001u, 0, 640 * 480 * 3, 2835, 2835, 0, 0 };
+            uint16_t bm = 0x4D42; uint32_t sz = 54 + 640 * 480 * 3; int i;
+            hdr[0] = sz; fwrite(&bm, 2, 1, f); fwrite(hdr, 4, 13, f);
+            for (i = 0; i < 640 * 480; i++) { uint16_t p = MEM16(px + i * 2u);
+                uint8_t rgb[3] = { (uint8_t)((p & 0x1F) << 3), (uint8_t)(((p >> 5) & 0x3F) << 2), (uint8_t)((p >> 11) << 3) }; fwrite(rgb, 1, 3, f); }
+            fclose(f);
+        }
+        fprintf(stderr, "[AUTOPLAY] barracks: picture requested (%s from 0x%08X)\n", nm, px); fflush(stderr);
+    }
+    if (getenv("XWA_BARRSEL") && cb == 0x0055FF30 && (!getenv("XWA_AUTOPLAY") || fip > 90)) {
         static int logged = 0;
         uint32_t v = (uint32_t)strtoul(getenv("XWA_BARRSEL"), NULL, 0);
         /* The screen reads this from its FIRST call, and only consults the table once the
@@ -2961,6 +2983,21 @@ void xwa_ui_driver(void) {
                     MEM32(0xAED75E), MEM32(0xAED76E), MEM32(0xAED75E + 0x30), MEM32(0xAED76E + 0x30), MEM32(0xAED75E + 0x60), MEM32(0xAED76E + 0x60),
                     MEM32(0x9F5EC0), l ? (int)MEM32(l + 0x140) : -1, l ? (int)MEM32(l + 0x148 + 0x140) : -1, l ? (int)MEM32(l + 0x290 + 0x140) : -1); }
         fflush(stderr);
+        /* XWA_AUTOPLAY: start every front-end screen with an empty character ring (0x9F6B7F, write
+         * 0x9F6F7F / read 0x9F6F83; sub_0055B530 tests whether a char is pending). An Esc left in it
+         * reached mission 2's briefing, whose Esc handler sub_00529330 asks "quit?" -- auto-confirmed
+         * by the FLYDEMO dialog driver -- and the game latched out of dispatching for good. */
+        if (getenv("XWA_WATCHLOOP")) {   /* hardware-watch the main loop's last-frame tick ([esp+0x44] of sub_0053E82B) */
+            extern uint32_t g_skdbg_esp0; extern void xwa_watch_set(uint32_t);
+            if (g_skdbg_esp0) xwa_watch_set(g_skdbg_esp0 + 4 + 0x44);
+        }
+        if (getenv("XWA_AUTOPLAY") && MEM32(0x9F6F83) != MEM32(0x9F6F7F)) {
+            uint32_t r = MEM32(0x9F6F83), w = MEM32(0x9F6F7F), k;
+            fprintf(stderr, "[AUTOPLAY] screen 0x%06X: dropping pending chars (r=%u w=%u):", cb, r, w);
+            for (k = r; k != w && k < 0x400u; k = (k + 1) & 0x3FFu) fprintf(stderr, " %02X", MEM8(0x9F6B7F + k));
+            fprintf(stderr, "\n"); fflush(stderr);
+            MEM32(0x9F6F83) = w;
+        }
         last_cb = cb; fip = 0;
     }
     fip++;
@@ -2968,8 +3005,16 @@ void xwa_ui_driver(void) {
     /* XWA_AUTOPLAY: the mission briefing (0x5775E0) advances on its voice lines or on Esc/Space/
      * Enter/Backspace (sub_0055B530), which sets its state 0x784998 = 5 = launch (0x564E90). Mission
      * 1's briefing ends by itself; skip one that runs long, as the Space key would. */
-    if (cb == 0x005775E0 && getenv("XWA_AUTOPLAY") && fip > 1200 && MEM32(0x784998) != 5) {
-        fprintf(stderr, "[AUTOPLAY] briefing: skipping (state 0x784998=%u, fip=%d)\n", MEM32(0x784998), fip); fflush(stderr);
+    if (cb == 0x005775E0 && getenv("XWA_AUTOPLAY") && fip > 1200 && fip % 300 == 1) {
+        fprintf(stderr, "[AUTOPLAY] briefing: skipping (state 0x784998=%u, screen tick A21441=%u, A1C08D=%u, fip=%d) last icalls:",
+                MEM32(0x784998), MEM32(0xA21441), MEM32(0xA1C08D), fip);
+        {   int k; for (k = 1; k <= 8; k++) fprintf(stderr, " %08X", g_icall_trace[(g_icall_trace_idx - k) & (ICALL_TRACE_SIZE - 1)]); }
+        {   /* main loop sub_0053E82B gates: 0x9F7042 (active), frame interval 0xA2143D, its last-frame
+             * tick local [esp+0x44] (loop esp = dispatch esp + 4) */
+            extern uint32_t g_skdbg_esp0; uint32_t le = g_skdbg_esp0 + 4;
+            fprintf(stderr, " | 9F7042=%u A2143D=%u last=%u now=%u [esp+10]=%u [esp+14]=%u", MEM32(0x9F7042), MEM32(0xA2143D),
+                    MEM32(le + 0x44), (uint32_t)GetTickCount(), MEM32(le + 0x10), MEM32(le + 0x14)); }
+        fprintf(stderr, "\n"); fflush(stderr);
         MEM32(0x784998) = 5;
     }
     /* XWA_DEBRSEL=<n> (default 1 under XWA_AUTOPLAY): the debriefing room (0x57ECE0) is a sprite

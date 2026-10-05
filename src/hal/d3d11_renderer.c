@@ -1058,6 +1058,8 @@ void d3d11_present(void) {
 
     /* XWA_SHOTEVERY=N: save every Nth presented frame as shot_NNNNN.bmp (at most 40), so a
      * headless run on a test machine leaves a picture trail of where it got to. */
+    {   extern volatile int g_shot_req;   /* one picture of the next frame, on request (main.c) */
+        if (g_shot_req) { char nm[40]; g_shot_req = 0; snprintf(nm, sizeof nm, "shot_req_%05u.bmp", g_frame_count); d3d11_capture_bmp(nm); } }
     {   static int every = -1, taken;
         if (every < 0) every = getenv("XWA_SHOTEVERY") ? atoi(getenv("XWA_SHOTEVERY")) : 0;
         if (every > 0 && taken < 40 && g_frame_count && (g_frame_count % (unsigned)every) == 0) {

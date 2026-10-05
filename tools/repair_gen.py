@@ -53,6 +53,11 @@ ADD = """
 
 # One-off hand corrections (exact text replacements in gen; skipped once applied).
 REPLACE = [
+    # main loop sub_0053E82B: a transition's frame-partner callback (0x539760, 0x55FE90, 0x57EC50) returned
+    # 4 bytes high; each one shifted the loop's frame until its last-frame tick read 0x10000000 and it
+    # never dispatched again (mission 2's briefing froze). Check and restore esp around the call.
+    ('    PUSH32(esp, eax); /* 0x0053E915: push eax */\n        RECOMP_ICALL(esi); /* 0x0053E916: call esi */\n',
+     '    PUSH32(esp, eax); /* 0x0053E915: push eax */\n    { uint32_t _pe0 = esp, _pf = esi;   /* the transition\'s frame-partner callback must keep the loop\'s frame */\n        RECOMP_ICALL(esi); /* 0x0053E916: call esi */\n      if (esp != _pe0) { static uint32_t _seen[16]; int _k; for (_k = 0; _k < 16 && _seen[_k] && _seen[_k] != _pf; _k++) ;\n        if (_k < 16 && !_seen[_k]) { _seen[_k] = _pf; fprintf(stderr, "[DISPESP] frame partner 0x%X returned with esp off by %d -- repaired\\n", _pf, (int)(esp - _pe0)); fflush(stderr); }\n        esp = _pe0; } }\n'),
     # sub_004BAA40 (AI order still valid?): a pickup target removed after delivery keeps its claim
     # (+0x1F) but has no render object; reading ro+0x85 crashed. Null ro = stale order.
     ('    eax = MEM32(eax + 0x23); /* 0x004BAAE8: mov eax, dword ptr [eax + 0x23] */\n    /* cmp MEM16(eax + 0x85), LO16(edx) */ /* 0x004BAAEB: cmp word ptr [eax + 0x85], dx */\n',
