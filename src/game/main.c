@@ -2924,19 +2924,37 @@ void xwa_ui_driver(void) {
                     spec0, spec1, MEM32(0x7B33C4), MEM32(0xABC0E5), MEM32(0x9EB8E0), MEM32(0x9F4B98));
             fflush(stderr);
         }
+        /* campaign progression state: won flag, progression gate, mission index (pilot AE2A8E[AE2A8A]) */
+        fprintf(stderr, "[CAMPAIGN] cb 0x%06X: 9EAA04=%u B07B53=%u ABC970=%u ABC96C=%u AE2A8A=%u AE2A9E=%u ABD7C8=%u 7831AC=%u ABD81E=%u\n",
+                cb, MEM32(0x9EAA04), MEM32(0xB07B53), MEM32(0xABC970), MEM32(0xABC96C), MEM32(0xAE2A8A), MEM32(0xAE2A9E),
+                MEM32(0xABD7C8), MEM32(0x7831AC), MEM32(0xABD81E));
+        {   uint32_t g = MEM32(0x9EB8E0);   /* the debrief's result inputs (sub_00582ED0) */
+            fprintf(stderr, "[CAMPAIGN]   result: AE2A86=%u AF3CC6[0..2]=%u,%u,%u 9C6E2C=%u B1B82=%u B1B83=%u 807A60=%u\n",
+                    MEM32(0xAE2A86), MEM32(0xAF3CC6), MEM32(0xAF3CC6 + 0x1C), MEM32(0xAF3CC6 + 0x38), MEM32(0x9C6E2C),
+                    g ? MEM8(g + 0xB1B82) : 0xFFu, g ? MEM8(g + 0xB1B83) : 0xFFu, MEM8(0x807A60));
+            /* per-mission records (0xAED75E + id*0x30: +0 played, +0x10 won) and the mission list's ids
+             * (0x9F4B98, 0x148-byte entries, id at +0x140): sub_0053AA90 picks the first unwon one */
+            uint32_t l = MEM32(0x9F4B98); if (l && !xwa_readable(l, 0x290 + 0x144)) l = 0;   /* stale between screens */
+            {   /* sub_0042E750 records a campaign mission only with exactly one active player slot
+                 * (dword 0x8BA077 + k*0xBCF) and mission type 0x7B6FAA = 5 or 6 */
+                uint32_t a, np = 0; for (a = 0x8BA077u; a < 0x8BFEEFu; a += 0xBCFu) np += MEM32(a) != 0;
+                fprintf(stderr, "[CAMPAIGN]   recorder: players=%u type(7B6FAA)=%u\n", np, MEM8(0x7B6FAA)); }
+            fprintf(stderr, "[CAMPAIGN]   missions: played/won id0=%u/%u id1=%u/%u id2=%u/%u | list(%u) ids %d %d %d\n",
+                    MEM32(0xAED75E), MEM32(0xAED76E), MEM32(0xAED75E + 0x30), MEM32(0xAED76E + 0x30), MEM32(0xAED75E + 0x60), MEM32(0xAED76E + 0x60),
+                    MEM32(0x9F5EC0), l ? (int)MEM32(l + 0x140) : -1, l ? (int)MEM32(l + 0x148 + 0x140) : -1, l ? (int)MEM32(l + 0x290 + 0x140) : -1); }
         fflush(stderr);
         last_cb = cb; fip = 0;
     }
     fip++;
 
-    /* XWA_AUTOPLAY, front end: the debriefing (screen 0x57ECE0) waits for the player. Press ESC,
-     * then ENTER, alternately until the screen changes; the room (barracks 0x55FF30) that follows
-     * takes XWA_BARRSEL and loads the next mission. */
-    if (cb == 0x0057ECE0 && fip > 300 && fip % 150 == 0 && getenv("XWA_AUTOPLAY")) {
-        extern void xwa_queue_key(uint32_t);
-        int esc = (fip / 150) % 2;
-        xwa_queue_key(esc ? 0x01 : 0x1C);
-        fprintf(stderr, "[AUTOPLAY] debriefing: pressing %s (fip=%d)\n", esc ? "ESC" : "ENTER", fip); fflush(stderr);
+    /* XWA_DEBRSEL=<n> (default 1 under XWA_AUTOPLAY): the debriefing room (0x57ECE0) is a sprite
+     * room like the barracks -- no keys; it dispatches on 0x784B00 (1..7) once its transition
+     * phase 0x9F4B48/4C reads 3. 1 = accept: copies the active pilot record (0xABD7E0) over the
+     * saved one (0xAE2A60) and goes to 0x5397D0; 4 = refly (LOADING); 6 = route 0x5775E0. */
+    if (cb == 0x0057ECE0 && fip > 300 && (getenv("XWA_DEBRSEL") || getenv("XWA_AUTOPLAY"))) {
+        uint32_t v = getenv("XWA_DEBRSEL") ? (uint32_t)strtoul(getenv("XWA_DEBRSEL"), NULL, 0) : 1u;
+        MEM32(0x784B00) = v; MEM32(0x9F4B48) = 3; MEM32(0x9F4B4C) = 3;
+        if (fip % 100 == 1) { fprintf(stderr, "[DEBRSEL] forcing 0x784B00=%u with phase 9F4B48/4C=3 (fip=%d)\n", v, fip); fflush(stderr); }
     }
 
     /* XWA_TRAINLAUNCH: skip the flaky door-click entirely. Once the concourse is

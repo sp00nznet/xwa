@@ -46,7 +46,10 @@ ADD = """
 0x004B2A40:0x004B2D04 0x004B2D10:0x004B2D24 0x004B2EF0:0x004B30EF 0x004B3110:0x004B3124 0x004B3A40:0x004B3F0D
 0x004B4100:0x004B4174 0x004B4980:0x004B4EB0 0x004B5390:0x004B5908 0x004B5910:0x004B5921 0x004B86E0:0x004B8861
 0x004BA600:0x004BA603
+0x0052A210:0x0052A243 0x0059DFE0:0x0059E032 0x0057EC50:0x0057ECD5
 """.split()
+# ^ last line: three more reached only through pointers -- a qsort comparator (sub_0059CF70, 328
+# unresolved calls a run), and the debriefing screen's frame partner 0x57EC50.
 
 # One-off hand corrections (exact text replacements in gen; skipped once applied).
 REPLACE = [
