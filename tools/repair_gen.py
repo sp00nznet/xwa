@@ -53,14 +53,22 @@ ADD = """
 
 # One-off hand corrections (exact text replacements in gen; skipped once applied).
 REPLACE = [
+    # sub_004BAA40 (AI order still valid?): a pickup target removed after delivery keeps its claim
+    # (+0x1F) but has no render object; reading ro+0x85 crashed. Null ro = stale order.
+    ('    eax = MEM32(eax + 0x23); /* 0x004BAAE8: mov eax, dword ptr [eax + 0x23] */\n    /* cmp MEM16(eax + 0x85), LO16(edx) */ /* 0x004BAAEB: cmp word ptr [eax + 0x85], dx */\n',
+     '    eax = MEM32(eax + 0x23); /* 0x004BAAE8: mov eax, dword ptr [eax + 0x23] */\n    if (!eax) goto L_004BAAF4;   /* order target removed (no render object) but still claimed: the order is stale */\n    /* cmp MEM16(eax + 0x85), LO16(edx) */ /* 0x004BAAEB: cmp word ptr [eax + 0x85], dx */\n'),
+    # flight exit -> results pass sub_0042E750: it records a won mission only when one player slot has a
+    # DirectPlay id, which the DP mock never assigns (main.c xwa_sp_dpid) -- only during that call
+    ('    PUSH32(esp, edi); /* 0x00511393: push edi */\n    PUSH32(esp, edi); /* 0x00511394: push edi */\n    RECOMP_CALL(sub_0042E750); /* 0x00511395: call 0x42e750 */\n',
+     '    { extern void xwa_sp_dpid(int); xwa_sp_dpid(1); }   /* the results pass records a mission only for a player with a DirectPlay id */\n    PUSH32(esp, edi); /* 0x00511393: push edi */\n    PUSH32(esp, edi); /* 0x00511394: push edi */\n    RECOMP_CALL(sub_0042E750); /* 0x00511395: call 0x42e750 */\n    { extern void xwa_sp_dpid(int); xwa_sp_dpid(0); }   /* ...and 0x00511432 re-finds the player slot by that id: take it back */\n'),
     # sub_004A1D80: an AI object can have a render object with no craft struct (ro+0xDD == 0) during the
     # mission-end teardown; the original dereferences it. Skip the object and report it once.
     ('    PUSH32(esp, eax); /* 0x004A1DE0: push eax */\n',
      '    if (!eax) {   /* AI object with a render object but no craft struct: report once, skip it */\n        static uint8_t _seen[0x3000 / 8]; uint32_t _i = MEM32(esp + 0x10), _o = MEM32(0x7B33C4) + _i * 0x27u;\n        if (_i < 0x3000u && !(_seen[_i >> 3] & (1 << (_i & 7)))) { _seen[_i >> 3] |= 1 << (_i & 7);\n            fprintf(stderr, "[NULLCRAFT] obj %u type %u fg %u region %u cat %u has ro but no craft\\n", _i, MEM16(_o + 2), MEM8(_o + 5), MEM8(_o + 6), MEM8(_o + 4)); fflush(stderr); }\n        goto L_004A1ED1; }\n    PUSH32(esp, eax); /* 0x004A1DE0: push eax */\n'),
     # sub_004554F0: after landing, a hangar object can have a render object with no craft record;
-    # give it a private zeroed one instead of reading through null.
+    # give it a private zeroed one instead of writing through null (also when it has no render object).
     ('    MEM32(0x910DFC) = eax; /* 0x00455C40: mov dword ptr [0x910dfc], eax */\n',
-     '    if (!eax) {   /* the hangar object has a render object but no craft record: report, use a private one */\n        extern uint32_t xwa_ro_slot(uint32_t); extern int xwa_readable(uint32_t, uint32_t); uint32_t _i = esi / 0x27u, _ro = MEM32(MEM32(0x7B33C4) + esi + 0x23);\n        static int _n; if (_n < 4) { _n++; fprintf(stderr, "[HANGARCRAFT] obj %u type %u ro 0x%08X has no craft (ro+0xDD=0); 80B604=%u\\n", _i,\n            MEM16(MEM32(0x7B33C4) + esi + 2), _ro, MEM32(0x80B604)); fflush(stderr); }\n        if (_ro && xwa_readable(_ro, 0xE5)) { eax = (uint32_t)(uintptr_t)calloc(1, 0x400); MEM32(_ro + 0xDD) = eax; } }\n    MEM32(0x910DFC) = eax; /* 0x00455C40: mov dword ptr [0x910dfc], eax */\n'),
+     '    if (!eax) {   /* the hangar object has a render object but no craft record: report, use a private one */\n        extern uint32_t xwa_ro_slot(uint32_t); extern int xwa_readable(uint32_t, uint32_t); uint32_t _i = esi / 0x27u, _ro = MEM32(MEM32(0x7B33C4) + esi + 0x23);\n        static int _n; if (_n < 4) { _n++; fprintf(stderr, "[HANGARCRAFT] obj %u type %u ro 0x%08X has no craft (ro+0xDD=0); 80B604=%u\\n", _i,\n            MEM16(MEM32(0x7B33C4) + esi + 2), _ro, MEM32(0x80B604)); fflush(stderr); }\n        eax = (uint32_t)(uintptr_t)calloc(1, 0x400);   /* the code below fills 0x910DFC->... unconditionally */\n        if (_ro && xwa_readable(_ro, 0xE5)) MEM32(_ro + 0xDD) = eax; }\n    MEM32(0x910DFC) = eax; /* 0x00455C40: mov dword ptr [0x910dfc], eax */\n'),
     # XWA_RENDERFN wrote 1 into 0x7828D0 believing it a render-enable flag; it is the ALERTBOXBUFFER
     # pointer, so sub_00511A90 later called free(1): heap corruption, the old L_0048967D crash.
     ('        if (!MEM32(0x7828D0u)) MEM32(0x7828D0u) = 1;\n',

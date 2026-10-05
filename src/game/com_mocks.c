@@ -221,6 +221,9 @@ static LONG g_mouse_dy = 0;
 #define SURFACE_GUARD    (4 * 1024 * 1024)
 #define SURFACE_SENTINEL 0xA5
 #define SURFACE_FRONT    (64 * 1024)
+/* small (texture) surfaces get 4 KB guards: a mission load creates ~3500 of them, and 64+64 KB each
+ * (~1 GB a load, never freed) ran the heap out during the second mission's load */
+#define SURF_FRONT(sz)   ((sz) >= 256 * 1024 ? SURFACE_FRONT : 4096u)
 #define MAX_TRACKED_SURF 4096
 static uint8_t* g_surf_ptr[MAX_TRACKED_SURF];
 static uint32_t g_surf_size[MAX_TRACKED_SURF];
@@ -238,8 +241,8 @@ static uint8_t* alloc_surface_buf(uint32_t size) {
      * 16x8, 8x64...). At 4MB of guard each that exhausted the heap by surface ~354, after
      * which HeapAlloc returned NULL and the game wrote through a null pixel pointer.
      * Scale the guard to the surface instead. */
-    uint32_t guard = (size >= 256 * 1024) ? SURFACE_GUARD : (64 * 1024);
-    uint8_t* p = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)SURFACE_FRONT + size + guard);
+    uint32_t guard = (size >= 256 * 1024) ? SURFACE_GUARD : 4096u, front = SURF_FRONT(size);
+    uint8_t* p = (uint8_t*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)front + size + guard);
     if (!p) {
         fprintf(stderr, "[COM] !! alloc_surface_buf FAILED for %u bytes (+%u guard)\n", size, guard);
         fflush(stderr);
@@ -247,8 +250,8 @@ static uint8_t* alloc_surface_buf(uint32_t size) {
     }
     /* front guard too: a blit that clips wrong writes BEFORE the pixels, which without it lands
      * on the process heap's block header (com_check_surface_guards() reports it) */
-    memset(p, SURFACE_SENTINEL, SURFACE_FRONT);
-    p += SURFACE_FRONT;
+    memset(p, SURFACE_SENTINEL, front);
+    p += front;
     memset(p + size, SURFACE_SENTINEL, guard);
     if (g_surf_n < MAX_TRACKED_SURF) { g_surf_ptr[g_surf_n] = p; g_surf_size[g_surf_n] = size; g_surf_n++; }
     return p;
@@ -257,13 +260,14 @@ static uint8_t* alloc_surface_buf(uint32_t size) {
 void com_check_surface_guards(void) {
     static int reported;
     for (int i = 0; i < g_surf_n && reported < 8; i++) {
-        const uint8_t* f = g_surf_ptr[i] - SURFACE_FRONT;
+        uint32_t front = SURF_FRONT(g_surf_size[i]);
+        const uint8_t* f = g_surf_ptr[i] - front;
         uint32_t k = 0;
-        while (k < SURFACE_FRONT && f[k] == SURFACE_SENTINEL) k++;
-        if (k < SURFACE_FRONT) {
+        while (k < front && f[k] == SURFACE_SENTINEL) k++;
+        if (k < front) {
             fprintf(stderr, "[SURFGUARD] surface #%d buf=%p size=%u: front guard overwritten from %u bytes before the pixels\n",
-                    i, (void*)g_surf_ptr[i], g_surf_size[i], SURFACE_FRONT - k);
-            fflush(stderr); memset((void*)f, SURFACE_SENTINEL, SURFACE_FRONT); reported++;
+                    i, (void*)g_surf_ptr[i], g_surf_size[i], front - k);
+            fflush(stderr); memset((void*)f, SURFACE_SENTINEL, front); reported++;
         }
     }
 }
@@ -453,7 +457,6 @@ static void dd_CreateSurface(void) {
         surf->extra[3] = bpp;
         surf->extra[4] = w * (bpp / 8);
         surf->extra[5] = caps;   /* remembered so Lock can report a texture pixel format */
-        surf->extra[31] = buf != NULL;   /* surf_unref frees it */
     }
 
     MEM32(ppSurf) = (uint32_t)(uintptr_t)surf;
@@ -737,7 +740,6 @@ static void dds_QueryInterface(void) {
     /* Create an IDirect3DTexture mock that points back to this surface */
     mock_com_obj_t* tex = alloc_mock(MOCK_TAG_D3D, g_d3dtexture_vtable_addr);
     tex->extra[0] = pThis; /* Back-pointer to the surface */
-    ((mock_com_obj_t*)(uintptr_t)pThis)->refcount++;   /* released by d3dtex_Release */
     tex->extra[1] = 0;     /* Texture handle (assigned on GetHandle) */
     MEM32(ppv) = (uint32_t)(uintptr_t)tex;
 
@@ -745,33 +747,11 @@ static void dds_QueryInterface(void) {
     g_esp += 16; /* pop ret + 3 args */
 }
 
-/* Drop one reference to an offscreen surface; the last one frees its pixel buffer. Each mission
- * load creates ~3500 texture surfaces at 128 KB+ apiece (guards included): never freeing them
- * ran the process out of heap during the second mission's load. extra[31] = buffer is ours. */
-static uint32_t surf_unref(mock_com_obj_t* obj) {
-    if (obj->refcount > 0) obj->refcount--;
-    if (obj->refcount == 0 && obj->extra[31] && obj->extra[0] && obj != g_main_offscreen) {   /* its pixels are cached at 0x6002BC */
-        uint8_t* p = (uint8_t*)(uintptr_t)obj->extra[0];
-        for (int i = 0; i < g_surf_n; i++)
-            if (g_surf_ptr[i] == p) { g_surf_n--; g_surf_ptr[i] = g_surf_ptr[g_surf_n]; g_surf_size[i] = g_surf_size[g_surf_n]; break; }
-        HeapFree(GetProcessHeap(), 0, p - SURFACE_FRONT);
-        obj->extra[0] = 0; obj->extra[31] = 0;
-    }
-    return obj->refcount;
-}
-
 static void dds_Release(void) {
-    g_eax = surf_unref((mock_com_obj_t*)(uintptr_t)MEM32(g_esp + 4));
-    g_esp += 8;
-}
-
-/* IDirect3DTexture is the same object as its surface in real D3D: QI took a surface reference,
- * the texture's last Release gives it back */
-static void d3dtex_Release(void) {
-    mock_com_obj_t* tex = (mock_com_obj_t*)(uintptr_t)MEM32(g_esp + 4);
-    if (tex->refcount > 0 && --tex->refcount == 0 && tex->extra[0]) {
-        surf_unref((mock_com_obj_t*)(uintptr_t)tex->extra[0]); tex->extra[0] = 0; }
-    g_eax = tex->refcount;
+    uint32_t pThis = MEM32(g_esp + 4);
+    mock_com_obj_t* obj = (mock_com_obj_t*)(uintptr_t)pThis;
+    if (obj->refcount > 0) obj->refcount--;
+    g_eax = obj->refcount;
     g_esp += 8;
 }
 
@@ -2976,7 +2956,7 @@ void com_mocks_init(void) {
 
         funcs[0] = com_stub_3arg;    /* QueryInterface */
         funcs[1] = dd_AddRef;        /* AddRef */
-        funcs[2] = d3dtex_Release;   /* Release */
+        funcs[2] = dd_Release;       /* Release */
         funcs[3] = com_stub_3arg;    /* Initialize */
         funcs[4] = d3dtex_GetHandle; /* GetHandle (3) */
         funcs[5] = com_stub_3arg;    /* PaletteChanged */

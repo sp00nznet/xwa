@@ -333,6 +333,23 @@ static void park_dir(uint32_t pidx, uint32_t obj, int off, int dir) {
     MEM32(po + 7) = MEM32(co + 7) + ax[dir][0] * off; MEM32(po + 0xB) = MEM32(co + 0xB) + ax[dir][1] * off;
     MEM32(po + 0xF) = MEM32(co + 0xF) + ax[dir][2] * off;
 }
+/* Called by the flight exit just before the results pass sub_0042E750 (@0x00511393, hooked by
+ * tools/repair_gen.py). That pass records the mission (played/won at 0xAED75E + id*0x30, which is
+ * what the campaign advances on) only when exactly one player slot holds a DirectPlay id (player
+ * record +0xB97, filled from the session's player list by sub_00421920). The real game always has a
+ * local DirectPlay session, even single player; the DP mock never creates one, so no slot had an id
+ * and won missions were never recorded. Give the local player's slot one -- for that call only
+ * (on=1 before, on=0 after): right after it the flight function re-finds the player's slot by
+ * DirectPlay id (sub_0049E3A0(sub_0049E3D0()) @0x00511432), and a leftover id there moved the
+ * player to an empty slot and crashed the hangar setup. */
+void xwa_sp_dpid(int on) {
+    static uint32_t set;   /* address we filled, 0 = none */
+    uint32_t a, n = 0;
+    if (!on) { if (set) MEM32(set) = 0; set = 0; return; }
+    for (a = 0x8BA077u; a < 0x8BFEEFu; a += 0xBCFu) n += MEM32(a) != 0;
+    if (!n) { set = 0x8BA077u + MEM32(0x8C1CC8) * 0xBCFu; MEM32(set) = 1; }
+}
+
 void xwa_autoplay_tick(void) {
     extern void sub_00507510(void), sub_00506CB0(void), sub_005079F0(void), xwa_queue_key(uint32_t);
     enum { WAIT, PICK1, SWAP, HYPER1, DELIVER1, PICK2, HYPER2, DELIVER2, LAND, DONE };
@@ -474,7 +491,7 @@ void xwa_autoplay_tick(void) {
             if (!wp && getenv("XWA_WATCHPICK")) { wp = 1; xwa_watch_set(MEM32(0x7B33C4) + pidx * 0x27u + 0xB); }
             if (!wp && getenv("XWA_WATCHPCMD")) {   /* the player's order cmd: who drops the pickup claim */
                 uint32_t rop = MEM32(MEM32(0x7B33C4) + pidx * 0x27u + 0x23);
-                if (rop && MEM32(rop + 0xDD)) { wp = 1; xwa_watch_set(MEM32(rop + 0xDD) + 0x84); } } }
+                if (rop && MEM32(rop + 0xDD)) { wp = 1; xwa_watch_set(MEM32(rop + 0xDD) + (getenv("XWA_WATCHOFF") ? (uint32_t)strtoul(getenv("XWA_WATCHOFF"), NULL, 0) : 0x84u)); } } }   /* XWA_WATCHOFF: other craft field */
         if (++tries > 40) GIVEUP("too many tries");
         break;
     case SWAP:
@@ -534,8 +551,9 @@ void xwa_autoplay_tick(void) {
                 fd = fopen("aiscripts.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x7FFDA0u), 1, 0x55 * 64, fd); fclose(fd); } } }   /* AI script names */
         MEM16(rec + 0x8B9505) = (uint16_t)obj; park_dir(pidx, obj, 20000, (tries / 2) % 6);   /* the dock ray test needs a docking point in view */
         {   uint32_t rop = MEM32(MEM32(0x7B33C4) + pidx * 0x27u + 0x23), crp = rop ? MEM32(rop + 0xDD) : 0;
-            fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s' dir %d, carrying obj %u\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
-                    (tries / 2) % 6, crp ? MEM16(crp + 0x185) : 0xFFFFu); fflush(stderr); }
+            /* craft +0x8E = object carried (sub_00506CB0 delivers only if != 0xFFFF), +0x92 = last released */
+            fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s' dir %d, carrying obj %u (+8E=%u +92=%u)\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
+                    (tries / 2) % 6, crp ? MEM16(crp + 0x185) : 0xFFFFu, crp ? MEM16(crp + 0x8E) : 0xFFFFu, crp ? MEM16(crp + 0x92) : 0xFFFFu); fflush(stderr); }
         mark = g_msg_n; guest_call1(sub_00506CB0, slot);
         if (++tries > 200) GIVEUP("no delivery");   /* the platform takes ours only after Selu has delivered */
         break;
@@ -2947,6 +2965,13 @@ void xwa_ui_driver(void) {
     }
     fip++;
 
+    /* XWA_AUTOPLAY: the mission briefing (0x5775E0) advances on its voice lines or on Esc/Space/
+     * Enter/Backspace (sub_0055B530), which sets its state 0x784998 = 5 = launch (0x564E90). Mission
+     * 1's briefing ends by itself; skip one that runs long, as the Space key would. */
+    if (cb == 0x005775E0 && getenv("XWA_AUTOPLAY") && fip > 1200 && MEM32(0x784998) != 5) {
+        fprintf(stderr, "[AUTOPLAY] briefing: skipping (state 0x784998=%u, fip=%d)\n", MEM32(0x784998), fip); fflush(stderr);
+        MEM32(0x784998) = 5;
+    }
     /* XWA_DEBRSEL=<n> (default 1 under XWA_AUTOPLAY): the debriefing room (0x57ECE0) is a sprite
      * room like the barracks -- no keys; it dispatches on 0x784B00 (1..7) once its transition
      * phase 0x9F4B48/4C reads 3. 1 = accept: copies the active pilot record (0xABD7E0) over the
