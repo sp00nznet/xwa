@@ -81,8 +81,34 @@ in range, issue the game's pickup / dock commands, follow the in-flight message 
    station's own (map 0xB3 = model 179, the Azzameen base). The hangar menu is "= MISSION
    COMPLETED =" (item 0 "Go to Debriefing") only when `MEM8(0x807A60 + team*3)` is set (team =
    player record +0x8B94EC; +1 is "failed"); otherwise ENTER relaunches.
-7. **Open:** the mission is not marked complete after the fuel cells -- the coolant delivery
-   (Aeron's) is the likely missing goal. The harness now goes back for it (second trip).
+7. **Mission complete**: the coolant (Aeron's job) delivered on a second trip completes it
+   (MSG 0x102); the hangar menu offers "Go to Debriefing".
+8. **Debriefing** (0x57ECE0, a sprite room like the barracks): its init call (arg 0) scores the
+   mission (`sub_00582ED0` -> `9EAA04` = 1 won). `XWA_DEBRSEL` (default 1 under autoplay) picks
+   "accept" -> concourse.
+9. **The campaign advances**: the flight exit's results pass `sub_0042E750` records the mission
+   (played/won at `0xAED75E + id*0x30`, +0x10 = won) -- only for a player slot with a DirectPlay
+   id, which `xwa_sp_dpid` supplies around that call. The concourse's mission select
+   (`sub_0053AA90`) then picks the first unwon list entry: `ABC970` = 1.
+10. **The family room** shows the mission-1 award ("Key to Harlequin Station",
+    `frontres/medals/familyawards.txt`) and plays `N01MC06.wav`. After a flight the room's
+    background is not drawn (front-end rendering), only its sprites.
+11. **Mission 2 loads**: briefing reads `1b0m2fw.tie` and `B0M2\N000201.wav`, then loadprep ->
+    LOADING -> FLIGHT-INIT with `session='~missions\1b0m2fw.tie'`, the .tie parses.
+
+What it took past the landing (2026-10-05), in order of discovery:
+- 31 AI order handlers (`0x5B6F08[cmd]`) and three pointer-only functions (a qsort comparator, the
+  debriefing's frame partner 0x57EC50, a CRT helper) were never in functions.json; each dispatch
+  to them leaked 4 bytes of guest stack. Lifted with `relift_func.py --new` (repair_gen `ADD`).
+- A gen flight hack forced the screen tick to 1 after the flight screen had pushed the
+  debriefing, so the debriefing never ran its init (no score). Now only while flight is current.
+- Transition frame-partner callbacks (0x539760, 0x55FE90, 0x57EC50) return 4 bytes high; each one
+  shifted the main loop's frame until its last-frame tick read 0x10000000 > GetTickCount and it
+  never dispatched again (mission 2's briefing froze). The dispatcher restores esp (repair_gen).
+- The hangar's player slot is re-found by DirectPlay id after the results pass, so the id is
+  given only for that call; a stale one moved the player to an empty slot (hangar crash).
+- Texture surfaces are never freed (the game keeps using released buffers); small ones now get
+  4 KB guards instead of 128 KB, or the second mission load ran out of heap.
 
 Selu never leaves region 0. After securing Xi 2 its pickup order (FG orders dumped from
 `0x80DC80 + fg*0xE42`, records 0x94 bytes from FG+0xCA, 4 per region: region 0 `0x11` pick up FG2

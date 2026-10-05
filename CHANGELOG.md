@@ -6,6 +6,10 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 ## [Unreleased]
 
 ### Added
+- The single-player campaign plays through: mission 1 completes, lands, is debriefed and scored,
+  the campaign records it, the family room shows its award, and mission 2 (`1b0m2fw`) loads.
+  `XWA_AUTOPLAY=1` drives all of it headlessly (`XWA_DEBRSEL`, briefing skip, room pictures
+  `shot_room*.bmp`). See `docs/campaign.md` steps 7-11.
 - Mission 1 now runs through both pickups, the jump to Harlequin Station, the delivery there and
   the fuel-cell pickup; the hyper buoy home (waiting on the wingman) is the open blocker. The
   intermittent heap-corruption crash is fixed (`XWA_FGFILL` pool overrun). See `docs/campaign.md`.
