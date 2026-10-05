@@ -71,16 +71,25 @@ in range, issue the game's pickup / dock commands, follow the in-flight message 
    collision pass (`sub_00408DC0`) sees the craft touch the container and attaches it.
 2. **Selu flies to Xi 2 and picks it up**; the hyper buoy to Harlequin Station activates (0x163).
 3. **Hyperspace works**: Space at the buoy (0x79 -> 0x71) moves the player to region 1.
-4. **Delivery at Harlequin Station works** (0x15C -> 0x162), and the fuel cells (FG14 "Pi") are
-   picked up and secured.
-5. **Blocker:** the hyper buoy home (FG23, region 1) never activates, and it most likely waits on
-   Aeron (her coolant pickup): the region-0 buoy activated right after Selu's pickup. Selu never
-   leaves region 0. After securing Xi 2 its pickup order (FG orders dumped from
-   `0x80DC80 + fg*0xE42`, records 0x94 bytes from FG+0xCA, 4 per region: region 0 `0x11` pick up
-   FG2 else FG1, `0x32` hyper to region 1, ...) falls back to FG1 and goes after Xi 1, which the
-   player carries; the order never completes, so `0x32` never runs. The cargo-attach routine
-   (`sub_004B65E0`) records the carrier at craft +0x185 and clears the carrier's order cmd; what
-   should stop Selu targeting a carried canister is still open.
+4. **Delivery at Harlequin Station works** (0x15C -> 0x162).
+5. **The trip home works.** The "Return Home" buoy (FG24) arrives on FG15 (cargo "Fuel Cells")
+   AND FG17's special craft (special cargo "Coolant", Aeron's job) picked up -- arrival triggers
+   are 6-byte records at FG+0x88 (cond 6 = picked up, var type 1 = FG, amount 6 = special craft).
+   The harness picks up and releases the coolant itself, then the fuel cells; the buoy arrives,
+   the jump home works and the fuel cells are delivered (0x162).
+6. **Landing works**: tractor prompt (0x117), Space, hangar state 6. The hangar is the family
+   station's own (map 0xB3 = model 179, the Azzameen base). The hangar menu is "= MISSION
+   COMPLETED =" (item 0 "Go to Debriefing") only when `MEM8(0x807A60 + team*3)` is set (team =
+   player record +0x8B94EC; +1 is "failed"); otherwise ENTER relaunches.
+7. **Open:** the mission is not marked complete after the fuel cells -- the coolant delivery
+   (Aeron's) is the likely missing goal. The harness now goes back for it (second trip).
+
+Selu never leaves region 0. After securing Xi 2 its pickup order (FG orders dumped from
+`0x80DC80 + fg*0xE42`, records 0x94 bytes from FG+0xCA, 4 per region: region 0 `0x11` pick up FG2
+else FG1, `0x32` hyper to region 1, ...) falls back to FG1 and goes after Xi 1, which the player
+carries; the order never completes, so `0x32` never runs. The cargo-attach routine
+(`sub_004B65E0`) records the carrier at craft +0x185 and clears the carrier's order cmd; what
+should stop Selu targeting a carried canister is still open.
 
 How the AI runs, for the next look: `sub_004A1D80` gates each craft on a countdown (order
 block +0x32 minus elapsed, reloaded from +0x2E); `sub_004A22C0` interprets a byte-code script

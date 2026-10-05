@@ -337,7 +337,7 @@ void xwa_autoplay_tick(void) {
     extern void sub_00507510(void), sub_00506CB0(void), sub_005079F0(void), xwa_queue_key(uint32_t);
     enum { WAIT, PICK1, SWAP, HYPER1, DELIVER1, PICK2, HYPER2, DELIVER2, LAND, DONE };
     static const char *const sname[] = { "WAIT", "PICK1", "SWAP", "HYPER1", "DELIVER1", "PICK2", "HYPER2", "DELIVER2", "LAND", "DONE" };
-    static int on = -1, st = WAIT, tries, skip; static DWORD last; static unsigned mark; static uint32_t region0;
+    static int on = -1, st = WAIT, tries, skip, trip; static DWORD last; static unsigned mark; static uint32_t region0;
     uint32_t slot, rec, pidx, obj, region;
     DWORD now = GetTickCount();
     if (on < 0) on = getenv("XWA_AUTOPLAY") ? 1 : 0;
@@ -415,6 +415,22 @@ void xwa_autoplay_tick(void) {
         if (MEM32(0x9C6750) && !MEM32(0x9C6954)) xwa_queue_key(0x1C);
         break;
     case PICK1: case PICK2:
+        if (st == PICK2 && trip) {   /* second trip: the coolant again, kept this time, for delivery home */
+            int fgc = fg_by_cargo("Realgar"); uint32_t i, sp, tb = MEM32(0x7B33C4);
+            if (msg_seen_since(mark, 0x156)) { NEXT(HYPER2); break; }
+            if (fgc < 0) { GIVEUP("no coolant flight group"); break; }
+            sp = MEM8(0x80DC80u + (uint32_t)fgc * 0xE42u + 0x69);
+            for (obj = 0xFFFFu, i = MEM32(0x8BF378); i < MEM32(0x7CA3B8) && i < 0x3000u; i++) {
+                uint32_t o = tb + i * 0x27u, ro = MEM32(o + 0x23);
+                if (MEM16(o + 2) && MEM8(o + 5) == (uint32_t)fgc && ro && MEM32(ro + 0xDD) && MEM8(MEM32(ro + 0xDD) + 0xE2) == sp) { obj = i; break; }
+            }
+            if (obj == 0xFFFFu) { GIVEUP("coolant container gone"); break; }
+            MEM16(rec + 0x8B9505) = (uint16_t)obj; park_dir(pidx, obj, 1500, 5);
+            fprintf(stderr, "[AUTOPLAY] PICK2 (trip 2): coolant obj %u\n", obj); fflush(stderr);
+            mark = g_msg_n; guest_call1(sub_00507510, slot);
+            if (++tries > 20) GIVEUP("coolant pickup failed");
+            break;
+        }
         if (st == PICK2) {
             /* FG24 "Return Home" arrives on fuel cells (FG15) AND the coolant -- FG17's special craft,
              * Aeron's job -- picked up. Selu never gets here, so take the coolant first, release it
@@ -480,7 +496,7 @@ void xwa_autoplay_tick(void) {
         break;
     case HYPER1: case HYPER2:
         if (getenv("XWA_THROTTLETEST") && tries < 6) xwa_queue_key(0x0E);   /* Backspace = full throttle */
-        if (region != region0) { NEXT(st == HYPER1 ? DELIVER1 : DELIVER2); break; }
+        if (region != region0) { NEXT(st == HYPER1 ? (trip ? PICK2 : DELIVER1) : DELIVER2); break; }
         obj = find_obj(-1, 218, st == HYPER1 ? "Harlequin" : "Home", 0);   /* FG24 "Return Home" arrives once the fuel cells (FG15) are picked up */
         if (tries % 20 == 0) {   /* every hyper buoy (type 218) in every region, to see what the mission spawned */
             uint32_t i, tb = MEM32(0x7B33C4); fprintf(stderr, "[AUTOPLAY] buoys:");
@@ -491,7 +507,7 @@ void xwa_autoplay_tick(void) {
         MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 4000);
         {   /* "follow Aeron": give Selu (obj 3, fg 3) time to jump first, as a flown approach would */
             uint32_t s3 = MEM32(0x7B33C4) + 3 * 0x27u;
-            int selu_here = st == HYPER1 && MEM16(s3 + 2) && MEM8(s3 + 5) == 3 && MEM8(s3 + 6) == region0;
+            int selu_here = st == HYPER1 && !trip && getenv("XWA_WAITSELU") && MEM16(s3 + 2) && MEM8(s3 + 5) == 3 && MEM8(s3 + 6) == region0;
             if (selu_here && tries < 40) { if (tries++ % 8 == 0) { fprintf(stderr, "[AUTOPLAY] %s: at buoy, waiting for Selu (obj3 at %d,%d,%d cmd 0x%02X)\n", sname[st],
                 (int32_t)MEM32(s3 + 7), (int32_t)MEM32(s3 + 0xB), (int32_t)MEM32(s3 + 0xF), MEM32(s3 + 0x23) ? MEM8(MEM32(MEM32(s3 + 0x23) + 0xDD) + 0x84) : 0); fflush(stderr); } break; } }
         fprintf(stderr, "[AUTOPLAY] %s: buoy obj %u '%s', pressing Space\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5))); fflush(stderr);
@@ -499,7 +515,14 @@ void xwa_autoplay_tick(void) {
         if (++tries > 70) GIVEUP("no jump");
         break;
     case DELIVER1: case DELIVER2:
-        if (msg_seen_since(mark, 0x162)) { NEXT(st == DELIVER1 ? PICK2 : LAND); break; }
+        if (msg_seen_since(mark, 0x162)) {
+            /* mission complete = MEM8(0x807A60 + team*3) (team: player record +0x8B94EC); the hangar
+             * offers "Go to Debriefing" only then. Still open after the fuel cells: the coolant
+             * (Aeron's, she never comes) -- go back for it */
+            uint32_t team = MEM16(rec + 0x8B94EC), done = MEM8(0x807A60u + team * 3u);
+            fprintf(stderr, "[AUTOPLAY] %s: delivered; mission complete flag (team %u) = %u, failed = %u\n", sname[st], team, done, MEM8(0x807A61u + team * 3u)); fflush(stderr);
+            if (st == DELIVER2 && !done && !trip) { trip = 1; NEXT(HYPER1); break; }
+            NEXT(st == DELIVER1 ? PICK2 : LAND); break; }
         obj = (st == DELIVER1) ? find_obj(13, -1, NULL, 0) : find_obj(4, -1, NULL, 0);
         if (obj == 0xFFFFu) { dump_region(); GIVEUP("no delivery target in this region"); break; }
         if (!tries) { dump_region();
@@ -510,16 +533,22 @@ void xwa_autoplay_tick(void) {
                 fd = fopen("fgall.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x80DC80u), 1, 0xE42 * 32, fd); fclose(fd); }
                 fd = fopen("aiscripts.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x7FFDA0u), 1, 0x55 * 64, fd); fclose(fd); } } }   /* AI script names */
         MEM16(rec + 0x8B9505) = (uint16_t)obj; park_dir(pidx, obj, 20000, (tries / 2) % 6);   /* the dock ray test needs a docking point in view */
-        fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s' (selu obj3 region %u)\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
-                MEM8(MEM32(0x7B33C4) + 3 * 0x27u + 6)); fflush(stderr);
+        {   uint32_t rop = MEM32(MEM32(0x7B33C4) + pidx * 0x27u + 0x23), crp = rop ? MEM32(rop + 0xDD) : 0;
+            fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s' dir %d, carrying obj %u\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
+                    (tries / 2) % 6, crp ? MEM16(crp + 0x185) : 0xFFFFu); fflush(stderr); }
         mark = g_msg_n; guest_call1(sub_00506CB0, slot);
         if (++tries > 200) GIVEUP("no delivery");   /* the platform takes ours only after Selu has delivered */
         break;
     case LAND:
         /* "Hit [Space] to activate tractor beam and enter hangar" (0x117) appears near the base */
-        if (MEM32(0x68BBA0) == 6) {   /* tractor beam has us: hands off, re-parking breaks the sequence */
-            fprintf(stderr, "[AUTOPLAY] LAND: tractor engaged, waiting (hstate=6)\n"); fflush(stderr);
-            if (++tries > 80) GIVEUP("tractor never finished"); break; }
+        if (MEM32(0x68BBA0) == 6) {   /* in the hangar: hands off (re-parking breaks the tractor-in) */
+            /* the hangar menu is now "= MISSION COMPLETED =", item 0 "Go to Debriefing" (STRINGS.TXT
+             * MISSION_OVER_DEBRIEF); ENTER selects it, as it selected Launch on the way out */
+            {   uint32_t team = MEM16(rec + 0x8B94EC);   /* the menu builder copies its title to 0x68BC40 */
+                fprintf(stderr, "[AUTOPLAY] LAND: in the hangar (hstate=6), map=0x%X, menu '%.40s', complete=%u%s\n", MEM16(0x9C6754),
+                        (const char *)ADDR(0x68BC40u), MEM8(0x807A60u + team * 3u), tries > 4 ? ", ENTER" : ""); fflush(stderr); }
+            if (tries > 4 && tries % 3 == 0) xwa_queue_key(0x1C);
+            if (++tries > 80) GIVEUP("no debriefing"); break; }
         obj = find_obj(4, -1, NULL, 0);
         if (obj != 0xFFFFu && !msg_seen_since(mark, 0x117)) { MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 3000 + tries * 500); }
         if (msg_seen_since(mark, 0x117) || tries > 3) xwa_queue_key(0x39);
