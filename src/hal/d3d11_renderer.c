@@ -65,6 +65,7 @@ static ID3D11DepthStencilState* g_dss_nowrite = NULL;
 
 /* 2D surface upload texture */
 static ID3D11Texture2D*         g_staging_tex = NULL;
+static uint32_t                 g_staging_w, g_staging_h;
 static ID3D11ShaderResourceView* g_staging_srv = NULL;
 
 /* Fullscreen quad for 2D surface blit */
@@ -531,6 +532,7 @@ int d3d11_init(void* hwnd, uint32_t width, uint32_t height) {
 
         hr = ID3D11Device_CreateTexture2D(g_device, &std, NULL, &g_staging_tex);
         if (SUCCEEDED(hr)) {
+            g_staging_w = std.Width; g_staging_h = std.Height;
             D3D11_SHADER_RESOURCE_VIEW_DESC srvd = {0};
             srvd.Format = std.Format;
             srvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
@@ -1521,8 +1523,11 @@ void d3d11_upload_surface(uint8_t* pixels, uint32_t width, uint32_t height, uint
             memcpy(rgba + y * width, pixels + y * pitch, width * 4);
         }
     }
-    ID3D11DeviceContext_UpdateSubresource(g_context, (ID3D11Resource*)g_staging_tex,
-                                          0, NULL, rgba, width * 4, 0);
+    /* The staging texture is window-sized; surfaces can be smaller (or larger). A NULL box would
+     * read g_staging_h rows from an rgba buffer that only has `height` -- a heap over-read. */
+    {   D3D11_BOX box = { 0, 0, 0, width < g_staging_w ? width : g_staging_w, height < g_staging_h ? height : g_staging_h, 1 };
+        ID3D11DeviceContext_UpdateSubresource(g_context, (ID3D11Resource*)g_staging_tex,
+                                              0, &box, rgba, width * 4, 0); }
 
     HeapFree(GetProcessHeap(), 0, rgba);
 

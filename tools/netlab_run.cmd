@@ -11,6 +11,9 @@ set XWA_BARRSEL=4& set XWA_NONAV=1& set XWA_AUTOPILOT=1& set XWA_PILOT=Test& set
 set XWA_DPSP=1& set XWA_DPOBJ=1& set XWA_ROGUARD=1& set XWA_NAMEGUARD=1& set XWA_STRGUARD=1
 set XWA_NATIVEDRAW=1& set XWA_ALLOBJ=1& set XWA_TBLGUARD=1& set XWA_WATCHDOG_MS=0
 set XWA_KEEP3D=1& set XWA_3DFLAG=1& set XWA_ZEROFILL=1
+rem ponytail: guest code reads/writes freed heap blocks (page heap catches it in sub_005960BE);
+rem leaking every block stops the ntdll heap crashes. Drop once the stale pointer is found.
+set XWA_NOFREE=1
 set XWA_FGFILL=1& set XWA_RTDUMP=25& set XWA_NOLST=1& set XWA_NATIVESCANF=1& set XWA_D3DCAPS=1
 set XWA_RENDERINIT=1& set XWA_PUMPFIX=1& set XWA_WAITEXIT=1& set XWA_WAITAFTER=150
 if exist xwa_knobs.cmd call xwa_knobs.cmd

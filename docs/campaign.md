@@ -65,21 +65,49 @@ hangar models load and draw. The `= HANGAR MENU =` is up and **ENTER now selects
 Launch works: the player exits the family hangar into space in the YT-1300 cockpit. The
 `XWA_AUTOPLAY=1` test harness then plays the mission with the game's own mechanics (target, park
 in range, issue the game's pickup / dock commands, follow the in-flight message ids through the
-`msg-tap` hook): **C/C Xi 1 is picked up and secured** (messages 0x14E -> 0x12B -> 0x156).
+`msg-tap` hook), with the mission clock running:
 
-**Current blocker:** the wingman Selu (FG 3) gets the right order -- craft+0x84 = 0x12 (pickup),
-order target craft+0x60 = object 2 (Xi 2) -- and claims Xi 2 (`MSG_ALREADY_TARGETED` 0x216 if the
-player tries), but never moves. Its AI pickup handler (0x004A8520, from the order-handler table at
-0x5B7690) is never called for it. The mission's hyper buoy to Harlequin Station never arrives,
-most likely because its trigger waits on Xi 2. Leads: the time-sliced AI pass `sub_004B8A60`
-walks [MEM16(0x8D9628), MEM32(0x8BF368)) = [96,188) while region 0's craft are [0,96) (set by
-`sub_004154A0(region)`; may be legitimate -- a second per-region range).
+1. **C/C Xi 1 is picked up and secured** (0x14E -> 0x12B -> 0x156). A pickup completes when the
+   collision pass (`sub_00408DC0`) sees the craft touch the container and attaches it.
+2. **Selu flies to Xi 2 and picks it up**; the hyper buoy to Harlequin Station activates (0x163).
+3. **Hyperspace works**: Space at the buoy (0x79 -> 0x71) moves the player to region 1.
+4. **Blocker:** Harlequin Station answers "No delivery locations currently available" (0x15D). The
+   mission says to let Aeron deliver first, and Selu never arrives: after its pickup it flies past
+   the buoy, stops ~42000 units out and stays in region 0. Its FG orders (dumped from
+   `0x80DC80 + fg*0xE42`, order records 0x94 bytes from FG+0xCA, 4 per region) are region 0:
+   `0x11` pick up, `0x32` hyper to region 1, `0x39`, `0x28`; region 1: `0x28` (FG13, deliver)...
+   so the AI hyperspace exit never completes the region transfer.
+
+How the AI runs, for the next look: `sub_004A1D80` gates each craft on a countdown (order
+block +0x32 minus elapsed, reloaded from +0x2E); `sub_004A22C0` interprets a byte-code script
+(`0x7CA1D0`, base `0x9109E0[order+0x2A]`, first byte = the runtime command at order+0x5C); each op
+is `op, next-script` and calls `0x5B76B8[op]`, switching scripts when the handler returns true.
+Op 1 dispatches the order itself through `0x5B6F08[cmd]` (0x12 = `sub_004B0770`, pickup).
 
 Mission flow, from the .tie text: pick up Xi 1 (Shift-P) -> target nav buoy, within 0.5 km, Space
 -> at Harlequin Station dock within 1 km (Shift-D, `sub_00506CB0`) -> pick up fuel cells -> hyper
 home -> deliver to the Azzameen base -> land.
 
 ## Fixed on the way (2026-10-04)
+
+- Selu never moved: the pickup order handler `sub_004B0770` reached its local switch
+  (`jmp [eax*4+0x4B2350]`) lifted as an indirect tail call, which dispatches nowhere. Re-lifted;
+  `tools/fix_jmptbl.py` now also reads decimal bounds (`CMP_A(eax, 3)`), a bound tested on a copied
+  register, and a `ja` lifted as a tail call.
+- False collisions lost the mission at launch: the collision test `sub_0040C960` was cut at a bogus
+  function start (0x0040C9C8) and returned garbage, and the collision pass itself was split in two
+  at 0x0040A15D, each half tail-jumping into the other. Both are re-lifted whole. Every `RELIFT`
+  range was then re-measured with `tools/func_extent.py` (walks the control flow, switch tables
+  included), which also caught AI script ops missing their epilogue (`sub_004B8F70`, `sub_004B9220`).
+- Intermittent ntdll heap crashes (0xC0000374, `L_0048967D`): guest code uses freed blocks (full
+  page heap catches a read of a freed texture record in `sub_005960BE`). `XWA_NOFREE=1` (on in
+  `tools/netlab_run.cmd`) leaks every guest block, and keeps realloc'd ones, until the stale
+  pointer is found.
+- d3d11: the window-sized staging texture was updated from smaller surfaces with a NULL box, an
+  over-read of the converted pixel buffer.
+- The mission clock (0x8053FA) was frozen until `tools/fix_narrowcmp.py` (signed compares on 8/16-bit
+  operands); with it running, the exterior hangar map (0xB3) is what the game picks -- the interior
+  map seen before was the missing carry in `neg al; sbb eax,eax`.
 
 - `XWA_RENDERFN` wrote 1 into 0x7828D0 (the ALERTBOXBUFFER pointer, not a flag) -> free(1) ->
   heap corruption: the long-standing "L_0048967D flake" and the contained exception at ~930K calls

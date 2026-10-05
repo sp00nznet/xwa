@@ -22,7 +22,15 @@ import pefile
 EXE = 'config/xwingalliance_decrypted.exe'
 SITE = re.compile(r'^(?P<ind>[ \t]*)RECOMP_ITAIL\(MEM32\((?P<reg>e[a-ds][xpi]) \* 4 \+ 0x(?P<tbl>[0-9A-F]+)\)\); return;'
                   r'(?P<cmt> /\* 0x[0-9A-F]{8}: jmp dword ptr \[[^\]]*\] \*/)', re.M)
-BOUND = re.compile(r'if \(CMP_A\((?P<reg>e[a-ds][xpi]), 0x(?P<n>[0-9A-F]+)u?\)\) goto L_[0-9A-F]{8};')
+# the lifter writes small immediates in decimal (`CMP_A(eax, 3)`), larger ones in hex
+# the ja may also leave the function (a bad func split lifts it as an ITAIL)
+BOUND = re.compile(r'if \(CMP_A\((?P<reg>e[a-ds][xpi]), (?:0x(?P<n>[0-9A-F]+)u?|(?P<d>[0-9]+))\)\) '
+                   r'(?:goto L_[0-9A-F]{8};|\{ RECOMP_ITAIL\(0x[0-9A-F]+u\); return; \})')
+COPY = re.compile(r'(?P<dst>e[a-ds][xpi]) = (?P<src>e[a-ds][xpi]); /\* 0x[0-9A-F]{8}: mov ')
+
+
+def bound_count(b):
+    return (int(b['n'], 16) if b['n'] else int(b['d'])) + 1
 
 
 def fix_one(src, m, pe, base):
@@ -30,10 +38,15 @@ def fix_one(src, m, pe, base):
     fs = src.rfind('\nvoid sub_', 0, m.start())
     fe = src.find('\n}', m.end())
     body = src[fs:fe]
-    b = [x for x in BOUND.finditer(src, max(fs, m.start() - 3000), m.start()) if x['reg'] == m['reg']]
+    reg = m['reg']
+    near = src[src.rfind('\n', 0, src.rfind('\n', 0, m.start())):m.start()]   # the line before the jmp
+    c = COPY.search(near)
+    if c and c['dst'] == reg:      # `mov ecx, eax; jmp [ecx*4+T]` -- the guard tested eax
+        reg = c['src']
+    b = [x for x in BOUND.finditer(src, max(fs, m.start() - 3000), m.start()) if x['reg'] == reg]
     if not b:
         return src, 'no bound'
-    cnt = int(b[-1]['n'], 16) + 1
+    cnt = bound_count(b[-1])
     if cnt > 512:
         return src, f'bound {cnt} too large'
     tbl = int(m['tbl'], 16)
@@ -64,7 +77,16 @@ def fix_one(src, m, pe, base):
     return src, None
 
 
+def selftest():
+    for line, n in (('    if (CMP_A(eax, 3)) goto L_004B2345;', 4), ('    if (CMP_A(ecx, 0x1Fu)) goto L_00400000;', 32),
+                    ('    if (CMP_A(ecx, 8)) { RECOMP_ITAIL(0x00517D16u); return; } /* x */', 9)):
+        assert bound_count(BOUND.search(line)) == n, line
+    print('selftest ok')
+
+
 def main(argv):
+    if not argv:
+        return selftest()
     dry = '--dry' in argv
     files = [a for a in argv if not a.startswith('--')]
     pe = pefile.PE(EXE, fast_load=True)

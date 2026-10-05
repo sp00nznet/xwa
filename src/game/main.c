@@ -236,6 +236,9 @@ int g_ui_mx = -1, g_ui_my = -1;
 int g_ui_click = 0;
 int g_ui_down = 0;     /* button held, for drag-and-drop menus */   /* UI driver cursor override, applied inside the game's own mouse update */
 int g_in_flight;
+/* XWA_BLOCKTRACE: the [G_AB]/[G_DC]/[G_ST]/... block tracers in gen print up to 200000 lines each;
+ * off unless asked for (set in main). */
+int g_blocktrace;
 unsigned g_simcalls;   /* sub_004F6510 (sim update) entries, for XWA_STATUS */
 
 /* XWA_AUTOPLAY=1: a TEST HARNESS that plays 1b0m1fw headlessly, the way XWA_AUTOPILOT types the
@@ -321,7 +324,24 @@ void xwa_autoplay_tick(void) {
     slot = MEM32(0x8C1CC8); rec = slot * 0xBCFu;
     pidx = MEM32(rec + 0x8B94E0); region = MEM8(rec + 0x8B94F0);
     if (pidx == 0xFFFFu || pidx > 0x3000u) return;
-    if (MEM8(rec + 0x8B94F3)) return;                 /* a pickup / docking manoeuvre is flying */
+    {   /* XWA_WATCHOBJ=n: hardware write-watch on object n's X, to name the code that moves it */
+        static int armed; extern void xwa_watch_set(uint32_t);
+        if (!armed && getenv("XWA_WATCHGATE")) {   /* Selu's AI countdown, order block +0x32 */
+            uint32_t ro3 = MEM32(MEM32(0x7B33C4) + 3 * 0x27u + 0x23);
+            if (ro3 && MEM32(ro3 + 0xDD)) { armed = 1; xwa_watch_set(MEM32(ro3 + 0xDD) + (getenv("XWA_WATCHCMD") ? 0x84 : 0x5A)); } }   /* +0x84: order cmd */
+        if (!armed && getenv("XWA_WATCHOBJ")) {   /* n or n:off (field offset, default 7 = X) */
+            const char *w = getenv("XWA_WATCHOBJ"), *c = strchr(w, ':');
+            armed = 1; xwa_watch_set(MEM32(0x7B33C4) + (uint32_t)atoi(w) * 0x27u + (c ? (uint32_t)strtoul(c + 1, NULL, 0) : 7u)); } }
+    {   static int k; uint32_t t = MEM32(0x7B33C4);
+        if ((k++ % 8) == 0) { fprintf(stderr, "[AUTOPLAY] pos: clock=%02u:%02u:%02u pidx=%u alt(96CC)=%u f5=%u f3=%u player(%d,%d,%d) obj3(%d,%d,%d) obj2(%d,%d,%d) docked=%u\n",
+            MEM8(0x8053F7), MEM8(0x8053F8), MEM8(0x8053F9), pidx, MEM32(rec + 0x8B96CC), MEM8(rec + 0x8B94F5), MEM8(rec + 0x8B94F3), (int32_t)MEM32(t + pidx*0x27u + 7), (int32_t)MEM32(t + pidx*0x27u + 0xB), (int32_t)MEM32(t + pidx*0x27u + 0xF),
+            (int32_t)MEM32(t + 3*0x27u + 7), (int32_t)MEM32(t + 3*0x27u + 0xB), (int32_t)MEM32(t + 3*0x27u + 0xF),
+            (int32_t)MEM32(t + 2*0x27u + 7), (int32_t)MEM32(t + 2*0x27u + 0xB), (int32_t)MEM32(t + 2*0x27u + 0xF), MEM32(0x9C6750)); fflush(stderr); } }
+    if (getenv("XWA_AIOP")) {   /* Selu's AI gate: order block (craft+0x28) +0x32 countdown, +0x2E interval */
+        uint32_t ro3 = MEM32(MEM32(0x7B33C4) + 3 * 0x27u + 0x23), cr3 = ro3 ? MEM32(ro3 + 0xDD) : 0;
+        uint32_t ps3 = MEM32(MEM32(0x7B33C4) + 3 * 0x27u + 0x1F);
+        if (cr3) { fprintf(stderr, "[AUTOPLAY] selu gate: +32=%d +2E=%d cmd=0x%02X slot=%d F6=%u 96F9=%u 96FB=%u | myslot=%u myF6=%u | obj3+4=%u obj%u+4=%u obj2+4=%u\n",(int32_t)MEM32(cr3 + 0x5A), (int32_t)MEM32(cr3 + 0x56), MEM8(cr3 + 0x84),
+            (int32_t)ps3, ps3 < 16 ? MEM8(ps3 * 0xBCFu + 0x8B94F6) : 0, ps3 < 16 ? MEM16(ps3 * 0xBCFu + 0x8B96F9) : 0, ps3 < 16 ? MEM16(ps3 * 0xBCFu + 0x8B96FB) : 0, slot, MEM8(rec + 0x8B94F6), MEM8(MEM32(0x7B33C4) + 3 * 0x27u + 4), pidx, MEM8(MEM32(0x7B33C4) + pidx * 0x27u + 4), MEM8(MEM32(0x7B33C4) + 2 * 0x27u + 4)); fflush(stderr); } }
     {   /* Selu's craft struct (obj 3: [[obj+0x23]+0xDD]), first 0x180 bytes, printed when it changes */
         static uint8_t prevc[0x180]; static int have; uint32_t t3 = MEM32(0x7B33C4) + (getenv("XWA_DIFFOBJ") ? (uint32_t)atoi(getenv("XWA_DIFFOBJ")) : 3u) * 0x27u, ro = MEM32(t3 + 0x23), cr;
         extern int xwa_readable(uint32_t, uint32_t);
@@ -343,17 +363,21 @@ void xwa_autoplay_tick(void) {
                 fprintf(stderr, "\n"); }
             for (j = 0; j < 0x27; j++) pv[a][j] = MEM8(o + j); }
         hv = 1; fflush(stderr); }
-    {   static int k; uint32_t t = MEM32(0x7B33C4);
-        if ((k++ % 8) == 0) { fprintf(stderr, "[AUTOPLAY] pos: player(%d,%d,%d) obj3(%d,%d,%d) obj2(%d,%d,%d) docked=%u\n",
-            (int32_t)MEM32(t + pidx*0x27u + 7), (int32_t)MEM32(t + pidx*0x27u + 0xB), (int32_t)MEM32(t + pidx*0x27u + 0xF),
-            (int32_t)MEM32(t + 3*0x27u + 7), (int32_t)MEM32(t + 3*0x27u + 0xB), (int32_t)MEM32(t + 3*0x27u + 0xF),
-            (int32_t)MEM32(t + 2*0x27u + 7), (int32_t)MEM32(t + 2*0x27u + 0xB), (int32_t)MEM32(t + 2*0x27u + 0xF), MEM32(0x9C6750)); fflush(stderr); } }
+
+    if (MEM8(rec + 0x8B94F3)) return;                 /* a pickup / docking manoeuvre is flying */
 #define NEXT(s) do { fprintf(stderr, "[AUTOPLAY] %s -> %s (region %u)\n", sname[st], sname[s], region); fflush(stderr); \
                      st = (s); tries = 0; skip = 0; mark = g_msg_n; region0 = region; } while (0)
 #define GIVEUP(why) do { fprintf(stderr, "[AUTOPLAY] %s: giving up (%s)\n", sname[st], why); fflush(stderr); st = DONE; } while (0)
     switch (st) {
     case WAIT:
-        if (MEM32(0x68BBA0) >= 4) { NEXT(PICK1); break; }   /* the hangar launch has finished */
+        if (MEM32(0x68BBA0) >= 4) {   /* the hangar launch has finished ... */
+            /* ... and the player has been moved into the space region: its object is inside the
+             * region range, is the YT-1300, and has been placed (the exit leaves it in the hangar
+             * partition, or at 0,0,0, for a while) */
+            static int settle; uint32_t po = MEM32(0x7B33C4) + pidx * 0x27u;
+            if (pidx >= MEM32(0x8BF378) && pidx < MEM32(0x7CA3B8) && MEM16(po + 2) == 58 &&
+                (MEM32(po + 7) | MEM32(po + 0xB) | MEM32(po + 0xF)) && ++settle > 3) NEXT(PICK1);
+            break; }
         /* "> Launch <" is the hangar menu's default item: ENTER until the launch starts
          * (9C6954 = launch requested). No keys after that -- nothing else should be pressed. */
         if (MEM32(0x9C6750) && !MEM32(0x9C6954)) xwa_queue_key(0x1C);
@@ -366,10 +390,13 @@ void xwa_autoplay_tick(void) {
         if (obj == pidx) { skip++; break; }
         if (tries && st == PICK2 && !msg_seen_since(mark, 0x14E)) skip++;              /* not pickable */
         MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 1500);
-        fprintf(stderr, "[AUTOPLAY] %s: target obj %u (fg %u '%s' type %u)\n", sname[st], obj,
+        fprintf(stderr, "[AUTOPLAY] %s: target obj %u (fg %u '%s' type %u) at (%d,%d,%d)\n", sname[st], obj,
                 MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5), fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
-                MEM16(MEM32(0x7B33C4) + obj * 0x27u + 2)); fflush(stderr);
+                MEM16(MEM32(0x7B33C4) + obj * 0x27u + 2), (int32_t)MEM32(MEM32(0x7B33C4) + obj * 0x27u + 7),
+                (int32_t)MEM32(MEM32(0x7B33C4) + obj * 0x27u + 0xB), (int32_t)MEM32(MEM32(0x7B33C4) + obj * 0x27u + 0xF)); fflush(stderr);
         mark = g_msg_n; guest_call1(sub_00507510, slot);
+        {   static int wp; extern void xwa_watch_set(uint32_t);   /* XWA_WATCHPICK: who moves the player next */
+            if (!wp && getenv("XWA_WATCHPICK")) { wp = 1; xwa_watch_set(MEM32(0x7B33C4) + pidx * 0x27u + 0xB); } }
         if (++tries > 40) GIVEUP("too many tries");
         break;
     case SWAP:
@@ -395,18 +422,27 @@ void xwa_autoplay_tick(void) {
         obj = find_obj(-1, 218, st == HYPER1 ? "Harlequin" : "Home", 0);
         if (obj == 0xFFFFu) { if (tries % 10 == 0) dump_region(); if (++tries > 60) GIVEUP("no hyper buoy appeared"); break; }
         MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 4000);
+        {   /* "follow Aeron": give Selu (obj 3, fg 3) time to jump first, as a flown approach would */
+            uint32_t s3 = MEM32(0x7B33C4) + 3 * 0x27u;
+            int selu_here = st == HYPER1 && MEM16(s3 + 2) && MEM8(s3 + 5) == 3 && MEM8(s3 + 6) == region0;
+            if (selu_here && tries < 40) { if (tries++ % 8 == 0) { fprintf(stderr, "[AUTOPLAY] %s: at buoy, waiting for Selu (obj3 at %d,%d,%d cmd 0x%02X)\n", sname[st],
+                (int32_t)MEM32(s3 + 7), (int32_t)MEM32(s3 + 0xB), (int32_t)MEM32(s3 + 0xF), MEM32(s3 + 0x23) ? MEM8(MEM32(MEM32(s3 + 0x23) + 0xDD) + 0x84) : 0); fflush(stderr); } break; } }
         fprintf(stderr, "[AUTOPLAY] %s: buoy obj %u '%s', pressing Space\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5))); fflush(stderr);
         xwa_queue_key(0x39);
-        if (++tries > 30) GIVEUP("no jump");
+        if (++tries > 70) GIVEUP("no jump");
         break;
     case DELIVER1: case DELIVER2:
         if (msg_seen_since(mark, 0x162)) { NEXT(st == DELIVER1 ? PICK2 : LAND); break; }
         obj = (st == DELIVER1) ? find_obj(13, -1, NULL, 0) : find_obj(4, -1, NULL, 0);
         if (obj == 0xFFFFu) { dump_region(); GIVEUP("no delivery target in this region"); break; }
+        if (!tries) { dump_region();
+            if (getenv("XWA_FGDUMP")) {   /* Selu's flight group record (orders + triggers), for offline decoding */
+                FILE *fd = fopen("fg3.bin", "wb"); if (fd) { fwrite((void*)ADDR(0x80DC80u + 3 * 0xE42u), 1, 0xE42, fd); fclose(fd); } } }
         MEM16(rec + 0x8B9505) = (uint16_t)obj; park_at(pidx, obj, 20000);
-        fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s'\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5))); fflush(stderr);
+        fprintf(stderr, "[AUTOPLAY] %s: dock with obj %u '%s' (selu obj3 region %u)\n", sname[st], obj, fg_name(MEM8(MEM32(0x7B33C4) + obj * 0x27u + 5)),
+                MEM8(MEM32(0x7B33C4) + 3 * 0x27u + 6)); fflush(stderr);
         mark = g_msg_n; guest_call1(sub_00506CB0, slot);
-        if (++tries > 30) GIVEUP("no delivery");
+        if (++tries > 200) GIVEUP("no delivery");   /* the platform takes ours only after Selu has delivered */
         break;
     case LAND:
         /* "Hit [Space] to activate tractor beam and enter hangar" (0x117) appears near the base */
@@ -1775,6 +1811,24 @@ static LONG WINAPI veh_handler(EXCEPTION_POINTERS* ep) {
             uintptr_t v = 0; __try { v = sp[i]; } __except(1) { break; }
             uint32_t gv = guest_func_for_host(v);
             if (gv) { extern int g_crash_contained; fprintf(stderr, "    stack[+%02X]=0x%zX -> guest sub_%08X\n", i*4, v, gv); found++; }
+        }
+        /* Deep in a system DLL (the D3D runtime / WARP) the guest frames are far up the stack:
+         * also print the first host return addresses inside this exe, raw, for
+         * `llvm-symbolizer --obj=build-farm/xwa_recomp.exe <addr>`. */
+        {   HMODULE me = GetModuleHandleA(NULL); MODULEINFO mi; int n = 0;
+            if (hm != me && GetModuleInformation(GetCurrentProcess(), me, &mi, sizeof mi)) {
+                uintptr_t lo = (uintptr_t)mi.lpBaseOfDll, hi = lo + mi.SizeOfImage;
+                MEMORY_BASIC_INFORMATION smb; int lim = 0;
+                if (VirtualQuery((void*)sp, &smb, sizeof smb))
+                    lim = (int)(((uintptr_t)smb.BaseAddress + smb.RegionSize - (uintptr_t)sp) / sizeof(uintptr_t));
+                if (lim > 2048) lim = 2048;
+                fprintf(stderr, "    host chain:");
+                for (int i = 0; i < lim && n < 8; i++) {
+                    uintptr_t v = sp[i];
+                    if (v > lo + 0x1000 && v < hi) { fprintf(stderr, " %zX", v); n++; }
+                }
+                fprintf(stderr, "\n");
+            }
         }
     }
     if (code == 0xC0000374 /* STATUS_HEAP_CORRUPTION */) {
@@ -5060,6 +5114,7 @@ char g_trace_ring[TRACE_RING_SIZE][TRACE_ENTRY_SIZE] = {{0}};
 uint32_t g_trace_ring_idx = 0;
 
 int main(int argc, char* argv[]) {
+    g_blocktrace = getenv("XWA_BLOCKTRACE") ? 1 : 0;
     /* Record our own module's image range so LINK_OK can exclude it (see recomp_types.h). */
     { HMODULE _h = GetModuleHandleA(NULL);
       if (_h) { IMAGE_DOS_HEADER* _d = (IMAGE_DOS_HEADER*)_h;

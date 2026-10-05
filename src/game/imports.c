@@ -1055,6 +1055,13 @@ static void bridge_HeapReAlloc_005A914C(void) { /* KERNEL32.dll:HeapReAlloc (4 a
     uint32_t a2 = MEM32(g_esp + 12);  /* lpMem */
     uint32_t a3 = MEM32(g_esp + 16);  /* dwBytes */
     HANDLE hHeap = (HANDLE)(uintptr_t)a0;
+    static int nf = -1; if (nf < 0) nf = getenv("XWA_NOFREE") != NULL;
+    if (nf && a2) {   /* XWA_NOFREE: a moving realloc frees the old block too -- keep it alive */
+        SIZE_T old = HeapSize(hHeap, 0, (void*)(uintptr_t)a2);
+        void* p = (a1 & HEAP_REALLOC_IN_PLACE_ONLY) ? NULL : HeapAlloc(hHeap, a1 & HEAP_ZERO_MEMORY, a3 + 256);
+        if (p && old != (SIZE_T)-1) memcpy(p, (void*)(uintptr_t)a2, old < a3 + 256 ? old : a3 + 256);
+        g_eax = (uint32_t)(uintptr_t)p; g_esp += 20; return;
+    }
     g_eax = (uint32_t)(uintptr_t)HeapReAlloc(hHeap, a1, (void*)(uintptr_t)a2, a3 + 256);  /* same padding as HeapAlloc */
     g_esp += 20;
 }
@@ -1067,6 +1074,9 @@ static void bridge_HeapFree_005A9150(void) { /* KERNEL32.dll:HeapFree (3 args) *
     HANDLE hHeap = (HANDLE)(uintptr_t)a0;
     g_heapop_count++;
     g_last_heapfree_ptr = a2;
+    {   /* XWA_NOFREE: leak every guest block -- diagnoses use-after-free heap corruption */
+        static int nf = -1; if (nf < 0) nf = getenv("XWA_NOFREE") != NULL;
+        if (nf) { g_eax = 1; g_esp += 16; return; } }
     if (a2) {
         /* #353b: a pointer inside the guest IMAGE (0x400000-0x600000) is never a heap block --
          * freeing one is always a bug, and HeapValidate has been observed returning TRUE for
