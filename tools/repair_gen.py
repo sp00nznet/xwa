@@ -42,10 +42,11 @@ REPLACE = [
     # textually preceding `cmp ebx, edi` @0x00443091 (audit: join_consumer_mismatched_setter)
     ('if (CMP_GE(ebx, edi)) goto L_004430AF; /* 0x0044309B: jge 0x4430af */',
      'if (CMP_GE(edi, ebx)) goto L_004430AF; /* 0x0044309B: jge 0x4430af */ /* join fix: setter is cmp edi,ebx @0x0044307D */'),
-    # XWA_FGFILL (gen-only) gave objects without a render object pool + i*0xE5, which past entry ~1010
-    # overlays the object table itself; the game writes ro fields -> object table and heap corruption
+    # XWA_FGFILL (gen-only) gave objects without a render object pool + i*0xE5, but the pool is sized
+    # for mobile objects ((n1+n2+n3)*0xE5 @0x00415A49) and handed out in order: that shared other
+    # objects' ro and ran past the pool (into the object table) -> state and heap corruption
     ('                uint32_t _ro   = _pool + _i * 0xE5u;\n                if (!xwa_readable(_slot, 4) || !xwa_readable(_ro, 0xE5)) break;\n',
-     '                uint32_t _ro   = _pool + _i * 0xE5u;\n                { extern uint32_t xwa_ro_slot(uint32_t);   /* past the pool the slots overlay the object table */\n                  extern uint32_t xwa_guest_block_size(uint32_t); static uint32_t _psz;   /* and past the pool allocation */\n                  if (_i == 0) _psz = xwa_guest_block_size(_pool);\n                  if ((_fgt > _pool && _ro + 0xE5u > _fgt) || (_psz && (_i + 1) * 0xE5u > _psz)) _ro = xwa_ro_slot(_i); }\n                if (!xwa_readable(_slot, 4) || !_ro || !xwa_readable(_ro, 0xE5)) break;\n'),
+     '                uint32_t _ro   = _pool + _i * 0xE5u;\n                /* the pool is sized for mobile objects and handed out in order, not by object index */\n                { extern uint32_t xwa_ro_slot(uint32_t); _ro = xwa_ro_slot(_i); }\n                if (!xwa_readable(_slot, 4) || !_ro || !xwa_readable(_ro, 0xE5)) break;\n'),
     # join point: the jne at 0x004A393F is also reached by `jmp` from the `cmp [edx+0x85],0`
     # @0x004A392D path (sub_004A36B0, AI target filter); lifted, both paths tested [ebp+0x185], so a
     # canister the player carries stayed a valid pickup target for the wingman
