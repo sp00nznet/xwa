@@ -131,7 +131,10 @@ typedef struct {
  * Texture Handle Table
  * ============================================================ */
 
-#define MAX_TEXTURE_HANDLES 256
+/* Handles are never reused (com_mocks hands out ++next), and a flight loads well over 256 textures:
+ * past the old cap of 256 every new texture was dropped and drew as flat white/grey.
+ * ponytail: freed surfaces keep their slot; recycle handles if a long session ever runs out. */
+#define MAX_TEXTURE_HANDLES 16384
 
 /* ============================================================
  * Renderer API

@@ -747,10 +747,11 @@ static void dds_QueryInterface(void) {
     g_esp += 16; /* pop ret + 3 args */
 }
 
+static void tex_handle_free(mock_com_obj_t* surf);
 static void dds_Release(void) {
     uint32_t pThis = MEM32(g_esp + 4);
     mock_com_obj_t* obj = (mock_com_obj_t*)(uintptr_t)pThis;
-    if (obj->refcount > 0) obj->refcount--;
+    if (obj->refcount > 0 && --obj->refcount == 0) tex_handle_free(obj);
     g_eax = obj->refcount;
     g_esp += 8;
 }
@@ -1983,6 +1984,18 @@ static void d3deb_SetExecuteData(void) {
  * [6] Load (2) [7] Unload (1)
  * ============================================================ */
 
+/* Texture handles belong to the SURFACE (extra[20]) and go back to a free list when the surface
+ * is released. The game queries fresh IDirect3DTexture interfaces continuously in flight without
+ * releasing them, and one new handle per interface ran past the renderer's table within minutes --
+ * every texture after that drew as flat white/grey. */
+static uint32_t g_free_tex_handles[4096]; static int g_free_tex_n;
+static unsigned g_ts_get, g_ts_new, g_ts_free;
+
+static void tex_handle_free(mock_com_obj_t* surf) {
+    if (surf->extra[20] && g_free_tex_n < 4096) { g_free_tex_handles[g_free_tex_n++] = surf->extra[20]; g_ts_free++; }
+    surf->extra[20] = 0;
+}
+
 static void d3dtex_GetHandle(void) {
     /* this=esp+4, pDevice=esp+8, pHandle=esp+12 */
     uint32_t pThis = MEM32(g_esp + 4);
@@ -1992,11 +2005,17 @@ static void d3dtex_GetHandle(void) {
     /* extra[0] = pointer to the underlying surface mock */
     mock_com_obj_t* surf = (mock_com_obj_t*)(uintptr_t)tex_obj->extra[0];
 
-    /* Assign a texture handle if not already assigned */
-    uint32_t handle = tex_obj->extra[1];
+    /* Assign a texture handle if not already assigned (to the surface, see tex_handle_free) */
+    uint32_t handle = surf ? surf->extra[20] : tex_obj->extra[1];
+    g_ts_get++;
+    if (getenv("XWA_TEXSTATS") && g_ts_get % 2000u == 0u) {
+        fprintf(stderr, "[TEXSTATS] GetHandle=%u new=%u freed=%u next=%u free_list=%d\n",
+                g_ts_get, g_ts_new, g_ts_free, g_next_texture_handle, g_free_tex_n); fflush(stderr); }
     if (handle == 0) {
-        handle = g_next_texture_handle++;
+        handle = g_free_tex_n ? g_free_tex_handles[--g_free_tex_n] : g_next_texture_handle++;
+        g_ts_new++;
         tex_obj->extra[1] = handle;
+        if (surf) surf->extra[20] = handle;
 
         /* Register with D3D11 renderer */
         if (surf && surf->extra[0]) {
@@ -2007,6 +2026,8 @@ static void d3dtex_GetHandle(void) {
                 surf->extra[4],   /* pitch */
                 surf->extra[3]    /* bpp */
             );
+        } else {
+            d3d11_register_texture(handle, NULL, 0, 0, 0, 0);   /* a recycled handle: drop the old pixels */
         }
         COM_LOG("[COM] IDirect3DTexture::GetHandle -> %u (surf=0x%08X, %ux%u)\n",
                 handle, (uint32_t)(uintptr_t)surf,

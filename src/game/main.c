@@ -947,6 +947,127 @@ static uint32_t ntex_surface(uint32_t node)
     return 0;
 }
 
+/* The engine only builds a surface for a texture it has drawn, and it draws nothing itself here,
+ * so far-off craft came out flat white/grey. Decode the texture from the .OPT file on disk instead:
+ * the loaded model is that file with its texture data cut out (pixels and palettes are gone from
+ * memory; the record's palette pointer at +0x06 now lands on face indices).
+ * In the file a texture is a type-20 node: [name ptr][20][0][0][unique id][data offset], the name
+ * ("Tex00000\0"), then [palette offset][0][size][size+mips][w][h] and w*h palette indices. The
+ * palette is 16 brightness levels x 256 RGB565; level 13 matched the engine's own surfaces best
+ * (XWA_PALCHECK measures it; XWA_PALLEVEL overrides).
+ * The engine record (node+0x14) keeps the id at +0x00, but ids repeat across files with different
+ * content, so the file is confirmed by its header: the loaded copy keeps the file's dword at +0x0C
+ * (zeroing +0 and +4), at node - (the node's offset in the file). */
+typedef struct { uint32_t uid, node_off, pix_off, pal_off, w, h; uint16_t file; char name[10]; } OptTex;
+static OptTex* g_ot; static int g_otn;
+static char (*g_otf)[48]; static uint32_t* g_otf_hdr;
+
+/* ponytail: reads all 329 files (88 MB) once, ~2.5 s stall at the first untextured model; move it
+ * to a startup thread, or index only the craft list's files, if the hitch matters. */
+static void opttex_index(void)
+{
+    WIN32_FIND_DATAA fd; HANDLE fh; int nf = 0, cap = 0, fcap = 0; DWORD t0 = GetTickCount();
+    fh = FindFirstFileA("FLIGHTMODELS\\*.OPT", &fd);
+    if (fh == INVALID_HANDLE_VALUE) { char cwd[260] = "";
+        GetCurrentDirectoryA(sizeof cwd, cwd);
+        fprintf(stderr, "[OPTTEX] no FLIGHTMODELS\\*.OPT under '%s' (error %lu)\n", cwd, (unsigned long)GetLastError());
+        fflush(stderr); g_otn = -1; return; }
+    do {
+        char path[80]; FILE* f; long sz; uint8_t* d; long i;
+        if (strlen(fd.cFileName) >= 48u) continue;
+        sprintf(path, "FLIGHTMODELS\\%s", fd.cFileName);
+        if (!(f = fopen(path, "rb"))) continue;
+        fseek(f, 0, SEEK_END); sz = ftell(f); fseek(f, 0, SEEK_SET);
+        d = (sz > 0x40) ? (uint8_t*)malloc((size_t)sz) : NULL;
+        if (!d || fread(d, 1, (size_t)sz, f) != (size_t)sz) { free(d); fclose(f); continue; }
+        fclose(f);
+        if (nf == fcap) { fcap = fcap ? fcap * 2 : 512;
+            g_otf = realloc(g_otf, (size_t)fcap * sizeof *g_otf); g_otf_hdr = realloc(g_otf_hdr, (size_t)fcap * 4u); }
+        strcpy(g_otf[nf], path); g_otf_hdr[nf] = *(uint32_t*)(d + 0xC);
+        for (i = 0x18; i + 9 + 24 < sz; i++) {
+            uint32_t dat, pal, w, h, delta; int k;
+            if (d[i] != 'T' || d[i+1] != 'e' || d[i+2] != 'x' || d[i+8] != 0) continue;
+            for (k = 3; k < 8 && d[i+k] >= '0' && d[i+k] <= '9'; k++) ;
+            if (k < 8 || *(uint32_t*)(d + i - 0x14) != 20u) continue;
+            dat = (uint32_t)i + 9u;
+            pal = *(uint32_t*)(d + dat); w = *(uint32_t*)(d + dat + 16); h = *(uint32_t*)(d + dat + 20);
+            delta = *(uint32_t*)(d + i - 4) - dat;              /* file offsets are stored rebased */
+            if (w < 1u || h < 1u || w > 512u || h > 512u || *(uint32_t*)(d + dat + 8) != w * h) continue;
+            if ((long)(dat + 24u + w * h) > sz || (long)(pal - delta + 8192u) > sz) continue;
+            if (g_otn == cap) { cap = cap ? cap * 2 : 4096; g_ot = realloc(g_ot, (size_t)cap * sizeof *g_ot); }
+            g_ot[g_otn].uid = *(uint32_t*)(d + i - 8); g_ot[g_otn].node_off = (uint32_t)i - 0x18u;
+            g_ot[g_otn].pix_off = dat + 24u; g_ot[g_otn].pal_off = pal - delta;
+            g_ot[g_otn].w = w; g_ot[g_otn].h = h; g_ot[g_otn].file = (uint16_t)nf;
+            memcpy(g_ot[g_otn].name, d + i, 9); g_ot[g_otn].name[9] = 0;
+            g_otn++;
+        }
+        free(d); nf++;
+    } while (FindNextFileA(fh, &fd));
+    FindClose(fh);
+    fprintf(stderr, "[OPTTEX] indexed %d textures in %d .OPT files (%lu ms)\n", g_otn, nf,
+            (unsigned long)(GetTickCount() - t0)); fflush(stderr);
+}
+
+/* Palette-decode texture `node` at level lv into px; returns w | h << 16, or -1. */
+static int ntex_palette_px(uint32_t node, uint32_t* px, uint32_t lv)
+{
+    static uint8_t pix[512 * 512], pal[8192];
+    static uint32_t last_node; static int last_i = -1, last_file = -1;
+    static struct { uint32_t dp, uid; int i; } seen[1024]; static int nseen;   /* record -> index entry */
+    uint32_t dp = MEM32(node + 0x14), w, h, k;
+    int i, hit = -1, cand = -1, ncand = 0, named;
+    if (!dp || !xwa_readable(dp, 0x24) || !xwa_readable(node + 0x18, 9)) return -1;
+    w = MEM32(dp + 0x16); h = MEM32(dp + 0x1A);
+    if (w < 1u || h < 1u || w > 512u || h > 512u) return -1;
+    if (!g_otn) opttex_index();
+    for (i = 0; i < nseen; i++) if (seen[i].dp == dp && seen[i].uid == MEM32(dp)) { hit = seen[i].i; break; }
+    /* Reference nodes (no name at +0x18) share the record of the texture node they point to. */
+    named = MEM8(node + 0x18) == 'T';
+    for (i = 0; hit < 0 && i < g_otn; i++) {
+        OptTex* t = &g_ot[i]; uint32_t base = node - t->node_off;
+        if (t->uid != MEM32(dp) || t->w != w || t->h != h) continue;
+        if (named && memcmp(t->name, (const void*)ADDR(node + 0x18), 9)) continue;
+        if (cand < 0 || t->file == last_file) cand = i;
+        ncand++;
+        if (named && xwa_readable(base, 16) && MEM32(base) == 0u && MEM32(base + 4) == 0u
+            && MEM32(base + 0xC) == g_otf_hdr[t->file]) hit = i;
+    }
+    /* Not confirmed by the header: one candidate, or the file the last confirmed texture came from. */
+    if (hit < 0 && (ncand == 1 || (cand >= 0 && g_ot[cand].file == last_file))) hit = cand;
+    if (hit < 0) return -1;
+    if (named && ncand) last_file = g_ot[hit].file;
+    if (ncand && nseen < 1024) { seen[nseen].dp = dp; seen[nseen].uid = MEM32(dp); seen[nseen].i = hit; nseen++; }
+    if (hit != last_i || node != last_node) {
+        FILE* f = fopen(g_otf[g_ot[hit].file], "rb");
+        if (!f) return -1;
+        fseek(f, (long)g_ot[hit].pix_off, SEEK_SET);
+        k = (uint32_t)fread(pix, 1, w * h, f);
+        fseek(f, (long)g_ot[hit].pal_off, SEEK_SET);
+        k += (uint32_t)fread(pal, 1, 8192, f);
+        fclose(f);
+        if (k != w * h + 8192u) return -1;
+        last_i = hit; last_node = node;
+    }
+    for (k = 0; k < w * h; k++) {
+        uint32_t c = *(uint16_t*)(pal + lv * 512u + pix[k] * 2u);
+        uint32_t r = ((c >> 11) & 0x1Fu) * 255u / 31u, g = ((c >> 5) & 0x3Fu) * 255u / 63u;
+        px[k] = 0xFF000000u | (r << 16) | (g << 8) | ((c & 0x1Fu) * 255u / 31u);
+    }
+    {   static int lg;
+        if (lg < 8 && getenv("XWA_NMESHLOG")) { lg++;
+            fprintf(stderr, "[NTEXPAL] node=0x%08X %ux%u %s %s (%d candidate files) level=%u\n",
+                    node, w, h, g_otf[g_ot[hit].file], g_ot[hit].name, ncand, lv); fflush(stderr); } }
+    return (int)(w | (h << 16));
+}
+
+static int ntex_palette(uint32_t node, uint32_t* px)
+{
+    int wh = ntex_palette_px(node, px,
+                             getenv("XWA_PALLEVEL") ? (uint32_t)atoi(getenv("XWA_PALLEVEL")) & 15u : 13u);
+    if (wh < 0) return -1;
+    return d3d11_native_texture(node, px, wh & 0xFFFF, wh >> 16);
+}
+
 static int ntex_get(uint32_t node)
 {
     static uint32_t px[512 * 512];
@@ -955,8 +1076,10 @@ static int ntex_get(uint32_t node)
      * actually writes into them decodes as 565 -- reading 1555 tints every hull purple. */
     int fmt565 = getenv("XWA_TEX555") ? 0 : 1;
     if (getenv("XWA_NOTEX")) return -1;
+    {   int id = d3d11_native_texture(node, NULL, 0, 0);   /* already uploaded: skip the decode */
+        if (id >= 0) return id; }
     surf = ntex_surface(node);
-    if (!surf) return -1;
+    if (!surf) return ntex_palette(node, px);
     pix   = MEM32(surf + 0x0C);
     w     = MEM32(surf + 0x10);
     h     = MEM32(surf + 0x14);
@@ -998,6 +1121,21 @@ static int ntex_get(uint32_t node)
             }
         }
     }
+    if (getenv("XWA_PALCHECK")) {   /* which palette level reproduces the engine's own surface */
+        static uint32_t q[512 * 512]; static int pc;
+        uint32_t dq = MEM32(node + 0x14);
+        if (pc < 6 && xwa_readable(dq, 0x24) && MEM32(dq + 0x16) == w && MEM32(dq + 0x1A) == h) {
+            uint32_t lv, best = 99u; double bd = 1e30; pc++;
+            for (lv = 0; lv < 16u; lv++) { double d = 0; uint32_t k;
+                if (ntex_palette_px(node, q, lv) < 0) break;
+                for (k = 0; k < w * h; k++) {
+                    int a1 = (int)(px[k] & 0xFF) - (int)(q[k] & 0xFF), a2 = (int)((px[k] >> 8) & 0xFF) - (int)((q[k] >> 8) & 0xFF);
+                    int a3 = (int)((px[k] >> 16) & 0xFF) - (int)((q[k] >> 16) & 0xFF);
+                    d += abs(a1) + abs(a2) + abs(a3); }
+                d /= (double)(w * h * 3u);
+                fprintf(stderr, "[PALCHECK] node=0x%08X level=%u meandiff=%.1f\n", node, lv, d);
+                if (d < bd) { bd = d; best = lv; } }
+            fprintf(stderr, "[PALCHECK] node=0x%08X best=%u diff=%.1f\n", node, best, bd); fflush(stderr); } }
     {   int id = d3d11_native_texture(node, px, (int)w, (int)h);
         static int lg;
         if (lg < 8 && getenv("XWA_NMESHLOG")) { lg++;

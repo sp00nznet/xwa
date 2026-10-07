@@ -39,6 +39,13 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 - README restructured to the house layout; deep-dive sections moved into `docs/`.
 
 ### Fixed
+- Flight textures: the game's own 3D draws (cockpit, HUD text, nearby craft) came out flat white/grey
+  once more than 256 textures had been created -- the renderer's handle table was capped at 256 and
+  handles were never reused. Handles now belong to the surface and are recycled when it is released.
+- Native model drawer: craft whose textures the engine had not uploaded yet drew untextured. Their
+  8-bit textures are now read from the `.OPT` files on disk (indexed once by texture id; the file is
+  confirmed by its header), palette level 13 (`XWA_PALLEVEL`, measured with `XWA_PALCHECK`).
+  `XWA_TEXSTATS` counts texture binds by outcome.
 - `XWA_RENDERFN` freed a bogus pointer (0x7828D0 = 1): heap corruption behind the old
   `L_0048967D` crash. MKCTX/RENDERFN/RUNSCENE dropped from the netlab run.
 - Host FILE streams read through the game's CRT fgetc/fread; EOF bit mirrored for game code.

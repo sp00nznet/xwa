@@ -836,7 +836,7 @@ static native_batch_t g_native_batch[NATIVE_BATCHES];
 static int g_native_batch_n = 0;
 
 /* Textures the native path owns, keyed by the OPT texture node address. */
-#define NATIVE_TEXTURES 256
+#define NATIVE_TEXTURES 1024
 static struct { uint32_t key; ID3D11ShaderResourceView* srv; } g_native_tex[NATIVE_TEXTURES];
 static int g_native_tex_n = 0;
 
@@ -1357,6 +1357,15 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
                 switch (st->drstRenderStateType) {
                 case D3DRENDERSTATE_TEXTUREHANDLE:
                     g_cur_texture_handle = st->dwArg;
+                    if (getenv("XWA_TEXSTATS")) {   /* why the engine's own 3D draws come out untextured */
+                        static unsigned n0, nrange, nnopix, nnosrv, nok, tot;
+                        uint32_t hh = st->dwArg;
+                        if (!hh) n0++; else if (hh >= MAX_TEXTURE_HANDLES) nrange++;
+                        else if (!g_textures[hh].pixels) nnopix++;
+                        else if (g_textures[hh].tex && !g_textures[hh].srv) nnosrv++; else nok++;
+                        if (++tot % 4000u == 0u) { fprintf(stderr, "[TEXSTATS] binds=%u zero=%u out_of_range=%u no_pixels=%u no_srv=%u ok=%u last=%u\n",
+                                                           tot, n0, nrange, nnopix, nnosrv, nok, hh); fflush(stderr); }
+                    }
                     if (g_cur_texture_handle > 0 && g_cur_texture_handle < MAX_TEXTURE_HANDLES) {
                         texture_entry_t* tex = &g_textures[g_cur_texture_handle];
                         if (tex->pixels) {
