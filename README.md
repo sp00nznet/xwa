@@ -27,16 +27,17 @@ intermittent crash (see [docs/building.md](docs/building.md)).
 | **Phase 8** | **Complete** | Frontend + concourse rendering — pilot creation, the fully-rendered Azzameen concourse room (backdrop, Emkay droid, holo-globe, animated doors), mouse hover/click input |
 | **Phase 9** | **Complete** | Menu navigation + flight entry — pilot creation → concourse → Combat Simulator → skirmish setup → mission load → flight, with a real 20-flight-group mission and a crash-free flight loop presenting frames |
 | **Phase 10** | **In Progress** | **Visible 3D flight** — texture-mapped spacecraft rendered from the game's own OPT models, in a starfield, with perspective, per-face lighting and backface culling (see *3D Flight* below). Remaining: transparency, full flight-group population, the engine's own camera, audio, game logic |
-| **Phase 11** | **In Progress** | **Single-player campaign** -- mission `1b0m1fw` loads through the engine's own barracks -> loading -> flight route, builds the player craft record, and flies the mission's craft with the real station and hangar models. Remaining: the hangar's Launch, see [docs/campaign.md](docs/campaign.md) |
+| **Phase 11** | **In Progress** | **Single-player campaign** -- mission `1b0m1fw` loads through the engine's own barracks -> loading -> flight route, builds the player craft record, and plays mission 1 end to end: hangar, launch, flight, debrief, the campaign advances and mission 2 loads. See [docs/campaign.md](docs/campaign.md) |
 
 ## Screenshots
 
-**First campaign mission** -- the Azzameen family base and a cargo canister in `1b0m1fw`, drawn
-from the mission's own flight groups:
+**First campaign mission** -- the Azzameen family base in `1b0m1fw` at true model scale, after launch:
 
 ![Campaign: Azzameen station](docs/campaign_station_closeup.png)
 
-![Campaign: correct craft models](docs/campaign_correct_craft_models.png)
+Docked in the family base's hangar before launch (only the player's region is drawn):
+
+![Campaign: family base hangar](docs/campaign_correct_craft_models.png)
 
 **Texture-mapped spacecraft in flight** — rendered from the game's own OPT model data: real faces,
 per-face normals for lighting and backface culling, and the original 1999 textures point-sampled onto
