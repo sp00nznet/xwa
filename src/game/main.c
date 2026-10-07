@@ -365,6 +365,9 @@ void xwa_autoplay_tick(void) {
     slot = MEM32(0x8C1CC8); rec = slot * 0xBCFu;
     pidx = MEM32(rec + 0x8B94E0); region = MEM8(rec + 0x8B94F0);
     if (pidx == 0xFFFFu || pidx > 0x3000u) return;
+    if (getenv("XWA_FLIGHTSHOTS")) {   /* =<ticks>: a picture every N autoplay ticks (1.5 s) in flight */
+        static int fs; int every = atoi(getenv("XWA_FLIGHTSHOTS")); if (every < 1) every = 20;
+        if (++fs % every == 0) { extern volatile int g_shot_req; g_shot_req = 1; } }
     {   /* XWA_WATCHOBJ=n: hardware write-watch on object n's X, to name the code that moves it */
         static int armed; extern void xwa_watch_set(uint32_t);
         if (!armed && getenv("XWA_WATCHGATE")) {   /* Selu's AI countdown, order block +0x32 */
@@ -430,6 +433,15 @@ void xwa_autoplay_tick(void) {
             break; }
         /* "> Launch <" is the hangar menu's default item: ENTER until the launch starts
          * (9C6954 = launch requested). No keys after that -- nothing else should be pressed. */
+        {   static int held;   /* XWA_HANGARHOLD=<ticks of 1.5 s>: sit in the hangar first (to look at it) */
+            if (MEM32(0x9C6750) && getenv("XWA_HANGARHOLD") && held < atoi(getenv("XWA_HANGARHOLD"))) {
+                uint32_t po = MEM32(0x7B33C4) + pidx * 0x27u, cam = slot * 0xBCFu + 0x8BA028u;
+                if (held % 4 == 0) { extern volatile int g_shot_req; g_shot_req = 1; }   /* a picture of the hangar view */
+                if (held++ % 4 == 0) { fprintf(stderr, "[HANGARVIEW] map=0x%X hstate=%u region(rec)=%u player obj %u type %u region %u at (%d,%d,%d) | cam (%d,%d,%d) ypr (%d,%d,%d) | hangar fg(0x68BCC4)=%u\n",
+                    MEM16(0x9C6754), MEM32(0x68BBA0), region, pidx, MEM16(po + 2), MEM8(po + 6), (int32_t)MEM32(po + 7), (int32_t)MEM32(po + 0xB), (int32_t)MEM32(po + 0xF),
+                    (int32_t)MEM32(cam), (int32_t)MEM32(cam + 4), (int32_t)MEM32(cam + 8), (int16_t)MEM16(cam + 0x16), (int16_t)MEM16(cam + 0x14), (int16_t)MEM16(cam + 0x18), MEM16(0x68BCC4));
+                    fflush(stderr); }
+                break; } }
         if (MEM32(0x9C6750) && !MEM32(0x9C6954)) xwa_queue_key(0x1C);
         break;
     case PICK1: case PICK2:
@@ -693,8 +705,9 @@ int g_nrot[4];              /* object orientation: yaw, pitch, roll (XwaObject +
 int g_camrot[4];            /* player craft orientation = camera orientation (cockpit view) */
 
 #define NMESH_MAX 512
-static struct { uint32_t vnode; int obj; int p[3]; int rot[3]; } g_nmesh[NMESH_MAX];
+static struct { uint32_t vnode; int obj; int p[3]; int rot[3]; unsigned seen; } g_nmesh[NMESH_MAX];
 static int g_nmesh_n;
+static unsigned g_npass;     /* render-walk pass; an entry not refreshed in the last one is gone */
 
 static int xwa_blk(uint32_t a) {
     return xwa_readable(a, 0x20) && MEM32(a) == 0u && MEM32(a + 0x14) == a + 0x18u;
@@ -994,7 +1007,7 @@ static int ntex_get(uint32_t node)
 }
 
 /* Per-mesh context shared with nfaces_emit (rendering is single-threaded). */
-static uint32_t nc_vdata, nc_vcnt, nc_tc, nc_tccnt;
+static uint32_t nc_vdata, nc_vcnt, nc_tc, nc_tccnt, nc_vn, nc_vncnt;   /* nc_vn: vertex normals (type 11) */
 static int nc_tex = -1;
 static double nc_relx, nc_rely, nc_relz, nc_k, nc_m[9];
 
@@ -1029,16 +1042,20 @@ static int nmesh_emit(int mi, D3DTLVERTEX* vb, int n, int cap)
     rely = (double)g_nmesh[mi].p[1] - vey;
     relz = (double)g_nmesh[mi].p[2] - vez;
 
-    /* OPT units -> world units. No measurement has pinned this constant, so it stays a knob:
-     * raise it if ships are specks, lower it if one hull fills the screen. */
-    k = getenv("XWA_NSCALE") ? atof(getenv("XWA_NSCALE")) : 0.12;
+    /* OPT units ARE world units (k = 1), measured: FamilyBase.opt spans y -35591..23764 and
+     * z -18925..10942, which encloses the hangar props the engine places in its bay (world
+     * y -4000..-8500, z ~ -5000); the YT-1300 is ~1080 long = 26 m at 40.96 units/m. The old
+     * guess 0.12 shrank the base 8x, so the bay never enclosed the docked camera. XWA_NSCALE stays. */
+    k = getenv("XWA_NSCALE") ? atof(getenv("XWA_NSCALE")) : 1.0;
 
     nc_vdata = vdata; nc_vcnt = vcnt;
-    nc_tc = 0; nc_tccnt = 0;
-    for (a = vdata + vcnt * 12u; a < vdata + 0x8000u; a++) {   /* texture coords: type 13, (u,v) */
-        if (!xwa_blk(a)) continue;
+    nc_tc = 0; nc_tccnt = 0; nc_vn = 0; nc_vncnt = 0;
+    for (a = vdata + vcnt * 12u; a < vdata + 0x8000u; a++) {   /* texture coords: type 13, (u,v); */
+        if (!xwa_blk(a)) continue;                               /* vertex normals: type 11, xyz */
         if (MEM32(a + 4) == 3u) break;
-        if (MEM32(a + 4) == 13u) { nc_tccnt = MEM32(a + 0x10); nc_tc = a + 0x18; break; }
+        if (MEM32(a + 4) == 13u && !nc_tc) { nc_tccnt = MEM32(a + 0x10); nc_tc = a + 0x18; }
+        if (MEM32(a + 4) == 11u && !nc_vn) { nc_vncnt = MEM32(a + 0x10); nc_vn = a + 0x18; }
+        if (nc_tc && nc_vn) break;
     }
     nc_relx = relx; nc_rely = rely; nc_relz = relz; nc_k = k;
     for (a = 0; a < 9; a++) nc_m[a] = m[a];
@@ -1163,9 +1180,13 @@ static int nfaces_emit(uint32_t a, D3DTLVERTEX* vb, int n, int cap)
             }
             fflush(stderr); } }
 
-    for (i = 0; i < fcnt && n + 6 <= cap; i++) {
-        int idx[4], j, nv, bad = 0;
-        double px[4], py[4], pz[4], sx[4], sy[4], sz[4];
+    static double nn = -1;   /* near plane (view units); XWA_NNEAR */
+    const double nf = 1.0e6;
+    if (nn < 0) { nn = getenv("XWA_NNEAR") ? atof(getenv("XWA_NNEAR")) : 16.0; if (nn < 0.1) nn = 16.0; }
+    for (i = 0; i < fcnt && n + 12 <= cap; i++) {
+        int idx[4], j, nv, bad = 0, cn = 0, inside = 0;
+        double px[4], py[4], pz[4], tu[4], tv[4], lt[4];
+        double cx[8], cy[8], cz[8], cu[8], cv[8], cl[8];   /* the face clipped to the near plane */
         idx[0] = (int32_t)MEM32(fp + i*64 + 0);  idx[1] = (int32_t)MEM32(fp + i*64 + 4);
         idx[2] = (int32_t)MEM32(fp + i*64 + 8);  idx[3] = (int32_t)MEM32(fp + i*64 + 12);
         nv = (idx[3] >= 0) ? 4 : 3;
@@ -1181,12 +1202,41 @@ static int nfaces_emit(uint32_t a, D3DTLVERTEX* vb, int n, int cap)
             px[j] = wx*vbx + wy*vby + wz*vbz;       /* world -> view */
             py[j] = wx*vfx + wy*vfy + wz*vfz;
             pz[j] = wx*vux + wy*vuy + wz*vuz;
-            if (py[j] < 0.05) { bad = 1; break; }   /* behind the camera */
-            sx[j] = 400.0 + 640.0 * px[j] / py[j];
-            sy[j] = 300.0 - 640.0 * pz[j] / py[j];
-            sz[j] = 1.0 - 1.0 / (1.0 + py[j]);      /* 0..1 depth, nearer = smaller */
+            tu[j] = tv[j] = 0.0;
+            if (nc_tc && nc_tex >= 0) {             /* face's texcoord indices, 3rd index group */
+                int ti = (int32_t)MEM32(fp + i*64 + 32 + j*4);
+                if (ti >= 0 && (uint32_t)ti < nc_tccnt) {
+                    tu[j] = xwa_f32(nc_tc + (uint32_t)ti * 8u);
+                    tv[j] = xwa_f32(nc_tc + (uint32_t)ti * 8u + 4u);
+                }
+            }
+            lt[j] = -1.0;                           /* smooth (Gouraud) light from the vertex normal, */
+            if (nc_vn) {                            /* the face's 4th index group; faceted otherwise */
+                int ni = (int32_t)MEM32(fp + i*64 + 48 + j*4);
+                if (ni >= 0 && (uint32_t)ni < nc_vncnt) {
+                    double ax = xwa_f32(nc_vn + (uint32_t)ni*12u), ay = xwa_f32(nc_vn + (uint32_t)ni*12u + 4u);
+                    double az = xwa_f32(nc_vn + (uint32_t)ni*12u + 8u);
+                    double bx = nc_m[0]*ax + nc_m[1]*ay + nc_m[2]*az, by = nc_m[3]*ax + nc_m[4]*ay + nc_m[5]*az;
+                    double bz = nc_m[6]*ax + nc_m[7]*ay + nc_m[8]*az, bl = sqrt(bx*bx + by*by + bz*bz);
+                    if (bl > 1e-9) { lt[j] = (0.40*bx - 0.80*by + 0.45*bz) / bl; if (lt[j] < 0.0) lt[j] = 0.0; }
+                }
+            }
+            inside += py[j] >= nn;
         }
-        if (bad) continue;
+        if (!inside) continue;                      /* wholly behind the near plane */
+        /* Clip to py >= near instead of dropping the face: inside the hangar bay nearly every wall
+         * and floor face has a vertex behind the camera, and dropping them opened holes to space. */
+        for (j = 0; j < nv; j++) {
+            int k = (j + 1) % nv, ij = py[j] >= nn, ik = py[k] >= nn;
+            if (ij) { cx[cn] = px[j]; cy[cn] = py[j]; cz[cn] = pz[j]; cu[cn] = tu[j]; cv[cn] = tv[j]; cl[cn] = lt[j]; cn++; }
+            if (ij != ik) {
+                double t = (nn - py[j]) / (py[k] - py[j]);
+                cx[cn] = px[j] + t * (px[k] - px[j]); cy[cn] = nn; cz[cn] = pz[j] + t * (pz[k] - pz[j]);
+                cu[cn] = tu[j] + t * (tu[k] - tu[j]); cv[cn] = tv[j] + t * (tv[k] - tv[j]);
+                cl[cn] = (lt[j] < 0.0 || lt[k] < 0.0) ? -1.0 : lt[j] + t * (lt[k] - lt[j]); cn++;
+            }
+        }
+        if (cn < 3) continue;
         {   /* The model stores a real normal per face: use it to cull backfaces and to shade,
              * instead of guessing from the winding. */
             double nx = xwa_f32(fnorm + i*12 + 0), ny = xwa_f32(fnorm + i*12 + 4);
@@ -1210,20 +1260,24 @@ static int nfaces_emit(uint32_t a, D3DTLVERTEX* vb, int n, int cap)
             if (sh > 255) sh = 255;
             col = 0xFF000000u | ((uint32_t)sh << 16) | ((uint32_t)sh << 8) | (uint32_t)(sh + 20);
             if (getenv("XWA_TEXONLY")) col = 0xFFFFFFFFu;   /* raw texture, no shading */
-            for (j = 0; j < nv - 2; j++) {          /* fan: (0,1,2) then (0,2,3) */
+            for (j = 0; j < cn - 2; j++) {          /* fan: (0,1,2), (0,2,3), ... */
                 int t[3], q; t[0] = 0; t[1] = j + 1; t[2] = j + 2;
                 for (q = 0; q < 3; q++) {
-                    int sidx = t[q];
-                    vb[n].sx = (float)sx[sidx]; vb[n].sy = (float)sy[sidx]; vb[n].sz = (float)sz[sidx];
-                    vb[n].rhw = 1.0f; vb[n].diffuse = col; vb[n].specular = 0;
-                    vb[n].tu = 0.0f; vb[n].tv = 0.0f;
-                    if (nc_tc && nc_tex >= 0) {          /* face's texcoord indices, 3rd index group */
-                        int ti = (int32_t)MEM32(fp + i*64 + 32 + sidx*4);
-                        if (ti >= 0 && (uint32_t)ti < nc_tccnt) {
-                            vb[n].tu = xwa_f32(nc_tc + (uint32_t)ti * 8u);
-                            vb[n].tv = xwa_f32(nc_tc + (uint32_t)ti * 8u + 4u);
-                        }
+                    int c = t[q];
+                    vb[n].sx = (float)(400.0 + 640.0 * cx[c] / cy[c]);
+                    vb[n].sy = (float)(300.0 - 640.0 * cz[c] / cy[c]);
+                    /* Standard D3D depth with a real near plane. The old 1-1/(1+d) was a near
+                     * plane of 1 unit: at station range neighbouring hull faces got the same
+                     * 24-bit depth and z-fought (the "tearing"). */
+                    vb[n].sz = (float)(nf / (nf - nn) * (1.0 - nn / cy[c]));
+                    vb[n].rhw = (float)(1.0 / cy[c]);   /* real 1/w: perspective-correct texturing */
+                    vb[n].diffuse = col; vb[n].specular = 0;
+                    if (cl[c] >= 0.0 && !getenv("XWA_TEXONLY") && !getenv("XWA_NFLAT")) {
+                        int vs = (nc_tex >= 0) ? (int)(150.0 + 105.0 * cl[c]) : (int)(50.0 + 170.0 * cl[c]);
+                        if (vs > 235) vs = 235;
+                        vb[n].diffuse = 0xFF000000u | ((uint32_t)vs << 16) | ((uint32_t)vs << 8) | (uint32_t)(vs + 20);
                     }
+                    vb[n].tu = (float)cu[c]; vb[n].tv = (float)cv[c];
                     n++;
                 }
             }
@@ -1246,6 +1300,7 @@ static int nmesh_add(uint32_t vnode, const int* pos, const int* rot, int obj)
         if (g_nmesh[i].vnode == vnode && g_nmesh[i].obj == obj) {
             g_nmesh[i].p[0] = pos[0]; g_nmesh[i].p[1] = pos[1]; g_nmesh[i].p[2] = pos[2];
             g_nmesh[i].rot[0] = rot[0]; g_nmesh[i].rot[1] = rot[1]; g_nmesh[i].rot[2] = rot[2];
+            g_nmesh[i].seen = g_npass;
             return 0;                                  /* already known -- just moved */
         }
     if (g_nmesh_n >= NMESH_MAX) return 0;
@@ -1253,6 +1308,7 @@ static int nmesh_add(uint32_t vnode, const int* pos, const int* rot, int obj)
     g_nmesh[g_nmesh_n].obj    = obj;
     g_nmesh[g_nmesh_n].p[0]   = pos[0]; g_nmesh[g_nmesh_n].p[1] = pos[1]; g_nmesh[g_nmesh_n].p[2] = pos[2];
     g_nmesh[g_nmesh_n].rot[0] = rot[0]; g_nmesh[g_nmesh_n].rot[1] = rot[1]; g_nmesh[g_nmesh_n].rot[2] = rot[2];
+    g_nmesh[g_nmesh_n].seen = g_npass;
     g_nmesh_n++;
     return 1;
 }
@@ -1327,6 +1383,30 @@ void xwa_native_object(unsigned type, int px, int py, int pz, int yaw, int pitch
         if (obj <= last) xwa_native_flush();
         last = obj;
     }
+    {   /* Only the player's region. Regions share one coordinate space, so the docked player's
+         * hangar (region 2) and the station's exterior (region 0) overlapped on screen.
+         * XWA_NALLREGIONS keeps the old everything-at-once view. */
+        uint32_t tb = MEM32(0x7B33C4), rec = MEM32(0x8C1CC8) * 0xBCFu;
+        if (!getenv("XWA_NALLREGIONS") && tb && obj >= 0 && xwa_readable(tb + (uint32_t)obj * 0x27u, 0x27)
+            && xwa_readable(rec + 0x8B94F0u, 1) && MEM8(tb + (uint32_t)obj * 0x27u + 6) != MEM8(rec + 0x8B94F0u))
+            return;
+        /* The camera is the cockpit: the player's own hull (a YT-1300 is ~1080 units long, the eye
+         * sits ~170 from its centre) filled the view from inside. XWA_NOWNSHIP=1 draws it anyway. */
+        if (!getenv("XWA_NOWNSHIP") && !getenv("XWA_NLOOKAT") && xwa_readable(rec + 0x8B94E0u, 4)
+            && (uint32_t)obj == MEM32(rec + 0x8B94E0u))
+            return;
+    }
+    if (getenv("XWA_NEARLOG")) {   /* what is drawn within 3000 units of the camera, once per (obj,type) */
+        static uint32_t seen[64]; int k; uint32_t key = ((uint32_t)obj << 12) ^ type;
+        double dx = px - (double)g_np[3], dy = py - (double)g_np[4], dz = pz - (double)g_np[5];
+        if (dx*dx + dy*dy + dz*dz < 9.0e6) {
+            for (k = 0; k < 64 && seen[k] && seen[k] != key; k++) ;
+            if (k < 64 && !seen[k]) { uint32_t rec = MEM32(0x8C1CC8) * 0xBCFu, tb = MEM32(0x7B33C4);
+                seen[k] = key;
+                fprintf(stderr, "[NEAR] obj %d type 0x%X region %u at (%d,%d,%d) cam (%d,%d,%d) | player obj %u region %u\n", obj, type,
+                        tb ? MEM8(tb + (uint32_t)obj * 0x27u + 6) : 0xFFu, px, py, pz, g_np[3], g_np[4], g_np[5],
+                        MEM32(rec + 0x8B94E0u), MEM8(rec + 0x8B94F0u)); fflush(stderr); } }
+    }
     img = xwa_model_for_type(type);
     root = img ? xwa_opt_root(img) : 0u;
     /* An OPT holds SEVERAL mesh roots (an X-wing is 5: fuselage plus wings). The count sits at
@@ -1398,6 +1478,13 @@ void xwa_native_flush(void)
     static D3DTLVERTEX vb[32768];
     int i, n = 0;
 
+    {   /* keep only what the pass that just ended walked: objects that left the walk (another
+         * region, destroyed, the hangar after launch) were drawn forever where last seen */
+        int k = 0;
+        for (i = 0; i < g_nmesh_n; i++) if (g_nmesh[i].seen == g_npass) g_nmesh[k++] = g_nmesh[i];
+        if (k) g_nmesh_n = k;   /* an empty pass (between screens) keeps the last scene */
+        g_npass++;
+    }
     d3d11_native_reset();
     nview_build();
     n = nstars_emit(vb, n, (int)(sizeof vb / sizeof vb[0]));

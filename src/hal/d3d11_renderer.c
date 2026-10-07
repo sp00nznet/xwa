@@ -951,7 +951,7 @@ static void d3d11_flush_native(void) {
             if (SUCCEEDED(ID3D11DeviceContext_Map(g_context, (ID3D11Resource*)g_cb_viewport, 0,
                                                   D3D11_MAP_WRITE_DISCARD, 0, &cb))) {
                 float* f = (float*)cb.pData;
-                f[0] = (float)g_vp_width; f[1] = (float)g_vp_height; f[2] = 2.0f; f[3] = 0.0f;
+                f[0] = (float)g_vp_width; f[1] = (float)g_vp_height; f[2] = 2.0f; f[3] = 1.0f;   /* persp */
                 ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_cb_viewport, 0);
             }
             for (b = 0; b < nbatch; b++) {
@@ -972,6 +972,7 @@ static void d3d11_flush_native(void) {
                 ID3D11DeviceContext_Draw(g_context, (UINT)g_native_batch[b].count,
                                          (UINT)g_native_batch[b].start);
             }
+            push_viewport_cb();   /* back to the game's own state (persp = 0) */
         }
         g_draw_calls++;
         g_total_triangles += (uint32_t)(count / 3);

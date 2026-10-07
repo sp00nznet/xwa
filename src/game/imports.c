@@ -2165,12 +2165,15 @@ static void bridge_timeSetEvent_005A92A0(void) { /* WINMM.dll:timeSetEvent (5 ar
     BRIDGE_TRACE("WINMM.dll:timeSetEvent");
     static STDFN5 fn = NULL;
     if (!fn) fn = (STDFN5)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeSetEvent");
-    uint32_t a0 = MEM32(g_esp + 4);
-    uint32_t a1 = MEM32(g_esp + 8);
     uint32_t a2 = MEM32(g_esp + 12);
-    uint32_t a3 = MEM32(g_esp + 16);
-    uint32_t a4 = MEM32(g_esp + 20);
-    if (fn) g_eax = fn(a0, a1, a2, a3, a4);
+    /* a2 is a GUEST callback (0x592C3B). Handing it to WinMM made the timer thread execute guest
+     * memory as native code: an access violation per tick, contained once, fatal when the timer
+     * fired again before the game killed it. Guest code cannot run on another thread here anyway
+     * (one shared register file), so create no native timer and return a fake, nonzero id. */
+    static uint32_t fake = 0x7E000000u;
+    (void)fn;
+    { static int lg; if (lg++ < 3) { fprintf(stderr, "[TIMER] timeSetEvent(cb=0x%08X) -> no native timer, id 0x%08X\n", a2, fake + 1); fflush(stderr); } }
+    g_eax = ++fake;
     g_esp += 24;
 }
 
@@ -2304,7 +2307,8 @@ static void bridge_timeKillEvent_005A92C8(void) { /* WINMM.dll:timeKillEvent (1 
     static STDFN1 fn = NULL;
     if (!fn) fn = (STDFN1)GetProcAddress(LoadLibraryA("WINMM.dll"), "timeKillEvent");
     uint32_t a0 = MEM32(g_esp + 4);
-    if (fn) g_eax = fn(a0);
+    if ((a0 & 0xFF000000u) == 0x7E000000u) g_eax = 0;   /* our fake timeSetEvent ids */
+    else if (fn) g_eax = fn(a0);
     g_esp += 8;
 }
 
