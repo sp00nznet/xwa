@@ -1360,7 +1360,8 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
                     if (getenv("XWA_TEXSTATS")) {   /* why the engine's own 3D draws come out untextured */
                         static unsigned n0, nrange, nnopix, nnosrv, nok, tot;
                         uint32_t hh = st->dwArg;
-                        if (!hh) n0++; else if (hh >= MAX_TEXTURE_HANDLES) nrange++;
+                        if (!hh) n0++; else if (hh >= MAX_TEXTURE_HANDLES) { if (nrange++ < 12u) {
+                            fprintf(stderr, "[TEXSTATS] out-of-range handle 0x%08X (binds so far %u)\n", hh, tot); fflush(stderr); } }
                         else if (!g_textures[hh].pixels) nnopix++;
                         else if (g_textures[hh].tex && !g_textures[hh].srv) nnosrv++; else nok++;
                         if (++tot % 4000u == 0u) { fprintf(stderr, "[TEXSTATS] binds=%u zero=%u out_of_range=%u no_pixels=%u no_srv=%u ok=%u last=%u\n",
