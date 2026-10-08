@@ -39,6 +39,10 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 - README restructured to the house layout; deep-dive sections moved into `docs/`.
 
 ### Fixed
+- Mission 2 bound texture handle 0xDEAD0000 (a leaked dummy return address): the COM mock heap
+  was growable, its later segments landed above 0x40000000, and the lifter's `LINK_OK()` guard
+  on the texture cache's QueryInterface/GetHandle/Load calls skipped them as "success". The heap
+  is now a fixed 128 MB reservation. `XWA_TEXSTATS` scans memory for the first bad handle it sees.
 - HUD text and other colour-keyed textures drew on black boxes: the key (black) only became
   transparent if the colour key happened to be on when the texture was first uploaded, and the
   shader never tested it. Black texels now carry alpha 0 and are discarded while

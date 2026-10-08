@@ -102,14 +102,23 @@ static HANDLE g_com_heap = NULL;
 
 static void* com_alloc(size_t size) {
     if (!g_com_heap) {
-        g_com_heap = HeapCreate(0, 0x10000, 0);
+        /* Fixed-size (reserved up front, low in the address space): a growable heap adds
+         * segments wherever VirtualAlloc lands, and the lifter's LINK_OK() guard on game COM
+         * calls rejects objects at >= 0x40000000 -- the texture-cache Load/QueryInterface/
+         * GetHandle calls were then silently skipped and the game bound its uninitialised
+         * handle (0xDEAD0000), so mission 2's craft drew flat white/grey.
+         * ponytail: 128 MB cap, blocks > ~512 KB fail in a fixed heap (none here: objects + vtables). */
+        g_com_heap = HeapCreate(0, 0x10000, 128u << 20);
         if (!g_com_heap) {
             COM_LOG("[COM] FATAL: failed to create COM heap\n");
             return NULL;
         }
         COM_LOG("[COM] Created dedicated COM heap at %p\n", (void*)g_com_heap);
     }
-    return HeapAlloc(g_com_heap, HEAP_ZERO_MEMORY, size);
+    void* p = HeapAlloc(g_com_heap, HEAP_ZERO_MEMORY, size);
+    if (!p || !LINK_OK((uint32_t)(uintptr_t)p)) { static int _n; if (_n++ < 5) {
+        fprintf(stderr, "[COM] !! com_alloc(%u) -> %p: outside what LINK_OK accepts\n", (unsigned)size, p); fflush(stderr); } }
+    return p;
 }
 
 /* Allocate a vtable (array of uint32_t marker values) */

@@ -1363,6 +1363,19 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
                     if (getenv("XWA_TEXSTATS")) {   /* why the engine's own 3D draws come out untextured */
                         static unsigned n0, nrange, nnopix, nnosrv, nok, tot;
                         uint32_t hh = st->dwArg;
+                        if (hh >= MAX_TEXTURE_HANDLES && !nrange) {   /* where does the bad handle live? */
+                            MEMORY_BASIC_INFORMATION mbi; uint8_t* p = (uint8_t*)0x10000; int hits = 0;
+                            while (hits < 24 && VirtualQuery(p, &mbi, sizeof mbi) && (uintptr_t)p < 0x7FFF0000u) {
+                                if (mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE)) &&
+                                    !(mbi.Protect & PAGE_GUARD))
+                                    for (uint32_t* q = (uint32_t*)mbi.BaseAddress; (uint8_t*)(q + 1) <= (uint8_t*)mbi.BaseAddress + mbi.RegionSize && hits < 24; q++)
+                                        if (*q == hh && (uint8_t*)q != (uint8_t*)&hh) { hits++;
+                                            fprintf(stderr, "[TEXSTATS] 0x%08X at %p: %08X %08X %08X %08X [%08X] %08X %08X %08X\n", hh, (void*)q,
+                                                    q[-4], q[-3], q[-2], q[-1], q[0], q[1], q[2], q[3]); }
+                                p = (uint8_t*)mbi.BaseAddress + mbi.RegionSize;
+                            }
+                            fflush(stderr);
+                        }
                         if (!hh) n0++; else if (hh >= MAX_TEXTURE_HANDLES) { if (nrange++ < 12u) {
                             fprintf(stderr, "[TEXSTATS] out-of-range handle 0x%08X (binds so far %u)\n", hh, tot); fflush(stderr); } }
                         else if (!g_textures[hh].pixels) nnopix++;
