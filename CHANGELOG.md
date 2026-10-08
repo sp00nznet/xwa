@@ -39,6 +39,11 @@ SemVer. No release has been tagged yet; everything so far is `Unreleased`.
 - README restructured to the house layout; deep-dive sections moved into `docs/`.
 
 ### Fixed
+- HUD text and other colour-keyed textures drew on black boxes: the key (black) only became
+  transparent if the colour key happened to be on when the texture was first uploaded, and the
+  shader never tested it. Black texels now carry alpha 0 and are discarded while
+  `COLORKEYENABLE` is on. Texture surfaces also remember their pixel format (an ARGB1555 request
+  decodes as 1555); `SetColorKey` no longer overwrites the remembered caps.
 - Flight textures: the game's own 3D draws (cockpit, HUD text, nearby craft) came out flat white/grey
   once more than 256 textures had been created -- the renderer's handle table was capped at 256 and
   handles were never reused. Handles now belong to the surface and are recycled when it is released.

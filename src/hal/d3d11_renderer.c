@@ -98,7 +98,7 @@ static void push_viewport_cb(void) {
         d[0] = (float)g_vp_width;
         d[1] = (float)g_vp_height;
         d[2] = (float)g_cur_texmapblend;
-        d[3] = 0.0f;
+        d[3] = g_cur_colorkey ? 2.0f : 0.0f;   /* 2: discard transparent (colour-keyed) texels */
         ID3D11DeviceContext_Unmap(g_context, (ID3D11Resource*)g_cb_viewport, 0);
     }
 }
@@ -165,11 +165,14 @@ static void create_texture_from_pixels(texture_entry_t* tex) {
         uint32_t* dst = rgba + y * w;
         for (uint32_t x = 0; x < w; x++) {
             uint16_t c = src[x];
-            uint32_t r = ((c >> 11) & 0x1F) * 255 / 31;
-            uint32_t g = ((c >> 5) & 0x3F) * 255 / 63;
-            uint32_t b = (c & 0x1F) * 255 / 31;
-            /* Color key: treat pure black (0x0000) as transparent if colorkey enabled */
-            uint32_t a = (c == 0 && g_cur_colorkey) ? 0 : 255;
+            uint32_t r, g, b, a;
+            if (tex->bpp == 15) {   /* ARGB1555: what Lock reports for texture surfaces */
+                r = ((c >> 10) & 0x1F) * 255 / 31; g = ((c >> 5) & 0x1F) * 255 / 31;
+                b = (c & 0x1F) * 255 / 31; a = (c & 0x8000) ? 255 : 0;
+            } else {
+                r = ((c >> 11) & 0x1F) * 255 / 31; g = ((c >> 5) & 0x3F) * 255 / 63;
+                b = (c & 0x1F) * 255 / 31; a = c ? 255 : 0;   /* black = the colour key */
+            }
             dst[x] = (a << 24) | (r << 16) | (g << 8) | b;
         }
     }
@@ -1414,6 +1417,7 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
 
                 case D3DRENDERSTATE_COLORKEYENABLE:
                     g_cur_colorkey = st->dwArg;
+                    push_viewport_cb();
                     break;
 
                 case D3DRENDERSTATE_TEXTUREMAPBLEND:

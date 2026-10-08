@@ -456,7 +456,14 @@ static void dd_CreateSurface(void) {
          * span forever. Record the real bpp. */
         surf->extra[3] = bpp;
         surf->extra[4] = w * (bpp / 8);
-        surf->extra[5] = caps;   /* remembered so Lock can report a texture pixel format */
+        surf->extra[21] = caps;   /* remembered so Lock can report a texture pixel format */
+        /* extra[22]: the pixels are ARGB1555 -- what the game asked for, else what Lock reports.
+         * (extra[5] held the caps too, until SetColorKey overwrote it with the key.) */
+        if (flags & 0x1000u) surf->extra[22] = MEM32(pDesc + 0x48 + 0x1C) == 0x8000u;
+        else surf->extra[22] = (caps & 0x1000u) != 0;
+        if ((caps & 0x1000u) && getenv("XWA_TEXSTATS")) { static int _pf; if (_pf++ < 12) {
+            fprintf(stderr, "[TEXFMT] %ux%u pf=%d flags=0x%X R=0x%X A=0x%X -> 1555=%u\n", w, h, (flags & 0x1000u) != 0,
+                    MEM32(pDesc + 0x48 + 4), MEM32(pDesc + 0x48 + 0x10), MEM32(pDesc + 0x48 + 0x1C), surf->extra[22]); fflush(stderr); } }
     }
 
     MEM32(ppSurf) = (uint32_t)(uintptr_t)surf;
@@ -800,7 +807,7 @@ static void dds_Lock(void) {
          * flight frame loop (8 frames in 480s). Texture surfaces report ARGB1555 so the alpha
          * scan terminates; everything else reports RGB565. */
         uint32_t pf = pDesc + 0x48;
-        int is_tex = (surf->extra[5] & 0x1000u) != 0;   /* DDSCAPS_TEXTURE */
+        int is_tex = (surf->extra[21] & 0x1000u) != 0;   /* DDSCAPS_TEXTURE */
         MEM32(pf + 0x00) = 32;                                  /* dwSize */
         MEM32(pf + 0x04) = is_tex ? (0x40u | 0x01u) : 0x40u;    /* DDPF_RGB [| DDPF_ALPHAPIXELS] */
         MEM32(pf + 0x08) = 0;                                   /* dwFourCC */
@@ -2024,7 +2031,7 @@ static void d3dtex_GetHandle(void) {
                 surf->extra[1],   /* width */
                 surf->extra[2],   /* height */
                 surf->extra[4],   /* pitch */
-                surf->extra[3]    /* bpp */
+                surf->extra[22] ? 15 : surf->extra[3]   /* bpp; ponytail: 15 means ARGB1555 */
             );
         } else {
             d3d11_register_texture(handle, NULL, 0, 0, 0, 0);   /* a recycled handle: drop the old pixels */
