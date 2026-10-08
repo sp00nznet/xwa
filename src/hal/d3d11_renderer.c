@@ -1398,6 +1398,11 @@ void d3d11_execute(uint8_t* buffer_data, uint32_t vertex_offset, uint32_t vertex
                         } else {
                             ID3D11DeviceContext_PSSetShader(g_context, g_ps_solid, NULL, 0);
                         }
+                    } else if (getenv("XWA_ZEROMAGENTA")) {   /* diagnostic: show what the game draws untextured */
+                        static uint16_t px = 0xF81F; static texture_entry_t mag = { (uint8_t*)&px, 1, 1, 2, 16 };
+                        if (!mag.srv) create_texture_from_pixels(&mag);
+                        ID3D11DeviceContext_PSSetShaderResources(g_context, 0, 1, &mag.srv);
+                        ID3D11DeviceContext_PSSetShader(g_context, g_ps_textured, NULL, 0);
                     } else {
                         ID3D11DeviceContext_PSSetShader(g_context, g_ps_solid, NULL, 0);
                     }
