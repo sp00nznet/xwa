@@ -8,8 +8,11 @@ HAL with a Direct3D 11 renderer. You supply your own copy of the game; nothing f
 
 **Alpha.** Boots, runs the full frontend, and flies the first single-player campaign mission
 (`1b0m1fw`, the Azzameen family-station mission) in the mission's own craft, the YT-1300, with the
-game's own HUD and objectives. Not playable end to end yet: the hangar launch is not driven, and
-audio and much game logic are untested.
+game's own HUD and objectives. Mission 1 plays through end to end under autoplay: hangar, launch,
+flight, debrief, and the campaign advances to mission 2, which loads and flies. Textured cockpit
+and craft, colour-keyed HUD text. Open: a few mission-2 craft draw untextured (the game binds
+texture handle 0 for them), mission 2 is not autoplayed, and audio and much game logic are
+untested.
 
 Regression suite (`tools/run_tests.sh`): **23 passed, 1 failed** -- the failure is a known
 intermittent crash (see [docs/building.md](docs/building.md)).
