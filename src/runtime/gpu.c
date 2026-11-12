@@ -388,6 +388,9 @@ static void upload(layer_t* L, const uint8_t* bits, int w, int h, int pitch, int
         if (bpp == 8) {
             const uint8_t* s = bits + (size_t)y * pitch;
             for (int x = 0; x < w; x++) d[x] = lut8[s[x]];
+        } else if (bpp == 32) {   /* X8R8G8B8 */
+            const uint32_t* s = (const uint32_t*)(bits + (size_t)y * pitch);
+            for (int x = 0; x < w; x++) d[x] = (int)(s[x] & 0xFFFFFF) == key ? 0 : 0xFF000000u | s[x];
         } else {
             const uint16_t* s = (const uint16_t*)(bits + (size_t)y * pitch);
             for (int x = 0; x < w; x++) d[x] = (int)s[x] == key ? 0 : lut16[s[x]];
@@ -399,7 +402,7 @@ static void upload(layer_t* L, const uint8_t* bits, int w, int h, int pitch, int
 void gpu_frame_2d(const uint8_t* bits, int w, int h, int pitch, int bpp, const PALETTEENTRY* pal, int key) {
     if (!g_ok) return;
     upload(&g_l2d, bits, w, h, pitch, bpp, pal, key);
-    g_2d_keyed = key >= 0 && bpp == 16;
+    g_2d_keyed = key >= 0 && bpp >= 16;
 }
 
 static void quad(ID3D11ShaderResourceView* srv, const RECT* r, int sw, int sh, int keyed, int layer3d,

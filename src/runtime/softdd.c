@@ -85,6 +85,11 @@ static void pixfmt_bpp(DDPIXELFORMAT* pf, int bpp) {
         return;
     }
     pf->dwFlags = DDPF_RGB;
+    if (bpp == 32) {   /* XWA flies in X8R8G8B8 */
+        pf->dwRGBBitCount = 32;
+        pf->dwRBitMask = 0xFF0000, pf->dwGBitMask = 0xFF00, pf->dwBBitMask = 0xFF;
+        return;
+    }
     pf->dwRGBBitCount = 16;
     pf->dwRBitMask = 0xF800;
     pf->dwGBitMask = 0x07E0;
@@ -132,7 +137,7 @@ static BITMAPINFO* bmi_of(Surf* s) {
     return s->bpp == 8 ? bmi8(s->w, s->h) : bmi565(s->w, s->h);
 }
 static void surf_pixfmt(Surf* s, DDPIXELFORMAT* pf) {
-    pixfmt_bpp(pf, s->bpp == 8 ? 8 : 16);
+    pixfmt_bpp(pf, s->bpp);
     if (s->bpp != 8) {
         pf->dwRGBBitCount = s->bpp;
         pf->dwRBitMask = s->rmask, pf->dwGBitMask = s->gmask, pf->dwBBitMask = s->bmask;
@@ -152,6 +157,7 @@ static Surf* surf_new(int w, int h, DWORD caps) {
     s->tex = &d3d_texture_vt;
     s->bpp = g_bpp;
     if (s->bpp == 16) s->rmask = 0xF800, s->gmask = 0x07E0, s->bmask = 0x001F;
+    if (s->bpp == 32) s->rmask = 0xFF0000, s->gmask = 0xFF00, s->bmask = 0xFF;
     if (g_new_fmt && g_new_fmt->dwRGBBitCount) {
         s->bpp = (int)g_new_fmt->dwRGBBitCount;
         s->rmask = g_new_fmt->dwRBitMask, s->gmask = g_new_fmt->dwGBitMask, s->bmask = g_new_fmt->dwBBitMask;
@@ -224,7 +230,7 @@ void softdd_shot(const char* path) {
 }
 static void write_shot(Surf* s) {
     BITMAPINFO* bi = bmi_of(s);
-    DWORD hsize = sizeof(BITMAPINFOHEADER) + (s->bpp == 8 ? 256 * 4 : 12), size = (DWORD)s->pitch * s->h;
+    DWORD hsize = sizeof(BITMAPINFOHEADER) + (s->bpp == 8 ? 256 * 4 : s->bpp == 16 ? 12 : 0), size = (DWORD)s->pitch * s->h;
     BITMAPFILEHEADER fh = { 0x4D42, sizeof fh + hsize + size, 0, 0, sizeof fh + hsize };
     FILE* f = fopen(g_shot_path, "wb");
     if (!f) return;
@@ -330,14 +336,16 @@ static void blit(Surf* dst, RECT dr, Surf* src, RECT sr, int keyed, DWORD lo, DW
             }
             return;
         }
-        for (int k = 0; k < dh; k++) {
-            int y = up ? dh - 1 - k : k;
-            uint16_t* dp = (uint16_t*)(dst->bits + (dr.top + y) * dst->pitch) + dr.left;
-            uint16_t* sp = (uint16_t*)(src->bits + (sr.top + y) * src->pitch) + sr.left;
-            if (!keyed) { memmove(dp, sp, dw * 2); continue; }
-            for (int x = 0; x < dw; x++)
-                if (sp[x] < lo || sp[x] > hi) dp[x] = sp[x];
+#define ROWS(T) for (int k = 0; k < dh; k++) {                                   \
+            int y = up ? dh - 1 - k : k;                                          \
+            T* dp = (T*)(dst->bits + (dr.top + y) * dst->pitch) + dr.left;        \
+            T* sp = (T*)(src->bits + (sr.top + y) * src->pitch) + sr.left;        \
+            if (!keyed) { memmove(dp, sp, dw * sizeof(T)); continue; }            \
+            for (int x = 0; x < dw; x++)                                          \
+                if (sp[x] < lo || sp[x] > hi) dp[x] = sp[x];                      \
         }
+        if (dst->bpp == 32) ROWS(uint32_t) else ROWS(uint16_t)
+#undef ROWS
         return;
     }
     /* Stretch, nearest neighbour, clipped per pixel. */
@@ -355,20 +363,22 @@ static void blit(Surf* dst, RECT dr, Surf* src, RECT sr, int keyed, DWORD lo, DW
         }
         return;
     }
-    for (int y = 0; y < dh; y++) {
-        int ty = dr.top + y, fy = sr.top + y * sh / dh;
-        if (ty < 0 || ty >= dst->h || fy < 0 || fy >= src->h) continue;
-        uint16_t* dp = (uint16_t*)(dst->bits + ty * dst->pitch);
-        uint16_t* sp = (uint16_t*)(src->bits + fy * src->pitch);
-        for (int x = 0; x < dw; x++) {
-            int tx = dr.left + x, fx = sr.left + x * sw / dw;
-            if (tx < 0 || tx >= dst->w || fx < 0 || fx >= src->w) continue;
-            if (!keyed || sp[fx] < lo || sp[fx] > hi) dp[tx] = sp[fx];
-        }
+#define ROWS(T) for (int y = 0; y < dh; y++) {                                   \
+        int ty = dr.top + y, fy = sr.top + y * sh / dh;                           \
+        if (ty < 0 || ty >= dst->h || fy < 0 || fy >= src->h) continue;           \
+        T* dp = (T*)(dst->bits + ty * dst->pitch);                                \
+        T* sp = (T*)(src->bits + fy * src->pitch);                                \
+        for (int x = 0; x < dw; x++) {                                            \
+            int tx = dr.left + x, fx = sr.left + x * sw / dw;                     \
+            if (tx < 0 || tx >= dst->w || fx < 0 || fx >= src->w) continue;       \
+            if (!keyed || sp[fx] < lo || sp[fx] > hi) dp[tx] = sp[fx];            \
+        }                                                                         \
     }
+    if (dst->bpp == 32) ROWS(uint32_t) else ROWS(uint16_t)
+#undef ROWS
 }
 
-static void fill(Surf* s, RECT r, uint16_t c) {
+static void fill(Surf* s, RECT r, uint32_t c) {
     if (r.left < 0) r.left = 0;
     if (r.top < 0) r.top = 0;
     if (r.right > s->w) r.right = s->w;
@@ -378,8 +388,13 @@ static void fill(Surf* s, RECT r, uint16_t c) {
             if (r.right > r.left) memset(s->bits + y * s->pitch + r.left, (uint8_t)c, r.right - r.left);
             continue;
         }
+        if (s->bpp == 32) {
+            uint32_t* p = (uint32_t*)(s->bits + y * s->pitch);
+            for (int x = r.left; x < r.right; x++) p[x] = c;
+            continue;
+        }
         uint16_t* p = (uint16_t*)(s->bits + y * s->pitch);
-        for (int x = r.left; x < r.right; x++) p[x] = c;
+        for (int x = r.left; x < r.right; x++) p[x] = (uint16_t)c;
     }
 }
 
@@ -447,7 +462,7 @@ static HRESULT WINAPI s_Blt(IDirectDrawSurface* This, LPRECT dr, LPDIRECTDRAWSUR
     ddlog("Blt", This);
     RECT d = dr ? *dr : full(SELF);
     if (flags & DDBLT_COLORFILL) {
-        fill(SELF, d, (uint16_t)fx->dwFillColor);
+        fill(SELF, d, fx->dwFillColor);
     } else if (src) {
         Surf* s = as_surf(src);
         RECT r = sr ? *sr : full(s);
@@ -862,7 +877,7 @@ static HRESULT WINAPI d_SetCooperativeLevel(IDirectDraw* This, HWND w, DWORD f) 
 }
 static HRESULT WINAPI d_SetDisplayMode(IDirectDraw* This, DWORD w, DWORD h, DWORD bpp) {
     fprintf(stderr, "[softdd] SetDisplayMode(%lu, %lu, %lu): the desktop is left alone\n", w, h, bpp);
-    if (bpp != 16 && bpp != 8) return DDERR_INVALIDMODE;
+    if (bpp != 16 && bpp != 8 && bpp != 32) return DDERR_INVALIDMODE;
     g_bpp = (int)bpp;
     SELF->w = (int)w;
     SELF->h = (int)h;

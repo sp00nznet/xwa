@@ -439,11 +439,11 @@ static volatile DWORD g_key_until[256];      /* DIK code -> tick it is held unti
 static volatile DWORD g_vk_until[256];       /* the same, by virtual key */
 /* Key presses and releases for buffered reads (GetDeviceData). */
 static CRITICAL_SECTION g_evq_lock;
-static struct { DWORD ofs, data; } g_evq[64];
+static struct { DWORD ofs, data, t; } g_evq[64];
 static int g_evq_n;
 static void evq_push(DWORD dik, DWORD data) {
     EnterCriticalSection(&g_evq_lock);
-    if (g_evq_n < 64) { g_evq[g_evq_n].ofs = dik; g_evq[g_evq_n].data = data; g_evq_n++; }
+    if (g_evq_n < 64) { g_evq[g_evq_n].ofs = dik; g_evq[g_evq_n].data = data; g_evq[g_evq_n].t = GetTickCount(); g_evq_n++; }
     LeaveCriticalSection(&g_evq_lock);
 }
 static volatile LONG g_cur_x = 320, g_cur_y = 240;
@@ -672,6 +672,9 @@ static HRESULT WINAPI hook_GetDeviceData(void* dev, DWORD size, void* od, DWORD*
         EnterCriticalSection(&g_evq_lock);
         int k = 0;
         while (k < g_evq_n && *n < room) {
+            /* A key from a screen that never read the buffer (XWA's front end)
+             * is stale: it would open the in-flight menu at launch. */
+            if (GetTickCount() - g_evq[k].t > 1000) { k++; continue; }
             DWORD* r = (DWORD*)((uint8_t*)od + *n * size);
             r[0] = g_evq[k].ofs; r[1] = g_evq[k].data; r[2] = GetTickCount(); r[3] = seq++;
             (*n)++, k++;
