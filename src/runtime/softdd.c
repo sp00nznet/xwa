@@ -241,6 +241,20 @@ static void write_shot(Surf* s) {
     fprintf(stderr, "[shot] frame %ld %dx%dx%d -> %s\n", softdd_frames, s->w, s->h, s->bpp, g_shot_path);
 }
 
+/* XWA's in-flight menu draws 16-bit pixels into the 32-bit flight surface
+ * (at its 32-bit pitch). True X8R8G8B8 has one top byte throughout; 565
+ * pairs do not. ponytail: a content check, a game flag if one turns up. */
+static int looks16(Surf* s) {
+    int odd = 0, n = 0;
+    for (int y = 8; y < s->h; y += 37)
+        for (int x = 3; x < s->w / 2; x += 29, n++) {
+            uint32_t a = ((uint32_t*)(s->bits + (size_t)y * s->pitch))[x] >> 24;
+            uint32_t b = ((uint32_t*)s->bits)[0] >> 24;
+            odd += a != b;
+        }
+    return odd * 4 > n;
+}
+
 static void present(Surf* s) {
     LONG n = InterlockedIncrement(&softdd_frames);
     if (n == 1 || n == 10 || n == 100 || n % 1000 == 0)
@@ -252,7 +266,8 @@ static void present(Surf* s) {
         record_frame(s);
     }
     if (!softdd_headless && g_dd && g_dd->hwnd && (gpu_ready() || gpu_init(g_dd->hwnd))) {
-        gpu_frame_2d(s->bits, s->w, s->h, s->pitch, s->bpp, screen_palette(), d3d_active() ? (int)KEY16 : -1);
+        int bpp = s->bpp == 32 && looks16(s) ? 16 : s->bpp;
+        gpu_frame_2d(s->bits, s->w, s->h, s->pitch, bpp, screen_palette(), d3d_active() ? (int)KEY16 : -1);
         gpu_present();
         d3d_frame_done();
     } else if (!softdd_headless && g_dd && g_dd->hwnd) {
@@ -779,6 +794,9 @@ static HRESULT WINAPI d_CreateSurface(IDirectDraw* This, LPDDSURFACEDESC d, LPDI
         g_new_fmt = (caps & DDSCAPS_ZBUFFER) ? &z16 : (d->dwFlags & DDSD_PIXELFORMAT) ? &d->ddpfPixelFormat : NULL;
         s = surf_new((int)d->dwWidth, (int)d->dwHeight, caps | ((caps & (DDSCAPS_TEXTURE | DDSCAPS_ZBUFFER)) ? 0 : DDSCAPS_OFFSCREENPLAIN));
         g_new_fmt = NULL;
+        if (getenv("XVT_LOGFMT"))
+            fprintf(stderr, "[fmt] %dx%d caps %08lX bpp %d masks %06X %06X %06X a %08X\n", s->w, s->h, caps, s->bpp,
+                    (unsigned)s->rmask, (unsigned)s->gmask, (unsigned)s->bmask, (unsigned)s->amask);
     }
     if (d->dwFlags & DDSD_CKSRCBLT) {
         s->has_ck = 1;

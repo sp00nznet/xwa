@@ -373,8 +373,10 @@ static HRESULT WINAPI dev_EnumTexFormats(void* t, LPD3DENUMTEXTUREFORMATSCALLBAC
     static const DWORD fm[][6] = {   /* bits, r, g, b, a, palettized */
         { 16, 0xF800, 0x07E0, 0x001F, 0, 0 }, { 16, 0x7C00, 0x03E0, 0x001F, 0x8000, 0 },
         { 16, 0x0F00, 0x00F0, 0x000F, 0xF000, 0 }, { 8, 0, 0, 0, 0, 1 },
+        /* XWA v2.02 (4 bytes a pixel throughout) looks for these */
+        { 32, 0xFF0000, 0xFF00, 0xFF, 0xFF000000, 0 }, { 32, 0xFF0000, 0xFF00, 0xFF, 0, 0 },
     };
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 6; i++) {
         DDSURFACEDESC d;
         memset(&d, 0, sizeof d);
         d.dwSize = sizeof d;
@@ -409,6 +411,7 @@ HRESULT d3d_device_create(Surf* target, void** out) {
     g_dev_obj.target = target;
     *out = &g_dev_obj;
     fprintf(stderr, "[d3d] device on a %dx%dx%d surface: rendered by gpu.c\n", target->w, target->h, target->bpp);
+    gpu_screen_w = target->w, gpu_screen_h = target->h;
     return DD_OK;
 }
 

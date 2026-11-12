@@ -39,6 +39,7 @@ const char* const gpu_mode_names[GPU_NMODES] = { "sharp", "smooth", "crt", "near
 
 #define GW 640
 #define GH 480
+int gpu_screen_w = GW, gpu_screen_h = GH;   /* the game's 3D target: XWA flies at 800x600 */
 
 typedef HRESULT (WINAPI *compile_fn)(LPCVOID, SIZE_T, LPCSTR, const void*, void*, LPCSTR, LPCSTR,
                                      UINT, UINT, ID3DBlob**, ID3DBlob**);
@@ -77,15 +78,15 @@ static const char k_hlsl[] =
 "  return float4(c.rgb, 1);\n"
 "}\n"
 /* the game's 3D */
-"cbuffer S : register(b1) { float4 fogcol; float xscale; int texon; int mapblend; int spec; int fog; int atest; float aref; int pad2; };\n"
+"cbuffer S : register(b1) { float4 fogcol; float xscale; int texon; int mapblend; int spec; int fog; int atest; float aref; int pad2; float hw; float hh; float2 pad3; };\n"
 "struct VI { float4 p : POSITION; float4 c : COLOR0; float4 s : COLOR1; float2 t : TEXCOORD0; };\n"
 "struct VO { float4 p : SV_Position; float4 c : COLOR0; float4 s : COLOR1; float2 t : TEXCOORD0; };\n"
 "Texture2D tex : register(t1);\n"
 "SamplerState s_tex : register(s2);\n"
 "VO vs_tl(VI i) {\n"
 "  VO o;\n"
-"  float x = (i.p.x / 320.0 - 1.0) * xscale;\n"               /* Hor+: the 4:3 middle of a wider view */
-"  o.p = float4(x, 1.0 - i.p.y / 240.0, saturate(i.p.z), 1);\n"
+"  float x = (i.p.x / hw - 1.0) * xscale;\n"               /* Hor+: the 4:3 middle of a wider view */
+"  o.p = float4(x, 1.0 - i.p.y / hh, saturate(i.p.z), 1);\n"
 "  if (i.p.w > 1e-6 && i.p.w < 1e6) o.p *= 1.0 / i.p.w;\n"     /* perspective-correct texturing */
 "  o.c = i.c; o.s = i.s; o.t = i.t; return o;\n"
 "}\n"
@@ -224,7 +225,7 @@ int gpu_init(HWND w) {
     };
     ID3D11Device_CreateInputLayout(g_dev, il, 4, ID3D10Blob_GetBufferPointer(vt), ID3D10Blob_GetBufferSize(vt), &g_layout);
     g_cb_p = buffer(32, D3D11_BIND_CONSTANT_BUFFER);
-    g_cb_s = buffer(48, D3D11_BIND_CONSTANT_BUFFER);
+    g_cb_s = buffer(64, D3D11_BIND_CONSTANT_BUFFER);
     g_vb = buffer(MAXV * sizeof(gpu_vertex), D3D11_BIND_VERTEX_BUFFER);
     g_ib = buffer(MAXI * 2, D3D11_BIND_INDEX_BUFFER);
     g_s_lin = sampler(D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_TEXTURE_ADDRESS_CLAMP, 1);
@@ -484,10 +485,11 @@ void gpu_draw(const gpu_vertex* v, int nv, const uint16_t* idx, int ni, const gp
     if (!ib) return;
     memcpy(ib, idx, ni * 2);
     unmap(g_ib);
-    struct { float fog[4]; float xscale; int texon, mapblend, spec, fog_on, atest; float aref; int pad; } cb;
+    struct { float fog[4]; float xscale; int texon, mapblend, spec, fog_on, atest; float aref; int pad; float hw, hh, pad3[2]; } cb;
     cb.fog[0] = ((st->fogcolor >> 16) & 255) / 255.0f, cb.fog[1] = ((st->fogcolor >> 8) & 255) / 255.0f;
     cb.fog[2] = (st->fogcolor & 255) / 255.0f, cb.fog[3] = 1;
     cb.xscale = 1.0f / gpu_aspect_gain();
+    cb.hw = gpu_screen_w / 2.0f, cb.hh = gpu_screen_h / 2.0f, cb.pad3[0] = cb.pad3[1] = 0;
     cb.texon = st->tex > 0 && g_tex[st->tex].srv;
     cb.mapblend = st->mapblend ? st->mapblend : 2;
     cb.spec = st->specular, cb.fog_on = st->fog;
