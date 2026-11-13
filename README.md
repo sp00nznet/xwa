@@ -16,7 +16,10 @@ goes through the concourse, mission overview and briefing into flight. Campaign
 mission 1 flies in 3D at 800x600, 32-bit, with the full cockpit and HUD, sound
 effects and voice. Music plays when it is on in the game's sound options.
 
-Not yet: a mission played to the end, multiplayer, and the remaster options.
+Campaign mission 1 plays to victory under a test script (tools/mission1.keys)
+with the host's autopilot.
+
+Not yet: multiplayer and the remaster options.
 
 ![Intro](docs/screenshots/intro.png)
 ![Main menu](docs/screenshots/menu.png)
