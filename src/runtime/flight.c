@@ -88,3 +88,39 @@ void flight_joystick(HWND game, int scripted, JOYINFOEX* j) {
     j->dwButtonNumber = (buttons & 1) + (buttons >> 1 & 1) + (buttons >> 2 & 1) + (buttons >> 3 & 1);
     j->dwPOV = JOY_POVCENTERED;
 }
+
+/* ---- autopilot (flight.h) ----------------------------------------------- */
+static flight_target_fn g_aim_fn;
+/* An angle (radians) to stick: full past ~10 degrees, and never less than
+ * the games' dead zone (~20%) outside 0.3 degrees, so it closes the gap. */
+static int aim_axis(float a) {
+    float m = fabsf(a);
+    if (m < 0.005f) return 0;
+    int v = (int)(m * 600.0f);
+    if (v < 22) v = 22;
+    if (v > 100) v = 100;
+    return a < 0 ? -v : v;
+}
+static volatile LONG g_aim_mode;
+static DWORD WINAPI aim_thread(LPVOID unused) {
+    (void)unused;
+    for (;;) {
+        Sleep(30);
+        int mode = g_aim_mode;
+        if (!mode || !g_aim_fn) continue;
+        float r, u, f;
+        if (!g_aim_fn(&r, &u, &f)) { if (g_aim_mode) flight_script(0, 0, 0); continue; }
+        float yaw = atan2f(r, f), pitch = atan2f(u, sqrtf(f * f + r * r));
+        /* full stick past ~25 degrees; behind, turn the shorter way at full */
+        int x = aim_axis(yaw), y = aim_axis(pitch);
+        int fire = mode == 2 && fabsf(yaw) < 0.05f && fabsf(pitch) < 0.05f;
+        if (g_aim_mode) flight_script(x, y, fire);   /* noaim may have centred it meanwhile */
+    }
+}
+void flight_aim(flight_target_fn f, int mode) {
+    static HANDLE t;
+    g_aim_fn = f;
+    InterlockedExchange(&g_aim_mode, mode);
+    if (!t) t = CreateThread(NULL, 0, aim_thread, NULL, 0, NULL);
+    if (!mode) { flight_script(0, 0, 0); Sleep(80); flight_script(0, 0, 0); }   /* after the thread's last tick */
+}

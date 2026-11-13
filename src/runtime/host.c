@@ -21,6 +21,7 @@
 #include <audiopolicy.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
@@ -439,7 +440,7 @@ static void shim_DirectDrawCreate(void) {
  * left, right, tab, f1..f10, a letter or digit), "click:X:Y" (game pixels,
  * 640x480), "move:X:Y", or "press:X:Y" ... "release:X:Y" for a drag. A key is held for 150 ms. While a script runs, the
  * real keyboard and mouse are not read: only the script reaches the game. */
-typedef struct { DWORD at; int dik, vk, x, y, click, move, shift; char on[64], shot[MAX_PATH]; } step_t;
+typedef struct { DWORD at; int dik, vk, x, y, click, move, shift; uint32_t peek_n; char peek[48], on[64], shot[MAX_PATH]; } step_t;
 
 static step_t g_steps[512];
 static int g_nsteps, g_scripted;
@@ -481,6 +482,90 @@ static int key_by_name(const char* n, int* vk) {
     return 0;
 }
 
+/* A guest address: hex, then "+hex" adds and "@" reads the pointer there,
+ * e.g. 7B33C4@+23@ is the pointer at offset 0x23 of the table 0x7B33C4 points to. */
+uint32_t guest_addr(const char* e) {
+    char* p;
+    uint32_t a = strtoul(e, &p, 16);
+    while (*p) {
+        if (*p == '@') { a = IsBadReadPtr((void*)(uintptr_t)a, 4) ? 0 : *(uint32_t*)(uintptr_t)a; p++; }
+        else if (*p == '+') a += strtoul(p + 1, &p, 16);
+        else break;
+    }
+    return a;
+}
+
+/* XWA's target, from the player's ship (flight_aim). Objects: the table at
+ * [0x7B33C4], 0x27 bytes each: position X,Y,Z (int) at +7, the mobile object
+ * at +0x23, whose orientation is front/right/up (short x3, 32767 = 1) at
+ * +0xC7/+0xCD/+0xD3. The player (0x8B94E0, index [0x8C1CC8], 0xBCF bytes):
+ * its object at +0, its target at +0x25 (-1: none). */
+static int xwa_target(float* right, float* up, float* fwd) {
+    const uint8_t* pl = (const uint8_t*)(uintptr_t)(0x8B94E0 + *(int*)0x8C1CC8 * 0xBCF);
+    int me = *(const short*)pl, tg = *(const short*)(pl + 0x25);
+    const uint8_t* objs = *(const uint8_t**)0x7B33C4;
+    if (tg < 0 || !objs) return 0;
+    const uint8_t* a = objs + me * 0x27, * b = objs + tg * 0x27;
+    const uint8_t* mob = *(const uint8_t**)(a + 0x23);
+    if (!mob || IsBadReadPtr(mob, 0xD9)) return 0;
+    float d[3];
+    for (int i = 0; i < 3; i++) d[i] = (float)(*(const int*)(b + 7 + 4 * i) - *(const int*)(a + 7 + 4 * i));
+    const short* m = (const short*)(mob + 0xC7);   /* front, right, up */
+    *fwd = d[0] * m[0] + d[1] * m[1] + d[2] * m[2];
+    *right = d[0] * m[3] + d[1] * m[4] + d[2] * m[5];
+    *up = d[0] * m[6] + d[1] * m[7] + d[2] * m[8];
+    { static DWORD last; if (getenv("XVT_AIMLOG") && GetTickCount() - last > 1000) { last = GetTickCount();
+        printf("[aim] me %d tg %d d %.0f %.0f %.0f f %d %d %d -> r %.0f u %.0f f %.0f\n", me, tg, d[0], d[1], d[2], m[0], m[1], m[2], *right, *up, *fwd); } }
+    return 1;
+}
+
+/* The autopilot's view: the target, but climbing over anything in the way
+ * (a ship parked by the target). ponytail: up only, no lateral dodge. */
+static int xwa_aim_target(float* right, float* up, float* fwd) {
+    if (!xwa_target(right, up, fwd)) return 0;
+    const uint8_t* pl = (const uint8_t*)(uintptr_t)(0x8B94E0 + *(int*)0x8C1CC8 * 0xBCF);
+    int me = *(const short*)pl, tg = *(const short*)(pl + 0x25);
+    const uint8_t* objs = *(const uint8_t**)0x7B33C4;
+    const uint8_t* a = objs + me * 0x27;
+    const short* m = (const short*)(*(const uint8_t**)(a + 0x23) + 0xC7);
+    float tdist = *fwd / 32767.0f;
+    for (int k = 0; k < 400; k++) {
+        const uint8_t* b = objs + k * 0x27;
+        if (k == me || k == tg || IsBadReadPtr(b, 0x27) || !*(const short*)(b + 2)) continue;
+        float d[3];
+        for (int i = 0; i < 3; i++) d[i] = (float)(*(const int*)(b + 7 + 4 * i) - *(const int*)(a + 7 + 4 * i));
+        float f = (d[0] * m[0] + d[1] * m[1] + d[2] * m[2]) / 32767.0f;
+        float rr = (d[0] * m[3] + d[1] * m[4] + d[2] * m[5]) / 32767.0f;
+        float uu = (d[0] * m[6] + d[1] * m[7] + d[2] * m[8]) / 32767.0f;
+        if (f > 0 && f < 6000 && f < tdist - 1500 && fabsf(rr) < 2500 && fabsf(uu) < 2500) {
+            *up = fabsf(*fwd) + 32767.0f * 3000;   /* nose well up until it is below us */
+            return 1;
+        }
+    }
+    return 1;
+}
+
+/* target:MODEL - the player's target becomes the nearest object of that model
+ * (XWA's model index, the short at +2 of an object). Returns the index or -1. */
+static int xwa_target_model(int model) {
+    uint8_t* pl = (uint8_t*)(uintptr_t)(0x8B94E0 + *(int*)0x8C1CC8 * 0xBCF);
+    int me = *(short*)pl, best = -1;
+    const uint8_t* objs = *(const uint8_t**)0x7B33C4;
+    double bd = 1e30;
+    for (int k = 0; objs && k < 400; k++) {
+        const uint8_t* b = objs + k * 0x27;
+        if (k == me || IsBadReadPtr(b, 0x27) || *(const short*)(b + 2) != model) continue;
+        double d = 0;
+        for (int i = 0; i < 3; i++) {
+            double v = (double)*(const int*)(b + 7 + 4 * i) - *(const int*)(objs + me * 0x27 + 7 + 4 * i);
+            d += v * v;
+        }
+        if (d < bd) bd = d, best = k;
+    }
+    if (best >= 0) *(short*)(pl + 0x25) = (short)best;
+    return best;
+}
+
 static void parse_keys(const char* spec) {
     static char buf[32768];
     lstrcpynA(buf, spec, sizeof buf);
@@ -490,8 +575,21 @@ static void parse_keys(const char* spec) {
         if (!c) continue;
         st.at = (DWORD)(atof(tok) * 1000);
         char* what = c + 1;
+        if (!strncmp(tok, "near:", 5)) {   /* near:N waits for the target within N game units */
+            st.move = 7, st.peek_n = strtoul(tok + 5, NULL, 0);
+            g_steps[g_nsteps++] = st;
+            continue;
+        }
         if (!strncmp(tok, "on:", 3)) {
             lstrcpynA(st.on, tok + 3, sizeof st.on);
+            g_steps[g_nsteps++] = st;
+            continue;
+        }
+        if (!strncmp(what, "peek:", 5)) {   /* peek:ADDR:LEN, hex; ADDR "*A" reads the pointer at A */
+            char* c2 = strchr(what + 5, ':');
+            lstrcpynA(st.peek, what + 5, c2 ? (int)(c2 - what - 5 + 1) : (int)sizeof st.peek);
+            st.peek_n = c2 ? strtoul(c2 + 1, NULL, 0) : 64;
+            st.move = 4;
             g_steps[g_nsteps++] = st;
             continue;
         }
@@ -499,6 +597,16 @@ static void parse_keys(const char* spec) {
         if (!strncmp(what, "stick:", 6)) {
             st.move = 2;
             sscanf(what + 6, "%d:%d", &st.x, &st.y);
+            g_steps[g_nsteps++] = st;
+            continue;
+        }
+        if (!strncmp(what, "target:", 7)) {
+            st.move = 8, st.x = atoi(what + 7);
+            g_steps[g_nsteps++] = st;
+            continue;
+        }
+        if (!strcmp(what, "aim") || !strcmp(what, "aimfire") || !strcmp(what, "noaim")) {
+            st.move = 6, st.x = what[0] == 'n' ? 0 : what[3] ? 2 : 1;   /* the autopilot: flight_aim */
             g_steps[g_nsteps++] = st;
             continue;
         }
@@ -526,6 +634,18 @@ static DWORD WINAPI keys_thread(LPVOID unused) {
     DWORD t0 = GetTickCount();
     for (int i = 0; i < g_nsteps; i++) {
         step_t* st = &g_steps[i];
+        if (st->move == 7) {
+            DWORD start = GetTickCount();
+            for (;;) {
+                float rr, uu, ff;
+                if (xwa_target(&rr, &uu, &ff) && sqrtf(rr * rr + uu * uu + ff * ff) / 32767.0f < (float)st->peek_n) break;
+                if (GetTickCount() - start > 180000) { printf("[keys] near:%u: not reached in 3 min\n", st->peek_n); break; }
+                Sleep(50);
+            }
+            t0 = GetTickCount();
+            printf("[keys] target within %u: times count from here\n", st->peek_n);
+            continue;
+        }
         if (st->on[0]) {
             if (!st->x) { lstrcpynA(g_wait_file, st->on, sizeof g_wait_file); st->x = 1; }
             WaitForSingleObject(g_file_seen, INFINITE);   /* armed here, or by the step before it */
@@ -542,6 +662,27 @@ static DWORD WINAPI keys_thread(LPVOID unused) {
         DWORD at = t0 + st->at, now = GetTickCount();
         if ((int)(at - now) > 0) Sleep(at - now);
         if (st->shot[0]) { softdd_shot(st->shot); continue; }
+        if (st->move == 8) {
+            printf("[keys] %.1fs target model %d -> object %d\n", st->at / 1000.0, st->x, xwa_target_model(st->x));
+            continue;
+        }
+        if (st->move == 6) {
+            flight_aim(xwa_aim_target, st->x);
+            printf("[keys] %.1fs aim %d\n", st->at / 1000.0, st->x);
+            continue;
+        }
+        if (st->move >= 4) {
+            uint32_t a = guest_addr(st->peek);
+            printf("[peek] %.1fs %08X:", st->at / 1000.0, a);
+            for (uint32_t i = 0; i < st->peek_n; i++) {
+                if (i % 32 == 0) printf("\n  +%04X", i);
+                const uint8_t* q = (const uint8_t*)(uintptr_t)(a + i);
+                if (IsBadReadPtr(q, 1)) { printf(" ??"); continue; }
+                printf(" %02X", *q);
+            }
+            printf("\n");
+            continue;
+        }
         if (st->move >= 2) {   /* the virtual joystick (flight.c) */
             static int sx, sy, fire;
             if (st->move == 2) sx = st->x, sy = st->y; else fire = st->click;
