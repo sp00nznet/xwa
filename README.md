@@ -19,11 +19,17 @@ effects and voice. Music plays when it is on in the game's sound options.
 Campaign mission 1 plays to victory under a test script (tools/mission1.keys)
 with the host's autopilot.
 
-Not yet: multiplayer and the remaster options.
+Multiplayer runs on the host's own DirectPlay (TCP 47700; XWA makes DirectPlay
+through COM, which the host answers): two machines host and join a TCP/IP
+skirmish and fly it together (netlab scenarios/xwa/lan.sh).
+
+Not yet: the remaster options.
 
 ![Intro](docs/screenshots/intro.png)
 ![Main menu](docs/screenshots/menu.png)
 ![Flight](docs/screenshots/flight.png)
+![Multiplayer, host](docs/screenshots/mp-host.png)
+![Multiplayer, joiner](docs/screenshots/mp-joiner.png)
 
 ## Step by step
 
