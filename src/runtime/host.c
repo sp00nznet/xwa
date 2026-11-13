@@ -465,6 +465,7 @@ static const struct { const char* n; int dik, vk; } g_keynames[] = {
     { "f1", 0x3B, VK_F1 }, { "f2", 0x3C, VK_F2 }, { "f3", 0x3D, VK_F3 }, { "f4", 0x3E, VK_F4 },
     { "f5", 0x3F, VK_F5 }, { "f6", 0x40, VK_F6 }, { "f7", 0x41, VK_F7 }, { "f8", 0x42, VK_F8 },
     { "f9", 0x43, VK_F9 }, { "f10", 0x44, VK_F10 },
+    { ".", 0x34, VK_OEM_PERIOD }, { "-", 0x0C, VK_OEM_MINUS },
     { "lbracket", 0x1A, VK_OEM_4 }, { "rbracket", 0x1B, VK_OEM_6 }, { "backslash", 0x2B, VK_OEM_5 },
 };
 static const char g_dik_letters[] = "qwertyuiop\0\0\0\0asdfghjkl\0\0\0\0\0zxcvbnm";   /* from 0x10 */
@@ -583,6 +584,16 @@ static void parse_keys(const char* spec) {
         if (!strncmp(tok, "on:", 3)) {
             lstrcpynA(st.on, tok + 3, sizeof st.on);
             g_steps[g_nsteps++] = st;
+            continue;
+        }
+        if (!strncmp(what, "type:", 5)) {   /* type:TEXT, a key each 0.2 s (letters, digits, '.', '-') */
+            for (const char* c = what + 5; *c && g_nsteps < 512; c++) {
+                char k[2] = { *c, 0 };
+                step_t t = st;
+                if (!(t.dik = key_by_name(k, &t.vk))) { fprintf(stderr, "--keys: cannot type \"%c\"\n", *c); exit(1); }
+                g_steps[g_nsteps++] = t;
+                st.at += 200;
+            }
             continue;
         }
         if (!strncmp(what, "peek:", 5)) {   /* peek:ADDR:LEN, hex; ADDR "*A" reads the pointer at A */
@@ -899,6 +910,24 @@ static void shim_DirectPlayLobbyCreateA(void) {   /* (sp guid, IDirectPlayLobbyA
     g_esp += 4 + 5 * 4;
 }
 
+/* DirectDrawEnumerateExA from Windows' ddraw.dll, by full path: the game
+ * folder's ddraw.dll (the Steam edition's wrapper, found first on a machine
+ * without ddraw already loaded) does not export it. */
+static void shim_DirectDrawEnumerateExA(void) {   /* (callback, ctx, flags) */
+    typedef HRESULT (WINAPI *enum_t)(void*, void*, DWORD);
+    static enum_t f;
+    if (!f) {
+        char path[MAX_PATH];
+        GetSystemDirectoryA(path, MAX_PATH);
+        lstrcatA(path, "\\ddraw.dll");
+        f = (enum_t)GetProcAddress(LoadLibraryA(path), "DirectDrawEnumerateExA");
+    }
+    HRESULT hr;
+    UNLOCKED(hr = f ? f((void*)(uintptr_t)ARG(0), (void*)(uintptr_t)ARG(1), ARG(2)) : E_FAIL);
+    g_eax = (uint32_t)hr;
+    g_esp += 4 + 3 * 4;
+}
+
 /* XWA makes DirectPlay and its lobby through COM, not DPLAYX's exports:
  * those two classes get the host's own; anything else is the real COM. */
 static void shim_CoCreateInstance(void) {   /* (clsid, outer, ctx, iid, out) */
@@ -973,6 +1002,7 @@ static native32_shim_t g_shims[] = {
     { "GetKeyboardState", shim_GetKeyboardState },
     { "SetCursorPos", shim_SetCursorPos },
     { "DirectDrawCreate", shim_DirectDrawCreate },
+    { "DirectDrawEnumerateExA", shim_DirectDrawEnumerateExA },
     { "DirectInputCreateA", shim_DirectInputCreateA },
     { "joyGetNumDevs", shim_joyGetNumDevs },
     { "joyGetDevCapsA", shim_joyGetDevCapsA },
