@@ -221,6 +221,14 @@ static void shim_GetVolumeInformationA(void) {
 /* "on:NAME" waits until the game opens a file whose name has NAME in it
  * (a screen's resources), and the times after it count from then. */
 static char g_wait_file[64];
+/* An on: step's file: any one of "a|b|c", by substring. */
+static int wait_match(const char* name) {
+    char alt[64];
+    lstrcpynA(alt, g_wait_file, sizeof alt);
+    for (char* t = strtok(alt, "|"); t; t = strtok(NULL, "|"))
+        if (StrStrIA(name, t)) return 1;
+    return 0;
+}
 static HANDLE g_file_seen;
 
 /* The game's file opens, logged: the milestones a run is read by. */
@@ -250,7 +258,7 @@ static void shim_CreateFileA(void) {
                                              ARG(4), ARG(5), (HANDLE)(uintptr_t)ARG(6));
     printf("[host] open %s -> %s\n", name ? name : "(null)",
            g_eax == (uint32_t)(uintptr_t)INVALID_HANDLE_VALUE ? "missing" : "ok");
-    if (g_wait_file[0] && name && StrStrIA(name, g_wait_file)) { g_wait_file[0] = 0; SetEvent(g_file_seen); }
+    if (g_wait_file[0] && name && wait_match(name)) { g_wait_file[0] = 0; SetEvent(g_file_seen); }
     g_esp += 4 + 7 * 4;
 }
 
@@ -431,7 +439,7 @@ static void shim_DirectDrawCreate(void) {
  * left, right, tab, f1..f10, a letter or digit), "click:X:Y" (game pixels,
  * 640x480), "move:X:Y", or "press:X:Y" ... "release:X:Y" for a drag. A key is held for 150 ms. While a script runs, the
  * real keyboard and mouse are not read: only the script reaches the game. */
-typedef struct { DWORD at; int dik, vk, x, y, click, move; char on[64], shot[MAX_PATH]; } step_t;
+typedef struct { DWORD at; int dik, vk, x, y, click, move, shift; char on[64], shot[MAX_PATH]; } step_t;
 
 static step_t g_steps[512];
 static int g_nsteps, g_scripted;
@@ -456,6 +464,7 @@ static const struct { const char* n; int dik, vk; } g_keynames[] = {
     { "f1", 0x3B, VK_F1 }, { "f2", 0x3C, VK_F2 }, { "f3", 0x3D, VK_F3 }, { "f4", 0x3E, VK_F4 },
     { "f5", 0x3F, VK_F5 }, { "f6", 0x40, VK_F6 }, { "f7", 0x41, VK_F7 }, { "f8", 0x42, VK_F8 },
     { "f9", 0x43, VK_F9 }, { "f10", 0x44, VK_F10 },
+    { "lbracket", 0x1A, VK_OEM_4 }, { "rbracket", 0x1B, VK_OEM_6 }, { "backslash", 0x2B, VK_OEM_5 },
 };
 static const char g_dik_letters[] = "qwertyuiop\0\0\0\0asdfghjkl\0\0\0\0\0zxcvbnm";   /* from 0x10 */
 
@@ -502,7 +511,8 @@ static void parse_keys(const char* spec) {
             st.click = what[0] == 'c' ? 1 : what[0] == 'p' ? 2 : what[0] == 'r' ? 3 : 0;
             st.move = 1;
             sscanf(strchr(what, ':') + 1, "%d:%d", &st.x, &st.y);
-        } else if (!(st.dik = key_by_name(what, &st.vk))) {
+        } else if (!strncmp(what, "shift+", 6) ? (st.shift = 1, !(st.dik = key_by_name(what + 6, &st.vk)))
+                                               : !(st.dik = key_by_name(what, &st.vk))) {
             fprintf(stderr, "--keys: unknown key \"%s\"\n", what);
             exit(1);
         }
@@ -557,6 +567,12 @@ static DWORD WINAPI keys_thread(LPVOID unused) {
             }
             printf("[keys] %.1fs %s %d,%d\n", st->at / 1000.0, st->click == 1 ? "click" : st->click == 2 ? "press" : st->click == 3 ? "release" : "move", st->x, st->y);
         } else {
+            if (st->shift) {   /* shift+key: left shift held around the key */
+                g_key_until[0x2A] = g_vk_until[VK_SHIFT] = g_vk_until[VK_LSHIFT] = GetTickCount() + 250;
+                evq_push(0x2A, 0x80);
+                if (w) PostMessageA(w, WM_KEYDOWN, VK_SHIFT, 1 | (0x2A << 16));
+                Sleep(30);
+            }
             g_key_until[st->dik] = g_vk_until[st->vk & 0xFF] = GetTickCount() + 150;
             evq_push(st->dik, 0x80);
             UINT sc = st->dik & 0x7F;
@@ -564,7 +580,11 @@ static DWORD WINAPI keys_thread(LPVOID unused) {
             Sleep(150);
             if (w) PostMessageA(w, WM_KEYUP, st->vk, 1 | (sc << 16) | 0xC0000000u);
             evq_push(st->dik, 0);
-            printf("[keys] %.1fs key %02X\n", st->at / 1000.0, st->dik);
+            if (st->shift) {
+                evq_push(0x2A, 0);
+                if (w) PostMessageA(w, WM_KEYUP, VK_SHIFT, 1 | (0x2A << 16) | 0xC0000000u);
+            }
+            printf("[keys] %.1fs key %s%02X\n", st->at / 1000.0, st->shift ? "shift+" : "", st->dik);
         }
     }
     return 0;
