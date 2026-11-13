@@ -122,7 +122,7 @@ static void queue(DPID from, DPID to, const void* data, DWORD size) {
 
 /* ---- the wire: [len][type][from][to] then the payload ---- */
 
-enum { W_HELLO = 1, W_WELCOME, W_ADD, W_DEL, W_JOINGROUP, W_LEAVEGROUP, W_DATA };
+enum { W_HELLO = 1, W_WELCOME, W_ADD, W_DEL, W_JOINGROUP, W_LEAVEGROUP, W_DATA, W_ENUM };
 typedef struct { DWORD len, type, from, to; } Hdr;
 typedef struct { DPID id; DWORD group; DPID parent; char name[64]; } WPlayer;
 
@@ -264,7 +264,16 @@ static DWORD WINAPI listener(LPVOID arg) {
         if (s == INVALID_SOCKET) return 0;
         Hdr h;
         uint8_t name[64];
-        if (!recv_all(s, &h, sizeof h) || h.type != W_HELLO || h.len > sizeof h + sizeof name || !recv_all(s, name, (int)(h.len - sizeof h))) { closesocket(s); continue; }
+        if (!recv_all(s, &h, sizeof h) || (h.type != W_HELLO && h.type != W_ENUM) || h.len > sizeof h + sizeof name || !recv_all(s, name, (int)(h.len - sizeof h))) { closesocket(s); continue; }
+        if (h.type == W_ENUM) {   /* EnumSessions: the session, then goodbye */
+            uint8_t e[sizeof(DPSESSIONDESC2) + 64];
+            EnterCriticalSection(&g_lock);
+            memcpy(e, &g_sd, sizeof g_sd), memcpy(e + sizeof g_sd, g_session_name, 64);
+            LeaveCriticalSection(&g_lock);
+            send_on(s, W_WELCOME, 0, 0, e, sizeof e);
+            closesocket(s);
+            continue;
+        }
         EnterCriticalSection(&g_lock);
         int i;
         for (i = 0; i < 16 && g_down[i] != INVALID_SOCKET; i++) ;
@@ -358,6 +367,32 @@ static ULONG WINAPI o_release(Obj* o) { return (ULONG)InterlockedDecrement(&o->r
     static HRESULT __declspec(naked) unsup##k(void) { __asm push k __asm call unsup_log __asm mov eax, DPERR_UNSUPPORTED __asm ret ((k) * 4 + 4) }
 static void __stdcall unsup_log(int nargs) { printf("[dplay] a method with %d arguments that is not provided\n", nargs); }
 STUB(0) STUB(1) STUB(2) STUB(3) STUB(4) STUB(5) STUB(6) STUB(9)
+/* IDirectPlay3/4 methods, each named by its vtable slot when unprovided. */
+#define SLOT(i, k) \
+    static HRESULT __declspec(naked) slot##i(void) { __asm push k __asm push i __asm call slot_log __asm mov eax, DPERR_UNSUPPORTED __asm ret ((k) * 4 + 4) }
+static void __stdcall slot_log(int slot, int nargs) { printf("[dplay] method %d (%d arguments) is not provided\n", slot, nargs); }
+SLOT(18, 3)
+SLOT(32, 2)
+SLOT(33, 6)
+SLOT(34, 2)
+SLOT(35, 4)
+SLOT(36, 5)
+SLOT(37, 4)
+SLOT(38, 2)
+SLOT(39, 4)
+SLOT(40, 4)
+SLOT(41, 3)
+SLOT(42, 2)
+SLOT(43, 2)
+SLOT(44, 2)
+SLOT(45, 4)
+SLOT(46, 2)
+SLOT(47, 2)
+SLOT(48, 2)
+SLOT(49, 9)
+SLOT(50, 5)
+SLOT(51, 2)
+SLOT(52, 3)
 
 /* ---- the lobby ---- */
 
@@ -411,6 +446,27 @@ static HRESULT WINAPI l_get_connection(Obj* o, DWORD app, void* data, DWORD* siz
     return DP_OK;
 }
 
+/* CreateCompoundAddress: real DPADDRESS chunks (GUID, size, data), with
+ * DPAID_TotalSize first. InitializeConnection reads the INet one back. */
+typedef struct { GUID type; DWORD size; const void* data; } AddrElem;
+static HRESULT WINAPI l_create_compound(Obj* o, const AddrElem* el, DWORD n, void* addr, DWORD* size) {
+    static const GUID total = { 0x1318F560, 0x912C, 0x11D0, { 0x9D, 0xAA, 0x00, 0xA0, 0xC9, 0x0A, 0x43, 0xCB } };
+    DWORD need = 24;
+    for (DWORD i = 0; i < n; i++) need += 20 + el[i].size;
+    if (!size) return DPERR_INVALIDPARAMS;
+    if (!addr || *size < need) { *size = need; return DPERR_BUFFERTOOSMALL; }
+    uint8_t* p = (uint8_t*)addr;
+    memcpy(p, &total, 16), *(DWORD*)(p + 16) = 4, *(DWORD*)(p + 20) = need, p += 24;
+    for (DWORD i = 0; i < n; i++) {
+        memcpy(p, &el[i].type, 16), *(DWORD*)(p + 16) = el[i].size;
+        if (el[i].size) memcpy(p + 20, el[i].data, el[i].size);
+        p += 20 + el[i].size;
+    }
+    *size = need;
+    LOG("CreateCompoundAddress: %lu parts, %lu bytes\n", n, need);
+    return DP_OK;
+}
+
 static void* g_lobby_vt[] = {
     o_qi, o_addref, o_release,
     l_connect,          /* 3 Connect */
@@ -424,7 +480,7 @@ static void* g_lobby_vt[] = {
     unsup4,             /* 11 SendLobbyMessage */
     l_set_connection,   /* 12 SetConnectionSettings */
     unsup3,             /* 13 SetLobbyMessageEvent */
-    unsup4,             /* 14 CreateCompoundAddress (IDirectPlayLobby2) */
+    l_create_compound,  /* 14 CreateCompoundAddress (IDirectPlayLobby2) */
     unsup4,             /* 15 ConnectEx (3) */
     unsup2,             /* 16 RegisterApplication */
     unsup2,             /* 17 UnregisterApplication */
@@ -504,7 +560,44 @@ static HRESULT enum_players(DPID group, DWORD flags, enum_players_cb cb, void* c
 static HRESULT WINAPI d_enum_group_players(Obj* o, DPID g, GUID* inst, enum_players_cb cb, void* ctx, DWORD flags) { return enum_players(g, flags, cb, ctx, 0); }
 static HRESULT WINAPI d_enum_groups(Obj* o, GUID* inst, enum_players_cb cb, void* ctx, DWORD flags) { return enum_players(0, flags, cb, ctx, 1); }
 static HRESULT WINAPI d_enum_players(Obj* o, GUID* inst, enum_players_cb cb, void* ctx, DWORD flags) { return enum_players(0, flags, cb, ctx, 0); }
-static HRESULT WINAPI d_enum_sessions(Obj* o, DPSESSIONDESC2* sd, DWORD timeout, void* cb, void* ctx, DWORD flags) { printf("[dplay] EnumSessions not provided\n"); return DPERR_UNSUPPORTED; }
+/* EnumSessions: ask the host at the connection's address (InitializeConnection).
+ * The callback gets the session, then the "timed out" call that ends the list. */
+typedef BOOL (WINAPI *enum_sessions_cb)(const DPSESSIONDESC2*, DWORD*, DWORD, void*);
+static DPSESSIONDESC2 g_found;
+static char g_found_name[64];
+static HRESULT WINAPI d_enum_sessions(Obj* o, DPSESSIONDESC2* sd, DWORD timeout, void* cb, void* ctx, DWORD flags) {
+    net_up();
+    if (flags & 0x20) return DP_OK;                          /* DPENUMSESSIONS_STOPASYNC */
+    LOG("EnumSessions at \"%s\" flags %08lX\n", g_conn_addr, flags);
+    int found = 0;
+    struct addrinfo hints = { 0 }, *ai = NULL;
+    hints.ai_family = AF_INET, hints.ai_socktype = SOCK_STREAM;
+    char port[8];
+    _snprintf(port, sizeof port, "%d", DP_PORT);
+    if (g_conn_addr[0] && !getaddrinfo(g_conn_addr, port, &hints, &ai) && ai) {
+        SOCKET k = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        DWORD ms = 3000;
+        setsockopt(k, SOL_SOCKET, SO_RCVTIMEO, (const char*)&ms, sizeof ms);
+        if (!connect(k, ai->ai_addr, (int)ai->ai_addrlen)) {
+            send_on(k, W_ENUM, 0, 0, "", 1);
+            Hdr h;
+            uint8_t e[sizeof(DPSESSIONDESC2) + 64];
+            if (recv_all(k, &h, sizeof h) && h.type == W_WELCOME && h.len - sizeof h == sizeof e && recv_all(k, e, sizeof e)) {
+                memcpy(&g_found, e, sizeof g_found);
+                memcpy(g_found_name, e + sizeof g_found, 64);
+                g_found.name = g_found_name, g_found.password = NULL;
+                found = 1;
+            }
+        }
+        closesocket(k);
+        freeaddrinfo(ai);
+    }
+    LOG("EnumSessions: %s\n", found ? g_found_name : "none");
+    DWORD t = timeout;
+    if (found && !((enum_sessions_cb)cb)(&g_found, &t, 0, ctx)) return DP_OK;
+    ((enum_sessions_cb)cb)(NULL, &t, 1 /* DPESC_TIMEDOUT */, ctx);   /* TRUE asks again: the game calls again */
+    return DP_OK;
+}
 static HRESULT WINAPI d_get_caps(Obj* o, DPCAPS* c, DWORD flags) {
     if (!c) return DPERR_INVALIDPARAMS;
     DWORD sz = c->dwSize;
@@ -567,7 +660,40 @@ static HRESULT WINAPI d_set_session_desc(Obj* o, const DPSESSIONDESC2* sd, DWORD
     return DP_OK;
 }
 static HRESULT WINAPI d_initialize(Obj* o, GUID* g) { return 0x88770078; /* DPERR_ALREADYINITIALIZED */ }
-static HRESULT WINAPI d_open(Obj* o, DPSESSIONDESC2* sd, DWORD flags) { printf("[dplay] Open not provided\n"); return DPERR_UNSUPPORTED; }
+/* Open: DPOPEN_CREATE hosts, DPOPEN_JOIN joins the host at the connection's address. */
+static HRESULT WINAPI d_open(Obj* o, DPSESSIONDESC2* sd, DWORD flags) {
+    net_up();
+    if (g_node) return DP_OK;
+    HRESULT hr;
+    if (flags & 2) {   /* DPOPEN_CREATE */
+        g_sd = *sd;
+        copy_str(g_session_name, sizeof g_session_name, sd->name);
+        g_sd.name = g_session_name, g_sd.password = NULL, g_sd.dwCurrentPlayers = 0;
+        g_sd.guidInstance.Data1 = GetTickCount();   /* any value: one session per host */
+        hr = host_session();
+    } else
+        hr = join_session(g_conn_addr);
+    LOG("Open flags %08lX -> %08lX\n", flags, hr);
+    return hr;
+}
+/* InitializeConnection: the address the game built (DPADDRESS chunks: GUID,
+ * size, data); the INet chunk is the host's IP, empty when hosting. */
+static HRESULT WINAPI d_init_connection(Obj* o, const void* addr, DWORD flags) {
+    static const GUID inet = { 0xC4A54DA0, 0xE0AF, 0x11CF, { 0x9C, 0x4E, 0x00, 0xA0, 0xC9, 0x05, 0x42, 0x5E } };
+    const uint8_t* p = (const uint8_t*)addr;
+    DWORD total = 0;
+    g_conn_addr[0] = 0;
+    if (p && !memcmp(p, "XVTA", 4)) { copy_str(g_conn_addr, sizeof g_conn_addr, (const char*)p + 4); p = NULL; }   /* our CreateAddress */
+    for (int i = 0; p && i < 16; i++) {
+        DWORD n = *(const DWORD*)(p + 16);
+        if (i == 0) total = n == 4 ? *(const DWORD*)(p + 20) : 0;   /* DPAID_TotalSize first */
+        if (!memcmp(p, &inet, 16)) { copy_str(g_conn_addr, sizeof g_conn_addr, (const char*)(p + 20)); break; }
+        p += 20 + n;
+        if (total && p >= (const uint8_t*)addr + total) break;
+    }
+    LOG("InitializeConnection \"%s\"\n", g_conn_addr);
+    return DP_OK;
+}
 static HRESULT WINAPI d_receive(Obj* o, DPID* from, DPID* to, DWORD flags, void* data, DWORD* size) {
     if (!size) return DPERR_INVALIDPARAMS;
     EnterCriticalSection(&g_lock);
@@ -637,7 +763,7 @@ static void* g_dp_vt[] = {
     d_get_data,            /* 15 GetGroupData */
     d_get_group_name,      /* 16 */
     d_get_message_count,   /* 17 */
-    unsup3,                /* 18 GetPlayerAddress */
+    slot18,                /* 18 GetPlayerAddress */
     d_get_player_caps,     /* 19 */
     d_get_data,            /* 20 GetPlayerData */
     d_get_player_name,     /* 21 */
@@ -651,9 +777,7 @@ static void* g_dp_vt[] = {
     d_ok4,                 /* 29 SetPlayerData */
     d_set_name,            /* 30 SetPlayerName */
     d_set_session_desc,    /* 31 */
-    unsup2, unsup6, unsup2, unsup4, unsup5, unsup4, unsup2, unsup4,   /* 32-39 (IDirectPlay3) */
-    unsup4, unsup3, unsup2, unsup2, unsup2, unsup4, unsup2,           /* 40-46 */
-    unsup2, unsup2, unsup9, unsup5, unsup2, unsup3,                   /* 47-52 (IDirectPlay4) */
+    slot32, slot33, slot34, slot35, slot36, slot37, d_init_connection, slot39, slot40, slot41, slot42, slot43, slot44, slot45, slot46, slot47, slot48, slot49, slot50, slot51, slot52,
 };
 static Obj g_dp = { g_dp_vt, 1 };
 

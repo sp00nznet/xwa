@@ -899,6 +899,21 @@ static void shim_DirectPlayLobbyCreateA(void) {   /* (sp guid, IDirectPlayLobbyA
     g_esp += 4 + 5 * 4;
 }
 
+/* XWA makes DirectPlay and its lobby through COM, not DPLAYX's exports:
+ * those two classes get the host's own; anything else is the real COM. */
+static void shim_CoCreateInstance(void) {   /* (clsid, outer, ctx, iid, out) */
+    static const GUID dp = { 0xD1EB6D20, 0x8923, 0x11D0, { 0x9D, 0x97, 0x00, 0xA0, 0xC9, 0x0A, 0x43, 0xCB } };
+    static const GUID lobby = { 0x2FE8F810, 0xB2A5, 0x11D0, { 0xA7, 0x87, 0x00, 0x00, 0xF8, 0x03, 0xAB, 0xFC } };
+    const GUID* clsid = (const GUID*)(uintptr_t)ARG(0);
+    void** out = (void**)(uintptr_t)ARG(4);
+    HRESULT hr;
+    if (clsid && !memcmp(clsid, &dp, sizeof dp)) hr = dplay_create(out);
+    else if (clsid && !memcmp(clsid, &lobby, sizeof lobby)) hr = dplay_lobby_create(out);
+    else UNLOCKED(hr = CoCreateInstance(clsid, (LPUNKNOWN)(uintptr_t)ARG(1), ARG(2), (const IID*)(uintptr_t)ARG(3), out));
+    g_eax = (uint32_t)hr;
+    g_esp += 4 + 5 * 4;
+}
+
 /* The CD music: the host's own player (music.c), not the Steam edition's
  * WIN32.dll, whose player thread raced the game's stop and play. */
 static void shim_mciSendCommandA(void) {
@@ -964,6 +979,7 @@ static native32_shim_t g_shims[] = {
     { "joyGetPosEx", shim_joyGetPosEx },
     { "CloseWindow", shim_CloseWindow },
     { "DPLAYX.dll#1", shim_DirectPlayCreate },
+    { "CoCreateInstance", shim_CoCreateInstance },
     { "DPLAYX.dll#4", shim_DirectPlayLobbyCreateA },
     { "GetForegroundWindow", shim_GetForegroundWindow },
     { "ShowWindow", shim_ShowWindow },
