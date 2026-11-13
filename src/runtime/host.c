@@ -790,6 +790,7 @@ static native32_shim_t g_shims[] = {
     { "LoadIconA", shim_LoadIconA },
     { "LoadCursorA", shim_LoadCursorA },
     { "DirectSoundCreate", shim_DirectSoundCreate },
+    { "DSOUND.dll#1", shim_DirectSoundCreate },   /* XWA imports it by ordinal */
     { "mciSendCommandA", shim_mciSendCommandA },
     { "auxSetVolume", shim_auxSetVolume },
     { "GetCursorPos", shim_GetCursorPos },
