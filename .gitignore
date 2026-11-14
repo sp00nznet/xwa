@@ -43,6 +43,7 @@ original/
 # every other analysis of Hod2.exe.
 src/recomp/gen/
 src/recomp/gen_bop/
+src/recomp/gen_xwau/
 work/
 analysis/
 scratch/

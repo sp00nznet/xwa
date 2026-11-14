@@ -57,6 +57,61 @@ PATCH_DECLS = ''
 # after the call, which ct_longjmp resumes at (tf_setjmp_resume[]).
 SETJMP = 0  # none found yet
 
+# The XWA Upgrade's hooks (tools/hookbake.c, host.c XWA_HOOKS): the patched exe
+# calls a trampoline at each hooked site, 0x5A8B20 (void) or 0x5A8B30 (returns
+# eax). The hook is picked by the call's return address, which a lifted call
+# does not push, so each such call becomes XWA_HOOK_CALL with the real one.
+# A few hooks move the return address to continue elsewhere: those targets.
+HOOK_TRAMPOLINES = {0x5A8B20: 0, 0x5A8B30: 1}
+HOOK_JUMPS = [int(x, 16) for x in open(os.path.join(_HERE, 'tools', 'hook_jumps.txt'))
+              if x.strip() and not x.startswith('#')]
+HOOK_CODE_SITES = {int(x, 16) for x in open(os.path.join(_HERE, 'tools', 'hook_codewrites.txt'))
+                   if x.strip() and not x.startswith('#')}
+HOOK_DECLS = (
+    'void xwa_hook_call(int isint);\nvoid xwa_hook_lost(uint32_t to);\nextern uint32_t g_hook_jump;\n'
+    '#define XWA_HOOK_CALL(isint, ra) do { PUSH32(esp, ra); RECOMP_FLAGS_OUT(); RECOMP_REGS_OUT(); '
+    'xwa_hook_call(isint); RECOMP_REGS_IN(); } while (0)\n')
+
+
+def hook_calls(path):
+    """Rewrite the trampoline calls in one generated chunk; returns (calls, jumps wired)."""
+    import re
+    src = orig = open(path, encoding='utf-8').read()
+    # the lifted call, or an earlier pass's XWA_HOOK_CALL (so the pass can be rerun)
+    call = re.compile(r'RECOMP_I?CALL\((?:sub_|0x)(005A8B[23]0)u?\); /\* 0x([0-9A-F]{8}): call 0x5a8b[23]0 \*/(?: /\* not lifted \*/)?'
+                      r'|XWA_HOOK_CALL\(([01]), 0x[0-9A-F]{8}u\);.*?/\* 0x([0-9A-F]{8}): call hook \*/')
+    # A call whose target a hook rewrites at run time (a live target): when it
+    # is a trampoline, it is a hook call like the others.
+    live = re.compile(r'RECOMP_ICALL\(\(0x([0-9A-F]{8})u \+ MEM32\(0x([0-9A-F]{8})u\)\)\); /\* 0x([0-9A-F]{8}): call 0x5a8b[23]0 \*/ /\* live target \*/')
+    src = live.sub(lambda m: '{ uint32_t _t = 0x%su + MEM32(0x%su); if (_t == 0x005A8B20u || _t == 0x005A8B30u) '
+                             '{ XWA_HOOK_CALL(_t == 0x005A8B30u, 0x%su); if (g_hook_jump) xwa_hook_lost(g_hook_jump); } '
+                             'else RECOMP_ICALL(_t); } /* 0x%s: call hook, live */'
+                             % (m.group(1), m.group(2), m.group(1), m.group(3)), src)
+    funcs = re.split(r'(?m)^(?=void sub_[0-9A-F]{8}\(void\) \{)', src)
+    n = wired = 0
+    for i, f in enumerate(funcs):
+        if '005A8B' not in f and 'XWA_HOOK_CALL' not in f:
+            continue
+        labels = [t for t in HOOK_JUMPS if 'L_%08X:' % t in f]
+
+        def sub(m):
+            nonlocal n, wired
+            n += 1
+            wired += len(labels)
+            isint = HOOK_TRAMPOLINES[int(m.group(1), 16)] if m.group(1) else int(m.group(3))
+            site = m.group(2) or m.group(4)
+            ra = int(site, 16) + 5
+            jumps = ''.join('case 0x%08Xu: goto L_%08X; ' % (t, t) for t in labels)
+            return ('XWA_HOOK_CALL(%d, 0x%08Xu); if (g_hook_jump) { switch (g_hook_jump) { %s'
+                    'default: xwa_hook_lost(g_hook_jump); } } /* 0x%s: call hook */'
+                    % (isint, ra, jumps, site))
+        funcs[i] = call.sub(sub, f)
+    out = ''.join(funcs)
+    if out != orig:
+        open(path, 'w', encoding='utf-8', newline='\n').write(out)
+    return n, wired
+
+
 def apply_patches(body, patches):
     """Add each patch's C after the lines that lift its instruction.
 
@@ -174,6 +229,11 @@ def lift_module(path, catalog, args, out, extra_roots):
     # The default reads a `_cf` that add/sub/cmp never write, which breaks every
     # 64-bit add and subtract (The Movies lost its menu video to it).
     patches = code_patches(md, code, cs, ce)
+    if args.exe:    # what the XWA hooks rewrite at run time is read live (tools/hookbake.c)
+        patches |= HOOK_CODE_SITES
+        ptrs = args.exe + '.ptrsites'     # hook DLL addresses in the patches (tools/hookbake.c)
+        if os.path.exists(ptrs):
+            patches |= {int(x, 16) for x in open(ptrs) if x.strip() and not x.startswith('#')}
     print('[*]   %d self-modified code fields' % len(patches))
     lifter = Lifter(iat_map=iat, lifted=set(byaddr), precise_carry=True, precise_sbb=True,
                     patch_sites=patches)
@@ -191,6 +251,9 @@ def lift_module(path, catalog, args, out, extra_roots):
                               if end > addr else ([], None))
             if leaders is not None:
                 leaders.add(addr)
+                if args.exe:    # a hook may continue there: give it a label (hook_calls)
+                    at = {i.address for i in insns}
+                    leaders.update(t for t in HOOK_JUMPS if t in at)
             resume = {i.end_address for i in insns if i.is_call and i.get_branch_target() == SETJMP}
             out.setjmp += [(addr, r) for r in sorted(resume)]
             body = (lift_function_linear(lifter, name, insns, leaders, addr, eh_resume=resume) if insns
@@ -239,7 +302,11 @@ def main():
     ap.add_argument('--split', type=int, default=400, help='functions per .c file')
     ap.add_argument('--seeds', default=os.path.join(_HERE, 'work', 'run_seeds.json'),
                     help='seed_from_log.py JSON of unresolved targets from runs')
+    ap.add_argument('--exe', help='lift this exe instead: the same build with patches applied '
+                                  '(tools/hookbake.c), so its timestamp may differ')
     args = ap.parse_args()
+    if args.exe:
+        MODULES[0] = (args.exe, MODULES[0][1], exe_stamp(args.exe), MODULES[0][3])
     for path, catalog, stamp, what in MODULES:
         if not os.path.exists(path):
             sys.exit('no %s -- README, Step by step' % path)
@@ -263,12 +330,21 @@ def main():
         for k in stats:
             stats[k] += s[k]
     out.flush()
+    if args.exe:
+        calls = wired = 0
+        for fn in sorted(os.listdir(args.out)):
+            if fn.startswith('recomp_') and fn.endswith('.c'):
+                c, w = hook_calls(os.path.join(args.out, fn))
+                calls += c
+                wired += w
+        print('hooks: %d trampoline calls, %d redirect targets wired' % (calls, wired))
 
     with open(os.path.join(args.out, 'recomp_funcs.h'), 'w', newline='\n') as f:
         f.write('/* xwa.exe - AUTO-GENERATED by run_lift.py */\n#pragma once\n'
                 '#include <stdint.h>\n\n'
                 'void recomp_not_lifted(uint32_t va);\n'
-                '#define RECOMP_NOT_LIFTED(va) recomp_not_lifted(va)\n\n' + PATCH_DECLS + '\n')
+                '#define RECOMP_NOT_LIFTED(va) recomp_not_lifted(va)\n\n' + PATCH_DECLS
+                + (HOOK_DECLS if args.exe else '') + '\n')
         for a, n in out.entries:
             f.write('void %s(void);\n' % n)
     with open(os.path.join(args.out, 'recomp_dispatch.c'), 'w', newline='\n') as f:

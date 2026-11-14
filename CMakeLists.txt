@@ -63,3 +63,9 @@ if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/recomp/gen")
 endif()
 # The output names keep Windows' compatibility database off the host.
 game_host(xwa src/recomp/gen xwarecomp)
+# The XWA Upgrade build: the exe with every hook's patches baked in
+# (tools/hookbake.c), lifted by `run_lift.py --all --exe <baked exe> --out src/recomp/gen_xwau`.
+if(EXISTS "${CMAKE_SOURCE_DIR}/src/recomp/gen_xwau/recomp_dispatch.c")
+  game_host(xwau src/recomp/gen_xwau xwaurecomp)
+  target_compile_definitions(xwau PRIVATE XWA_HOOKS=1 NATIVE32_CB_RETADDR=1)
+endif()

@@ -587,6 +587,32 @@ static void png_save(const char* path, const uint32_t* px, int w, int h) {
     if (s) IWICStream_Release(s);
 }
 
+/* One window's own picture (PrintWindow, so never the desktop around it), as
+ * a .png: the shot when another renderer draws the game (XWA_HOOKS). */
+void gpu_window_shot(HWND wnd, const char* path) {
+    RECT rc;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);   /* WIC, on whichever thread asks */
+    if (!wnd || !GetClientRect(wnd, &rc) || rc.right <= 0 || rc.bottom <= 0) {
+        printf("[gpu] no window to shoot (%p)\n", (void*)wnd);
+        return;
+    }
+    int w = rc.right, h = rc.bottom;
+    BITMAPINFO bi = { { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB } };
+    void* bits = NULL;
+    HDC wdc = GetDC(wnd), mdc = CreateCompatibleDC(wdc);
+    HBITMAP bm = CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (bm) {
+        HGDIOBJ old = SelectObject(mdc, bm);
+        PrintWindow(wnd, mdc, PW_CLIENTONLY | 2 /* PW_RENDERFULLCONTENT */);
+        SelectObject(mdc, old);
+        for (int k = 0; k < w * h; k++) ((uint32_t*)bits)[k] |= 0xFF000000u;
+        png_save(path, (const uint32_t*)bits, w, h);
+        DeleteObject(bm);
+    }
+    DeleteDC(mdc);
+    ReleaseDC(wnd, wdc);
+}
+
 static uint32_t chan(uint32_t v, uint32_t mask) {
     if (!mask) return 255;
     int sh = 0;

@@ -54,13 +54,41 @@ static DWORD g_shot_s[16];
 static char  g_shot_file[16][MAX_PATH];
 static int   g_shots, g_shot_next;
 static HWND g_game_wnd;      /* the game's window */
+#ifdef XWA_HOOKS
+/* A hook or the XWA Upgrade's renderer makes the window itself: this
+ * process's largest visible top-level window. */
+static BOOL CALLBACK own_window(HWND w, LPARAM best) {
+    DWORD pid; RECT rc, br;
+    GetWindowThreadProcessId(w, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(w) || !GetClientRect(w, &rc)) return TRUE;
+    HWND* b = (HWND*)best;
+    if (getenv("XWA_WNDLOG")) {
+        char cls[64] = "", title[64] = "";
+        GetClassNameA(w, cls, sizeof cls); GetWindowTextA(w, title, sizeof title);
+        printf("[host] window %p \"%s\" class %s %ldx%ld\n", (void*)w, title, cls, rc.right, rc.bottom);
+    }
+    if (!*b || (GetClientRect(*b, &br), rc.right * rc.bottom > br.right * br.bottom)) *b = w;
+    return TRUE;
+}
+#endif
+static void take_shot(const char* path) {
+#ifdef XWA_HOOKS
+    HWND w = g_game_wnd;
+    if (getenv("XWA_WNDLOG")) { HWND t = NULL; EnumWindows(own_window, (LPARAM)&t); printf("[host] game window %p, foreground %p\n", (void*)g_game_wnd, (void*)GetForegroundWindow()); }
+    if (!w) EnumWindows(own_window, (LPARAM)&w);
+    gpu_window_shot(w, path);   /* the XWA Upgrade's renderer draws it */
+#else
+    softdd_shot(path);
+#endif
+}
+
 static DWORD WINAPI shot_thread(LPVOID unused) {
     (void)unused;
     DWORD t0 = GetTickCount();
     for (int i = 0; i < g_shots; i++) {
         DWORD at = t0 + g_shot_s[i] * 1000, now = GetTickCount();
         if ((int)(at - now) > 0) Sleep(at - now);
-        softdd_shot(g_shot_file[i]);
+        take_shot(g_shot_file[i]);
     }
     return 0;
 }
@@ -370,6 +398,9 @@ static void shim_CreateWindowExA(void) {
 /* Before its main loop the game waits in GetMessage until its window is in
  * front (sub_0040A730), and minimizes it meanwhile. Windowed, it always is. */
 static void shim_GetForegroundWindow(void) {
+#ifdef XWA_HOOKS
+    if (!g_game_wnd) EnumWindows(own_window, (LPARAM)&g_game_wnd);   /* hook_windowed made it */
+#endif
     g_eax = (uint32_t)(uintptr_t)(g_game_wnd ? g_game_wnd : GetForegroundWindow());
     g_esp += 4;
 }
@@ -430,8 +461,33 @@ static void shim_joyGetPosEx(void) {
  * DirectDraw is softdd (softdd.c): the game's 640x480x8 fullscreen mode in a
  * window, the desktop left alone. DirectInput checks the instance handle; the
  * game passes its own image base, which Windows never loaded. */
+#ifdef XWA_HOOKS
+/* The XWA Upgrade's hooks talk to its own renderer (the game folder's
+ * ddraw.dll, Effects or Golden) through private calls, so it draws: the
+ * game's DirectDraw goes there instead of softdd. */
+static HMODULE xwau_ddraw(void) {
+    static HMODULE m;
+    if (!m) {
+        char path[MAX_PATH];
+        GetFullPathNameA("ddraw.dll", MAX_PATH, path, NULL);   /* the working directory is the game folder */
+        m = LoadLibraryA(path);
+        printf("[host] renderer: %s %s\n", path, m ? "loaded" : "did not load");
+    }
+    return m;
+}
+#endif
+
 static void shim_DirectDrawCreate(void) {
+#ifdef XWA_HOOKS
+    typedef HRESULT (WINAPI *create_t)(GUID*, void**, void*);
+    static create_t create;
+    if (!create) create = (create_t)GetProcAddress(xwau_ddraw(), "DirectDrawCreate");
+    HRESULT hr;
+    UNLOCKED(hr = create ? create((GUID*)(uintptr_t)ARG(0), (void**)(uintptr_t)ARG(1), (void*)(uintptr_t)ARG(2)) : E_FAIL);
+    g_eax = (uint32_t)hr;
+#else
     g_eax = (uint32_t)softdd_create((void**)(uintptr_t)ARG(1));
+#endif
     g_esp += 4 + 3 * 4;
 }
 
@@ -672,7 +728,7 @@ static DWORD WINAPI keys_thread(LPVOID unused) {
             }
         DWORD at = t0 + st->at, now = GetTickCount();
         if ((int)(at - now) > 0) Sleep(at - now);
-        if (st->shot[0]) { softdd_shot(st->shot); continue; }
+        if (st->shot[0]) { take_shot(st->shot); continue; }
         if (st->move == 8) {
             printf("[keys] %.1fs target model %d -> object %d\n", st->at / 1000.0, st->x, xwa_target_model(st->x));
             continue;
@@ -873,7 +929,7 @@ static HRESULT WINAPI hook_DI_CreateDevice(void* di, const GUID* g, void** out, 
 static void shim_DirectInputCreateA(void) {
     typedef HRESULT (WINAPI *create_t)(HINSTANCE, DWORD, void**, void*);
     static create_t create;
-    if (!create) create = (create_t)GetProcAddress(LoadLibraryA("dinput.dll"), "DirectInputCreateA");
+    if (!create) create = (create_t)GetProcAddress(LoadLibraryExA("dinput.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32), "DirectInputCreateA");
     uint32_t ver = ARG(1), out = ARG(2), outer = ARG(3);
     HRESULT hr;
     UNLOCKED(hr = create(GetModuleHandleA(NULL), ver, (void**)(uintptr_t)out, (void*)(uintptr_t)outer));
@@ -886,11 +942,164 @@ static void shim_DirectInputCreateA(void) {
     g_esp += 4 + 4 * 4;
 }
 
+#ifdef XWA_HOOKS
+/* ---- the XWA Upgrade's hooks (hook_*.dll in the game folder) ----
+ * Each hook DLL lists "call site -> function" pairs (GetHookFunction); the
+ * exe, patched by tools/hookbake.c, calls one of two trampolines at each site.
+ * run_lift.py turns those calls into XWA_HOOK_CALL, which pushes the call's
+ * real return address (lifted calls push a dummy) and lands here. The hook
+ * gets the caller's stack as params; params[-1] is the return address, which
+ * a few hooks move to continue somewhere else (g_hook_jump). The hooks call
+ * back into the game by address: that faults into the lifted code (native32). */
+static int (**g_hooks)(int*);
+uint32_t g_hook_jump;
+
+static DWORD WINAPI code_watch(LPVOID snapshot);
+static void hooks_load(void) {
+    g_hooks = calloc(0x1A8000, sizeof *g_hooks);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA("hook_*.dll", &fd);
+    int mods = 0, fns = 0;
+    for (BOOL more = h != INVALID_HANDLE_VALUE; more; more = FindNextFileA(h, &fd)) {
+        char path[MAX_PATH];
+        GetFullPathNameA(fd.cFileName, MAX_PATH, path, NULL);
+        HMODULE m = LoadLibraryA(path);
+        if (!m) { printf("[hooks] %s does not load (%lu)\n", fd.cFileName, GetLastError()); continue; }
+        typedef struct { int from; int (*fn)(int*); } hookfn_t;
+        int (*count)(void) = (int (*)(void))GetProcAddress(m, "GetHookFunctionsCount");
+        hookfn_t (*get)(int) = (hookfn_t (*)(int))GetProcAddress(m, "GetHookFunction");
+        mods++;
+        /* The hooks' patches, written as their loader (dinput.dll) writes them.
+         * The code bytes are already in the lifted exe (tools/hookbake.c); the
+         * ones that hold this process's addresses are read live from here. */
+        typedef struct { int off; const char* from; const char* to; } item_t;
+        typedef struct { const char* name; int count; const item_t* items; } patch_t;
+        const patch_t* (*getp)(int) = (const patch_t* (*)(int))GetProcAddress(m, "GetHookPatch");
+        for (int i = 0; getp && getp(i); i++)
+            for (int k = 0; k < getp(i)->count; k++) {
+                const item_t* it = &getp(i)->items[k];
+                uint8_t* at = (uint8_t*)(uintptr_t)(it->off + 0x400C00);
+                for (const char* x = it->to; x[0] && x[1]; x += 2, at++) {
+                    char b[3] = { x[0], x[1], 0 };
+                    *at = (uint8_t)strtoul(b, NULL, 16);
+                }
+            }
+        for (int i = 0, n = count && get ? count() : 0; i < n; i++) {
+            hookfn_t f = get(i);
+            if (f.from < 0x401000 || f.from >= 0x401000 + 0x1A8000 || !f.fn) continue;
+            if (g_hooks[f.from - 0x401000]) printf("[hooks] %s: 0x%06X is taken\n", fd.cFileName, f.from);
+            else g_hooks[f.from - 0x401000] = f.fn, fns++;
+        }
+    }
+    if (h != INVALID_HANDLE_VALUE) FindClose(h);
+    printf("[hooks] %d functions in %d modules\n", fns, mods);
+    /* the code as patched, before the game runs (code_watch) */
+    uint8_t* snapshot = malloc(0x5A9000 - 0x401000);
+    memcpy(snapshot, (void*)(uintptr_t)0x401000, 0x5A9000 - 0x401000);
+    CloseHandle(CreateThread(NULL, 0, code_watch, snapshot, 0, NULL));
+}
+
+/* Hooks also store into the game's code (a constant, a jump made unconditional).
+ * Lifted code never sees that, so the writes are recorded: every 2 s the code
+ * section is compared with a copy, and each change goes to hook_codewrites.log
+ * (address and bytes) for tools/hookbake.c to bake into the exe that is lifted. */
+/* The window is made where host.c does not see it (no CreateWindowExA shim),
+ * so it is subclassed here once it exists: the game pauses when it is not in
+ * front, and a test run's window seldom is. Only activation is kept; the
+ * XWA Upgrade's renderer handles the rest. */
+static WNDPROC g_xwau_proc;
+static LRESULT CALLBACK xwau_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_ACTIVATEAPP: case WM_NCACTIVATE: w = TRUE; break;
+    case WM_ACTIVATE: w = MAKEWPARAM(WA_ACTIVE, HIWORD(w)); break;
+    case WM_KILLFOCUS: return 0;
+    }
+    return CallWindowProcA(g_xwau_proc, h, m, w, l);
+}
+
+static DWORD WINAPI code_watch(LPVOID snapshot) {
+    const uint32_t lo = 0x401000, hi = 0x5A9000;
+    uint8_t* copy = snapshot;
+    for (;;) {
+        if (!g_xwau_proc && !g_fullscreen) {
+            HWND w = NULL;
+            EnumWindows(own_window, (LPARAM)&w);
+            if (w) {
+                g_game_wnd = w;
+                g_xwau_proc = (WNDPROC)SetWindowLongPtrA(w, GWLP_WNDPROC, (LONG_PTR)xwau_wndproc);
+                /* it may have paused already, before the subclass: wake it */
+                PostMessageA(w, WM_ACTIVATEAPP, TRUE, 0);
+                PostMessageA(w, WM_ACTIVATE, WA_ACTIVE, 0);
+                printf("[hooks] window %p kept active\n", (void*)w);
+            }
+        }
+        const uint8_t* now = (const uint8_t*)(uintptr_t)lo;
+        for (uint32_t i = 0; i < hi - lo; i++) {
+            if (now[i] == copy[i]) continue;
+            uint32_t n = 1;
+            while (i + n < hi - lo && n < 64 && now[i + n] != copy[i + n]) n++;
+            FILE* f = fopen("hook_codewrites.log", "a");
+            if (f) {
+                fprintf(f, "%06X ", lo + i);
+                for (uint32_t k = 0; k < n; k++) fprintf(f, "%02X", now[i + k]);
+                fprintf(f, " (was ");
+                for (uint32_t k = 0; k < n; k++) fprintf(f, "%02X", copy[i + k]);
+                fprintf(f, ") in sub_%08X\n", g_cur_func);
+                fclose(f);
+            }
+            printf("[hooks] code write at 0x%06X, %u bytes\n", lo + i, n);
+            memcpy(copy + i, now + i, n);
+            i += n - 1;
+        }
+        Sleep(2000);
+    }
+}
+
+/* The return address is on the guest stack; isint: the trampoline returns the hook's value in eax. */
+void xwa_hook_call(int isint) {
+    /* The trampoline's frame: pushfd, pushad under the return address. Hooks
+     * read and write the caller's registers there (params[-3] eax ... [-10] edi). */
+    uint32_t ra = MEM32(g_esp), f = g_esp - 36;
+    MEM32(f + 32) = 0;   /* eflags: the lifted flags are not a register; hooks do not read them */
+    MEM32(f + 28) = g_eax, MEM32(f + 24) = g_ecx, MEM32(f + 20) = g_edx, MEM32(f + 16) = g_ebx;
+    MEM32(f + 12) = g_esp, MEM32(f + 8) = g_ebp, MEM32(f + 4) = g_esi, MEM32(f + 0) = g_edi;
+    int (*fn)(int*) = ra >= 0x401000 && ra < 0x401000 + 0x1A8000 ? g_hooks[ra - 0x401000] : NULL;
+    int r = 0;
+    if (getenv("XWA_HOOKLOG")) {   /* the first call at each site: how far a run gets */
+        static uint8_t seen[0x1A8000 / 8];
+        uint32_t k = ra - 0x401000;
+        if (k < 0x1A8000 && !(seen[k / 8] & (1 << (k % 8)))) {
+            seen[k / 8] |= (uint8_t)(1 << (k % 8));
+            printf("[hooks] first call from 0x%06X (in sub_%08X)\n", ra - 5, g_cur_func);
+        }
+    }
+    g_esp = f;
+    /* pushfd/popfd: the hook calls back into the game, whose lifted code
+     * leaves its own flags in these globals; the caller's must come back. */
+    uint32_t fk = g_flag_k, fa = g_flag_a, fb = g_flag_b, fc = g_flag_cf;
+    if (fn) { int* params = (int*)(uintptr_t)(f + 40); UNLOCKED(r = fn(params)); }
+    else printf("[hooks] no hook for call site 0x%06X\n", ra);
+    g_flag_k = fk, g_flag_a = fa, g_flag_b = fb, g_flag_cf = fc;
+    if (isint) MEM32(f + 28) = (uint32_t)r;          /* the trampoline returns it through popad */
+    g_eax = MEM32(f + 28), g_ecx = MEM32(f + 24), g_edx = MEM32(f + 20), g_ebx = MEM32(f + 16);
+    g_ebp = MEM32(f + 8), g_esi = MEM32(f + 4), g_edi = MEM32(f + 0);
+    uint32_t to = MEM32(f + 36);
+    g_esp = f + 40;
+    g_hook_jump = to != ra ? to : 0;
+}
+
+/* A hook moved the return address to a place the lifted caller has no label for. */
+void xwa_hook_lost(uint32_t to) {
+    static int said;
+    if (said++ < 20) printf("[hooks] a hook continues at 0x%06X, which its caller cannot reach: carrying on\n", to);
+}
+#endif
+
 /* ---- sound: the real DirectSound and MUSIC.dll, counted (sound.c) ---- */
 static void shim_DirectSoundCreate(void) {
     typedef HRESULT (WINAPI *create_t)(const GUID*, void**, void*);
     static create_t create;
-    if (!create) create = (create_t)GetProcAddress(LoadLibraryA("dsound.dll"), "DirectSoundCreate");
+    if (!create) create = (create_t)GetProcAddress(LoadLibraryExA("dsound.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32), "DirectSoundCreate");
     void** out = (void**)(uintptr_t)ARG(1);
     HRESULT hr;
     UNLOCKED(hr = create((const GUID*)(uintptr_t)ARG(0), out, (void*)(uintptr_t)ARG(2)));
@@ -921,6 +1130,10 @@ static void shim_DirectDrawEnumerateExA(void) {   /* (callback, ctx, flags) */
         GetSystemDirectoryA(path, MAX_PATH);
         lstrcatA(path, "\\ddraw.dll");
         f = (enum_t)GetProcAddress(LoadLibraryA(path), "DirectDrawEnumerateExA");
+#ifdef XWA_HOOKS
+        if (GetProcAddress(xwau_ddraw(), "DirectDrawEnumerateExA"))
+            f = (enum_t)GetProcAddress(xwau_ddraw(), "DirectDrawEnumerateExA");
+#endif
     }
     HRESULT hr;
     UNLOCKED(hr = f ? f((void*)(uintptr_t)ARG(0), (void*)(uintptr_t)ARG(1), ARG(2)) : E_FAIL);
@@ -1083,10 +1296,24 @@ static void crash_emit(const char* fmt, ...) {
     if (n > 0) g_crash_len += n;
 }
 
+static int g_last_chance;
+static LONG CALLBACK crash(EXCEPTION_POINTERS* ep);
+static LONG WINAPI last_chance(EXCEPTION_POINTERS* ep) { g_last_chance = 1; return crash(ep); }
 static LONG CALLBACK crash(EXCEPTION_POINTERS* ep) {
     static volatile LONG once;
     EXCEPTION_RECORD* r = ep->ExceptionRecord;
     if ((r->ExceptionCode & 0xF0000000u) != 0xC0000000u) return EXCEPTION_CONTINUE_SEARCH;
+#ifdef XWA_HOOKS
+    /* .NET (the hooks' managed half) faults on purpose, in clr.dll and in JIT
+     * code, and handles it: only a fault in the host or the guest is ours. */
+    if (GetModuleHandleA("clr.dll") && !g_last_chance) {
+        HMODULE mod = NULL;
+        uint32_t pc = (uint32_t)(uintptr_t)r->ExceptionAddress;
+        GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCSTR)r->ExceptionAddress, &mod);
+        if (mod != GetModuleHandleA(NULL) && !native32_in_guest(pc)) return EXCEPTION_CONTINUE_SEARCH;
+    }
+#endif
     if (InterlockedExchange(&once, 1)) TerminateProcess(GetCurrentProcess(), 3);
     crash_emit("\n=== fault 0x%08lX at 0x%p, thread %lu ===\n", r->ExceptionCode,
                r->ExceptionAddress, GetCurrentThreadId());
@@ -1153,9 +1380,28 @@ static DWORD WINAPI sampler(LPVOID unused) {
     return 0;
 }
 
+/* XWA_SEEN=1: which lifted functions ran, sampled every ~1 ms; listed when the
+ * watchdog ends the run (a function that runs for long is always caught). */
+static uint8_t g_seen[0x1A8000 / 8];
+static DWORD WINAPI seen_sampler(LPVOID unused) {
+    (void)unused;
+    timeBeginPeriod(1);
+    for (;;) {
+        uint32_t k = g_cur_func - 0x401000;
+        if (k < 0x1A8000) g_seen[k / 8] |= (uint8_t)(1 << (k % 8));
+        Sleep(1);
+    }
+}
+
 static DWORD WINAPI watchdog(LPVOID unused) {
     (void)unused;
     Sleep(g_watchdog_s * 1000);
+    if (getenv("XWA_SEEN")) {
+        FILE* f = fopen("seen.txt", "w");
+        for (uint32_t k = 0; f && k < 0x1A8000; k++)
+            if (g_seen[k / 8] & (1 << (k % 8))) fprintf(f, "%08X\n", 0x401000 + k);
+        if (f) fclose(f);
+    }
     fprintf(stderr, "\n[watchdog] %lu s: in sub_%08X, last native call %s, %u indirect calls\n",
             g_watchdog_s, g_cur_func, g_cur_import, g_icall_count);
     native32_dump_icalls(8);
@@ -1212,6 +1458,9 @@ int main(int argc, char** argv) {
 
     native32_init();
     AddVectoredExceptionHandler(0, crash);
+#ifdef XWA_HOOKS
+    SetUnhandledExceptionFilter(last_chance);   /* what .NET left unhandled (crash() let it pass) */
+#endif
     printf("X-Wing Alliance recomp host\n  lifted functions in dispatch: %u\n", recomp_dispatch_count);
 
     uint32_t span = native32_map(exe_full, IMAGE_BASE);
@@ -1227,6 +1476,9 @@ int main(int argc, char** argv) {
     }
     /* The game opens its data relative to its working directory. */
     if (!SetCurrentDirectoryA(game_full)) { fprintf(stderr, "cannot enter %s\n", game_full); return 1; }
+#ifdef XWA_HOOKS
+    hooks_load();
+#endif
     settings_apply_prefs();
     CoInitialize(NULL);
     /* Playing: sound on. Test runs (a script or a watchdog) are muted unless --sound. */
@@ -1239,6 +1491,7 @@ int main(int argc, char** argv) {
     printf("  audio: %s\n", sound ? "on" : m == 2 ? "muted (no audio device)" : "muted (a test run; --sound to hear it)");
     if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
     if (g_sample) CloseHandle(CreateThread(NULL, 0, sampler, NULL, 0, NULL));
+    if (getenv("XWA_SEEN")) CloseHandle(CreateThread(NULL, 0, seen_sampler, NULL, 0, NULL));
     if (g_shots) CloseHandle(CreateThread(NULL, 0, shot_thread, NULL, 0, NULL));
     InitializeCriticalSection(&g_evq_lock);
     g_file_seen = CreateEventA(NULL, FALSE, FALSE, NULL);
