@@ -25,6 +25,14 @@ skirmish and fly it together (netlab scenarios/xwa/lan.sh).
 
 Not yet: the remaster options.
 
+**X-Wing Alliance Upgrade.** A second build, `xwaurecomp.exe`, runs the
+community [XWA Upgrade](https://www.xwaupgrade.com/) 2025 on the recomp: its
+hook DLLs, its D3D11 renderer, its HD art and ship models. It gets through
+pilot creation, the HD family room and the briefing; flight is next. How it
+works and how to set it up: [docs/xwau.md](docs/xwau.md).
+
+![XWAU briefing](docs/screenshots/xwau-briefing.png)
+
 ![Intro](docs/screenshots/intro.png)
 ![Main menu](docs/screenshots/menu.png)
 ![Flight](docs/screenshots/flight.png)

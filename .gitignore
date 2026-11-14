@@ -19,7 +19,7 @@ __pycache__/
 *.pyc
 
 # --- Retail game files: NOT redistributed (REPO_RULES section 3) ---
-# X-Wing vs TIE Fighter (c) Lucasfilm / LucasArts / Totally Games.
+# X-Wing Alliance (c) Lucasfilm / LucasArts / Totally Games.
 # Bring your own copy; it goes in game/.
 game/
 redump/
@@ -40,7 +40,7 @@ original/
 *.rar
 
 # Generated from the binary, never committed: the lifted C, the catalog and
-# every other analysis of Hod2.exe.
+# every other analysis of the game exe.
 src/recomp/gen/
 src/recomp/gen_bop/
 src/recomp/gen_xwau/
@@ -56,9 +56,6 @@ scratch/
 Thumbs.db
 Desktop.ini
 
-# Made by Setup.cmd
-Crazy Taxi.cmd
-setup.log
 build-*/
 
 # Run logs

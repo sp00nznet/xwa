@@ -1,5 +1,8 @@
 # tools
 
+`hookbake.c` / `hookbake.cmd`, `hook_jumps.txt`, `hook_codewrites.txt`: the
+X-Wing Alliance Upgrade build, see [docs/xwau.md](../docs/xwau.md).
+
 `mission1.keys` flies campaign mission 1 (Aeron's Lesson) from the intro to
 victory: pickup, hyperspace, delivery, the Viraxo, the fuel cells, home.
 

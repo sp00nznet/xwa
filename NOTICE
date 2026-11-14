@@ -1,0 +1,14 @@
+X-Wing Alliance recomp
+
+The host and remaster come from the X-Wing vs TIE Fighter recomp
+(https://github.com/sp00nznet/xvt-recomp), itself from the X-Wing and TIE Fighter
+recomps; all run on pcrecomp's native32 runtime
+(https://github.com/sp00nznet/pcrecomp), all MIT.
+
+The XWAU build loads, but does not include, the X-Wing Alliance Upgrade
+(https://www.xwaupgrade.com/, the XWAU team) and its hooks and renderer by
+Jeremy Ansel (https://github.com/JeremyAnsel/xwa_hooks,
+https://github.com/JeremyAnsel/xwa_ddraw_d3d11). The addresses in
+tools/hook_jumps.txt and tools/hook_codewrites.txt were read from those hooks.
+
+Star Wars: X-Wing Alliance is (c) Lucasfilm Ltd. No part of the game is included.
