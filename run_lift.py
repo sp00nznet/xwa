@@ -103,7 +103,7 @@ def hook_calls(path):
             ra = int(site, 16) + 5
             jumps = ''.join('case 0x%08Xu: goto L_%08X; ' % (t, t) for t in labels)
             return ('XWA_HOOK_CALL(%d, 0x%08Xu); if (g_hook_jump) { switch (g_hook_jump) { %s'
-                    'default: xwa_hook_lost(g_hook_jump); } } /* 0x%s: call hook */'
+                    'default: RECOMP_ITAIL(g_hook_jump); return; } } /* 0x%s: call hook */'
                     % (isint, ra, jumps, site))
         funcs[i] = call.sub(sub, f)
     out = ''.join(funcs)
@@ -209,11 +209,19 @@ def lift_module(path, catalog, args, out, extra_roots):
 
     # Bound each injected entry by the next known one: an entry landing
     # mid-code handed `ce` makes the extent walk descend the whole section.
-    want = {a for a in set(RUN_SEEDS) | load_seeds(args.seeds) if cs <= a < ce and a not in byaddr}
+    # With --exe, every place a hook may continue at is also a function of its
+    # own: a target its caller has no label for (the hook's patch cut the
+    # branch that led there) is tail-called (hook_calls).
+    seeds = set(RUN_SEEDS) | load_seeds(args.seeds) | (set(HOOK_JUMPS) if args.exe else set())
+    want = {a for a in seeds if cs <= a < ce and a not in byaddr}
     known = sorted(set(byaddr) | want)
     nxt = {a: (known[i + 1] if i + 1 < len(known) else ce) for i, a in enumerate(known)}
+    hooked = set(HOOK_JUMPS) if args.exe else set()
     for a in want:
-        byaddr[a] = {'address': a, 'end': min(nxt[a], a + 0x100), 'calls_to': [], 'entry_kind': 'start'}
+        end = min(nxt[a], a + 0x100)
+        if a in hooked:     # a hook target runs on to the end of the function it sits in
+            end = max([f['end'] for f in byaddr.values() if f['address'] < a < f.get('end', 0)] or [end])
+        byaddr[a] = {'address': a, 'end': end, 'calls_to': [], 'entry_kind': 'start'}
 
     entry = info.image_base + info.entry_point_rva
     roots = [entry] + [info.image_base + e.rva for e in getattr(info, 'exports', [])

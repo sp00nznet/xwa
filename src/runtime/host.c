@@ -76,7 +76,7 @@ static void take_shot(const char* path) {
     HWND w = g_game_wnd;
     if (getenv("XWA_WNDLOG")) { HWND t = NULL; EnumWindows(own_window, (LPARAM)&t); printf("[host] game window %p, foreground %p\n", (void*)g_game_wnd, (void*)GetForegroundWindow()); }
     if (!w) EnumWindows(own_window, (LPARAM)&w);
-    gpu_window_shot(w, path);   /* the XWA Upgrade's renderer draws it */
+    if (!gpu_present_shot(path)) gpu_window_shot(w, path);   /* the XWA Upgrade's renderer draws it */
 #else
     softdd_shot(path);
 #endif
@@ -955,11 +955,38 @@ static int (**g_hooks)(int*);
 uint32_t g_hook_jump;
 
 static DWORD WINAPI code_watch(LPVOID snapshot);
+
+/* hook_windowed drops DirectInput and zeroes the mouse whenever the game
+ * window is not in front, which a test run's window seldom is: scripted, the
+ * hooks are told it is. */
+static HWND WINAPI hooks_GetForegroundWindow(void) {
+    HWND game = *(HWND*)(uintptr_t)0x9F701A;
+    return g_scripted && game ? game : GetForegroundWindow();
+}
+static void hooks_patch_import(HMODULE m, const char* name, void* fn) {
+    uint8_t* b = (uint8_t*)m;
+    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(b + ((IMAGE_DOS_HEADER*)b)->e_lfanew);
+    IMAGE_DATA_DIRECTORY dd = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    for (IMAGE_IMPORT_DESCRIPTOR* d = (IMAGE_IMPORT_DESCRIPTOR*)(b + dd.VirtualAddress); dd.Size && d->Name; d++) {
+        IMAGE_THUNK_DATA* names = (IMAGE_THUNK_DATA*)(b + (d->OriginalFirstThunk ? d->OriginalFirstThunk : d->FirstThunk));
+        IMAGE_THUNK_DATA* iat = (IMAGE_THUNK_DATA*)(b + d->FirstThunk);
+        for (; names->u1.AddressOfData; names++, iat++) {
+            if (IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) continue;
+            if (strcmp((const char*)((IMAGE_IMPORT_BY_NAME*)(b + names->u1.AddressOfData))->Name, name)) continue;
+            DWORD old;
+            VirtualProtect(&iat->u1.Function, 4, PAGE_READWRITE, &old);
+            iat->u1.Function = (uintptr_t)fn;
+            VirtualProtect(&iat->u1.Function, 4, old, &old);
+        }
+    }
+}
+
 static void hooks_load(void) {
     g_hooks = calloc(0x1A8000, sizeof *g_hooks);
+    gpu_present_hook();
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA("hook_*.dll", &fd);
-    int mods = 0, fns = 0;
+    int mods = 0, fns = 0, fast = 0;
     for (BOOL more = h != INVALID_HANDLE_VALUE; more; more = FindNextFileA(h, &fd)) {
         char path[MAX_PATH];
         GetFullPathNameA(fd.cFileName, MAX_PATH, path, NULL);
@@ -969,6 +996,8 @@ static void hooks_load(void) {
         int (*count)(void) = (int (*)(void))GetProcAddress(m, "GetHookFunctionsCount");
         hookfn_t (*get)(int) = (hookfn_t (*)(int))GetProcAddress(m, "GetHookFunction");
         mods++;
+        hooks_patch_import(m, "GetForegroundWindow", (void*)hooks_GetForegroundWindow);
+        fast += native32_direct_calls(m);
         /* The hooks' patches, written as their loader (dinput.dll) writes them.
          * The code bytes are already in the lifted exe (tools/hookbake.c); the
          * ones that hold this process's addresses are read live from here. */
@@ -992,7 +1021,8 @@ static void hooks_load(void) {
         }
     }
     if (h != INVALID_HANDLE_VALUE) FindClose(h);
-    printf("[hooks] %d functions in %d modules\n", fns, mods);
+    printf("[hooks] %d functions in %d modules, %d direct calls into the game\n", fns, mods, fast);
+    native32_veh_first();   /* the .NET hooks' runtime added its exception handler ahead of ours */
     /* the code as patched, before the game runs (code_watch) */
     uint8_t* snapshot = malloc(0x5A9000 - 0x401000);
     memcpy(snapshot, (void*)(uintptr_t)0x401000, 0x5A9000 - 0x401000);
@@ -1065,7 +1095,9 @@ void xwa_hook_call(int isint) {
     MEM32(f + 12) = g_esp, MEM32(f + 8) = g_ebp, MEM32(f + 4) = g_esi, MEM32(f + 0) = g_edi;
     int (*fn)(int*) = ra >= 0x401000 && ra < 0x401000 + 0x1A8000 ? g_hooks[ra - 0x401000] : NULL;
     int r = 0;
-    if (getenv("XWA_HOOKLOG")) {   /* the first call at each site: how far a run gets */
+    static int hooklog = -1;   /* per-vertex hooks run this a lot: getenv once */
+    if (hooklog < 0) hooklog = getenv("XWA_HOOKLOG") != NULL;
+    if (hooklog) {   /* the first call at each site: how far a run gets */
         static uint8_t seen[0x1A8000 / 8];
         uint32_t k = ra - 0x401000;
         if (k < 0x1A8000 && !(seen[k / 8] & (1 << (k % 8)))) {
@@ -1080,7 +1112,7 @@ void xwa_hook_call(int isint) {
     if (fn) { int* params = (int*)(uintptr_t)(f + 40); UNLOCKED(r = fn(params)); }
     else printf("[hooks] no hook for call site 0x%06X\n", ra);
     g_flag_k = fk, g_flag_a = fa, g_flag_b = fb, g_flag_cf = fc;
-    if (isint) MEM32(f + 28) = (uint32_t)r;          /* the trampoline returns it through popad */
+    if (isint) MEM32(f + 28) = (uint32_t)r;         /* the trampoline returns it through popad */
     g_eax = MEM32(f + 28), g_ecx = MEM32(f + 24), g_edx = MEM32(f + 20), g_ebx = MEM32(f + 16);
     g_ebp = MEM32(f + 8), g_esi = MEM32(f + 4), g_edi = MEM32(f + 0);
     uint32_t to = MEM32(f + 36);
@@ -1393,6 +1425,59 @@ static DWORD WINAPI seen_sampler(LPVOID unused) {
     }
 }
 
+/* XWA_PROF=1: where the game thread spends its time, sampled every ~1 ms: the
+ * module its EIP is in, and the lifted function running. Every 20 s. */
+static HANDLE g_prof_thread;
+static DWORD WINAPI prof_sampler(LPVOID unused) {
+    (void)unused;
+    timeBeginPeriod(1);
+    enum { N = 64 };
+    for (;;) {
+        static uintptr_t mods[N]; static uint32_t fns[N]; static int mc[N], fc[N];
+        memset(mc, 0, sizeof mc), memset(fc, 0, sizeof fc), memset(mods, 0, sizeof mods), memset(fns, 0, sizeof fns);
+        int total = 0;
+        for (DWORD t0 = GetTickCount(); GetTickCount() - t0 < 20000; Sleep(1)) {
+            CONTEXT c = { .ContextFlags = CONTEXT_CONTROL };
+            if (SuspendThread(g_prof_thread) == (DWORD)-1) continue;
+            BOOL ok = GetThreadContext(g_prof_thread, &c);
+            uint32_t fn = g_cur_func;
+            ResumeThread(g_prof_thread);
+            if (!ok) continue;
+            HMODULE m = NULL;
+            GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(uintptr_t)c.Eip, &m);
+            int i = 0;
+            while (i < N - 1 && mods[i] && mods[i] != (uintptr_t)m) i++;
+            mods[i] = (uintptr_t)m, mc[i]++;
+            for (i = 0; i < N - 1 && fns[i] && fns[i] != fn; i++);
+            fns[i] = fn, fc[i]++;
+            if (m == GetModuleHandleA("ntdll.dll")) {   /* which ntdll routine: the nearest export below */
+                static uintptr_t eips[N]; static int ec[N];
+                uintptr_t best = 0;
+                uint8_t* b = (uint8_t*)m;
+                IMAGE_EXPORT_DIRECTORY* ed = (IMAGE_EXPORT_DIRECTORY*)(b + ((IMAGE_NT_HEADERS*)(b + ((IMAGE_DOS_HEADER*)b)->e_lfanew))->OptionalHeader.DataDirectory[0].VirtualAddress);
+                const char* bn = "?";
+                DWORD* fn_ = (DWORD*)(b + ed->AddressOfFunctions); DWORD* nm = (DWORD*)(b + ed->AddressOfNames); WORD* ord = (WORD*)(b + ed->AddressOfNameOrdinals);
+                for (DWORD k = 0; k < ed->NumberOfNames; k++) {
+                    uintptr_t a = (uintptr_t)b + fn_[ord[k]];
+                    if (a <= c.Eip && a > best) best = a, bn = (const char*)(b + nm[k]);
+                }
+                for (i = 0; i < N - 1 && eips[i] && eips[i] != best; i++);
+                eips[i] = best;
+                if (++ec[i] == 2000) printf("[prof] ntdll hot: %s\n", bn);
+            }
+            total++;
+        }
+        printf("[prof] %d samples\n", total);
+        for (int i = 0; i < N && mods[i]; i++) {
+            char name[MAX_PATH] = "?";
+            GetModuleFileNameA((HMODULE)mods[i], name, MAX_PATH);
+            if (mc[i] * 100 >= total) printf("[prof]   %3d%% %s\n", mc[i] * 100 / total, strrchr(name, '\\') ? strrchr(name, '\\') + 1 : name);
+        }
+        for (int i = 0; i < N && fns[i]; i++)
+            if (fc[i] * 100 >= total * 2) printf("[prof]   %3d%% sub_%08X\n", fc[i] * 100 / total, fns[i]);
+    }
+}
+
 static DWORD WINAPI watchdog(LPVOID unused) {
     (void)unused;
     Sleep(g_watchdog_s * 1000);
@@ -1492,6 +1577,10 @@ int main(int argc, char** argv) {
     if (g_watchdog_s) CloseHandle(CreateThread(NULL, 0, watchdog, NULL, 0, NULL));
     if (g_sample) CloseHandle(CreateThread(NULL, 0, sampler, NULL, 0, NULL));
     if (getenv("XWA_SEEN")) CloseHandle(CreateThread(NULL, 0, seen_sampler, NULL, 0, NULL));
+    if (getenv("XWA_PROF")) {
+        DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &g_prof_thread, 0, FALSE, DUPLICATE_SAME_ACCESS);
+        CloseHandle(CreateThread(NULL, 0, prof_sampler, NULL, 0, NULL));
+    }
     if (g_shots) CloseHandle(CreateThread(NULL, 0, shot_thread, NULL, 0, NULL));
     InitializeCriticalSection(&g_evq_lock);
     g_file_seen = CreateEventA(NULL, FALSE, FALSE, NULL);

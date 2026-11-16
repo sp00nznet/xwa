@@ -693,6 +693,91 @@ int gpu_texture(const void* key, uint32_t version, const uint8_t* bits, int w, i
     return t->srv ? slot : 0;
 }
 
+/* ---- someone else's renderer (the XWA Upgrade's) ---------------------------------
+ * Its swap chain is not ours, and PrintWindow waits on a game thread that the
+ * flight loop keeps busy. Present is hooked instead: vtable slot 8, which every
+ * swap chain DXGI makes shares, found through a throwaway one of our own. */
+typedef HRESULT (STDMETHODCALLTYPE *present_t)(IDXGISwapChain*, UINT, UINT);
+static present_t g_real_present;
+static char g_xshot_path[MAX_PATH];
+static volatile LONG g_xshot_due;
+
+static void xshot_save(IDXGISwapChain* sc) {
+    ID3D11Device* dev = NULL;
+    ID3D11DeviceContext* ctx = NULL;
+    ID3D11Texture2D *bb = NULL, *st = NULL;
+    if (FAILED(IDXGISwapChain_GetDevice(sc, &IID_ID3D11Device, (void**)&dev))) return;
+    ID3D11Device_GetImmediateContext(dev, &ctx);
+    IDXGISwapChain_GetBuffer(sc, 0, &IID_ID3D11Texture2D, (void**)&bb);
+    D3D11_TEXTURE2D_DESC td;
+    if (bb) {
+        ID3D11Texture2D_GetDesc(bb, &td);
+        int rgba = td.Format == DXGI_FORMAT_R8G8B8A8_UNORM || td.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+        td.Usage = D3D11_USAGE_STAGING, td.BindFlags = 0, td.CPUAccessFlags = D3D11_CPU_ACCESS_READ, td.MiscFlags = 0;
+        td.SampleDesc.Count = 1, td.SampleDesc.Quality = 0;
+        D3D11_MAPPED_SUBRESOURCE m;
+        if (SUCCEEDED(ID3D11Device_CreateTexture2D(dev, &td, NULL, &st))) {
+            ID3D11DeviceContext_CopyResource(ctx, (ID3D11Resource*)st, (ID3D11Resource*)bb);
+            if (SUCCEEDED(ID3D11DeviceContext_Map(ctx, (ID3D11Resource*)st, 0, D3D11_MAP_READ, 0, &m))) {
+                uint32_t* px = (uint32_t*)malloc((size_t)td.Width * td.Height * 4);
+                for (UINT y = 0; y < td.Height; y++) {
+                    const uint32_t* s = (const uint32_t*)((const uint8_t*)m.pData + (size_t)y * m.RowPitch);
+                    for (UINT x = 0; x < td.Width; x++) {
+                        uint32_t v = s[x];
+                        if (rgba) v = (v & 0xFF00FF00u) | (v >> 16 & 0xFF) | (v & 0xFF) << 16;
+                        px[(size_t)y * td.Width + x] = v | 0xFF000000u;
+                    }
+                }
+                ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource*)st, 0);
+                png_save(g_xshot_path, px, td.Width, td.Height);
+                free(px);
+                printf("[shot] %ux%u -> %s\n", td.Width, td.Height, g_xshot_path);
+            }
+            ID3D11Texture2D_Release(st);
+        }
+        ID3D11Texture2D_Release(bb);
+    }
+    ID3D11DeviceContext_Release(ctx);
+    ID3D11Device_Release(dev);
+}
+
+static HRESULT STDMETHODCALLTYPE hooked_present(IDXGISwapChain* sc, UINT interval, UINT flags) {
+    if (g_xshot_due) xshot_save(sc), InterlockedExchange(&g_xshot_due, 0);
+    return g_real_present(sc, interval, flags);
+}
+
+int gpu_present_hook(void) {
+    if (g_real_present) return 1;
+    HWND w = CreateWindowExA(0, "STATIC", "", WS_POPUP, 0, 0, 16, 16, NULL, NULL, NULL, NULL);
+    DXGI_SWAP_CHAIN_DESC d = { { 16, 16, { 0, 1 }, DXGI_FORMAT_B8G8R8A8_UNORM }, { 1, 0 },
+                               DXGI_USAGE_RENDER_TARGET_OUTPUT, 1, w, TRUE, DXGI_SWAP_EFFECT_DISCARD };
+    IDXGISwapChain* sc = NULL;
+    ID3D11Device* dev = NULL;
+    if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION,
+                                                &d, &sc, &dev, NULL, NULL))) {
+        void** vt = *(void***)sc;
+        DWORD old;
+        VirtualProtect(&vt[8], sizeof vt[8], PAGE_READWRITE, &old);
+        g_real_present = (present_t)vt[8];
+        vt[8] = (void*)hooked_present;
+        VirtualProtect(&vt[8], sizeof vt[8], old, &old);
+        IDXGISwapChain_Release(sc);
+        ID3D11Device_Release(dev);
+    }
+    DestroyWindow(w);
+    printf("[gpu] Present hook %s\n", g_real_present ? "on" : "failed");
+    return g_real_present != NULL;
+}
+
+/* A shot of the next frame someone presents; 0 if none comes within 3 s. */
+int gpu_present_shot(const char* path) {
+    if (!g_real_present) return 0;
+    lstrcpynA(g_xshot_path, path, MAX_PATH);
+    InterlockedExchange(&g_xshot_due, 1);
+    for (int i = 0; g_xshot_due && i < 300; i++) Sleep(10);
+    return !InterlockedExchange(&g_xshot_due, 0);
+}
+
 /* ---- present ------------------------------------------------------------------- */
 int gpu_shot_pending(void) { return g_shot_due != 0; }
 

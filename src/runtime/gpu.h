@@ -63,6 +63,8 @@ void gpu_from_game(POINT* p);   /* and back */
 int gpu_shot_pending(void);
 void gpu_shot(const char* path);
 void gpu_window_shot(HWND wnd, const char* path);
+int gpu_present_hook(void);
+int gpu_present_shot(const char* path);
 /* Hor+: how much wider than 4:3 the 3D view is (1.0 = 4:3). */
 float gpu_aspect_gain(void);
 extern int gpu_screen_w, gpu_screen_h;   /* screen-space vertices are in these */

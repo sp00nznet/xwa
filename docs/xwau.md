@@ -14,6 +14,8 @@ The XWAU build is a second exe, `xwaurecomp.exe`, next to the plain
 
 ![Family room](screenshots/xwau-familyroom.png)
 ![Briefing, with XWAU's YT-1300](screenshots/xwau-briefing.png)
+![Flight: the YT-1300 cockpit and XWAU's HUD](screenshots/xwau-flight.png)
+![Flight: XWAU's cargo canisters and station](screenshots/xwau-cargo.png)
 
 ## Status
 
@@ -21,8 +23,8 @@ The XWAU build is a second exe, `xwaurecomp.exe`, next to the plain
 |---|---|
 | Title, HD front end, pilot creation | works |
 | Family room, mission select, briefing (XWAU models) | works |
-| Launching flight from the HD briefing | not yet: the launch button isn't found by the test script |
-| Flight with XWAU models and renderer | not tested yet |
+| Launching flight from the briefing (the button at 554,461) | works |
+| Flight with XWAU models, cockpit, HUD and renderer | works: mission 1 launches and flies |
 | Briefing craft name | sometimes printed one letter per line |
 | Tech room door animation | may play wrong (see "Code the hooks rewrite") |
 
@@ -69,13 +71,14 @@ The same lift as the plain build, plus:
 - The patch sites above become live reads (`MEM32(addr)`), including
   `call`/`jmp` instructions whose target a hook rewrites.
 - Every call to a trampoline becomes `XWA_HOOK_CALL(isint, return address)`.
-- The 142 addresses hooks may send the game to (`tools/hook_jumps.txt`)
+- The 150 addresses hooks may send the game to (`tools/hook_jumps.txt`)
   become block starts, and each hook call is followed by a switch that jumps
-  to whichever one the hook chose. 111 of them are inside the calling
-  function; the other 31 aren't wired yet and print `continues at ...` if a
-  hook ever picks one.
+  to whichever one the hook chose. A target its caller has no label for
+  (the hook's patch cut the branch that led there; `FrontResGetArea`, which
+  every button's hit test uses, is one) is also lifted as a function of its
+  own, and the hook call tail-calls it.
 
-This needs a lifter change, on the pcrecomp branch
+This needs lifter and runtime changes, on the pcrecomp branch
 [`xwau/code-sites`](https://github.com/sp00nznet/pcrecomp/tree/xwau/code-sites).
 
 **3. Run the hooks for real** (`src/runtime/host.c`, built with `XWA_HOOKS=1`).
@@ -86,6 +89,15 @@ calls the hook, and writes back the registers it changed. Because the lifted
 code keeps the CPU flags in variables, the host saves and restores those
 around each hook too. Without that, the game skipped its front-end setup and
 every label said "No text".
+
+**Hooks calling the game.** The hooks call game functions by address, and in
+a recompiled game every such call faults into the lifted code. That cost one
+exception per vertex in flight (about half a frame a second). At startup the
+host rewrites each hook DLL's direct calls into game functions (`call rel32`,
+and `mov reg, imm32` + `call reg`) to go through a small thunk instead
+(`native32_direct_calls`): flight runs about 17 times faster. The hooks are
+also told the game window is in front when a test script drives it, since
+`hook_windowed` drops the mouse otherwise.
 
 DirectDraw comes from the game folder's `ddraw.dll`, which is XWAU's D3D11
 renderer. The hooks talk to it directly. DirectInput and DirectSound come
@@ -150,13 +162,17 @@ a new hook DLL, an XWAU update), redo steps 4 to 6.
 | `XWA_HOOKLOG=1` | prints the first call at each hook site: how far a run gets |
 | `XWA_SEEN=1` | writes `seen.txt`, a sample of the functions that ran |
 | `XWA_WNDLOG=1` | logs the game window and focus changes |
+| `XWA_PROF=1` | every 20 s, where the game thread spends its time (modules, lifted functions) |
+
+Screenshots in the XWAU build (`--keys` `shot=`) come from a hook on the
+renderer's `Present`, so they work in flight and show the whole frame.
 
 ## Files
 
 | File | What |
 |---|---|
 | `tools/hookbake.c`, `tools/hookbake.cmd` | bakes the hook patches into an exe |
-| `tools/hook_jumps.txt` | the 142 addresses hooks send the game to |
+| `tools/hook_jumps.txt` | the 150 addresses hooks send the game to |
 | `tools/hook_codewrites.txt` | the 34 code dwords hooks set at run time |
 | `run_lift.py` (`--exe`) | the hook-aware lift |
 | `src/runtime/host.c` (`XWA_HOOKS`) | loads and calls the hooks |
